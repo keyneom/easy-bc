@@ -44,9 +44,23 @@ pub fn replan_preview_json_wasm(input: &str) -> Result<String, JsValue> {
 }
 
 #[cfg(feature = "ffi")]
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum FfiError {
+    #[error("{msg}")]
+    PlannerError { msg: String },
+}
+
+#[cfg(feature = "ffi")]
 #[uniffi::export]
-pub fn plan_fertility_risk_planner_json(opts_json: String) -> Result<String, String> {
-    plan_from_json(&opts_json)
+pub fn plan_fertility_risk_planner_json(opts_json: String) -> Result<String, FfiError> {
+    plan_from_json(&opts_json).map_err(|msg| FfiError::PlannerError { msg })
+}
+
+#[cfg(feature = "ffi")]
+#[uniffi::export]
+pub fn replan_preview_json(request_json: String) -> Result<String, FfiError> {
+    replan_preview_from_json(&request_json).map_err(|msg| FfiError::PlannerError { msg })
 }
 
 #[cfg(feature = "ffi")]
