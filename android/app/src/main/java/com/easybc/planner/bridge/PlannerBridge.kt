@@ -78,7 +78,7 @@ class MockPlannerBridge : PlannerBridge {
 
             val dayWeights = (1..cycleLen).map { day ->
                 val riskScore = computeMockRisk(day, ovuCenter, sd, ageMul)
-                val action = assignAction(riskScore, opts.targetCumulativeFailure)
+                val action = assignAction(riskScore, opts)
                 DayWeight(
                     day = day,
                     recommendedAction = action,
@@ -165,12 +165,17 @@ class MockPlannerBridge : PlannerBridge {
         return (gauss * 100.0 * ageMul).roundToInt().coerceIn(0, 100)
     }
 
-    private fun assignAction(riskScore: Int, target: Double): RecommendedAction {
+    private fun assignAction(riskScore: Int, opts: UserOptions): RecommendedAction {
+        val target = opts.targetCumulativeFailure
         val strictness = ((1.0 - target * 10.0) * 100).coerceIn(20.0, 90.0)
         return when {
             riskScore >= strictness -> RecommendedAction.A
-            riskScore >= strictness * 0.4 -> RecommendedAction.C
-            riskScore >= strictness * 0.15 -> RecommendedAction.U
+            riskScore >= strictness * 0.4 && opts.protectedDayMethod != ProtectedDayMethod.None -> {
+                RecommendedAction.C
+            }
+            riskScore >= strictness * 0.25 && opts.withdrawalMode != WithdrawalMode.None -> {
+                RecommendedAction.W
+            }
             else -> RecommendedAction.U
         }
     }

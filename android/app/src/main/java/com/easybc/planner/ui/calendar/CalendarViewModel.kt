@@ -122,6 +122,23 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /**
+     * Find the period record that contains [date] and set its endDate to [date].
+     * Called from the day detail sheet when the user taps "Mark period ended on this day".
+     */
+    fun endCurrentPeriod(date: LocalDate) {
+        viewModelScope.launch {
+            val epochDay = date.toEpochDay()
+            val period = periods.value.find { record ->
+                val end = record.endDate ?: (record.startDate + 30) // generous window for open periods
+                epochDay in record.startDate..end
+            }
+            if (period != null) {
+                repo.updatePeriod(period.copy(endDate = epochDay))
+            }
+        }
+    }
+
     fun logDayAction(date: LocalDate, action: RecommendedAction, notes: String? = null) {
         viewModelScope.launch {
             repo.logDay(date, action, notes)

@@ -25,7 +25,7 @@ fn golden_typical_1pct_reference() {
     .unwrap();
     assert!(out.target_met);
     assert!(
-        (out.achieved_cumulative_risk - 0.008925660984283157).abs() < 1e-12,
+        (out.achieved_cumulative_risk - 0.009968536971187048).abs() < 1e-12,
         "risk {}",
         out.achieved_cumulative_risk
     );
@@ -51,7 +51,7 @@ fn golden_example_readme() {
     let out = fertility_risk_planner(opts).unwrap();
     assert!(out.target_met);
     assert!(
-        (out.achieved_cumulative_risk - 0.019925825302057998).abs() < 1e-12,
+        (out.achieved_cumulative_risk - 0.019993563257089564).abs() < 1e-12,
         "risk {}",
         out.achieved_cumulative_risk
     );
@@ -71,7 +71,7 @@ fn golden_hold_lifecycle_constant() {
     assert_eq!(plan_string(&out.years[0]), "UCAAAAAAAAAAAAAAAAAAACUUUUUU");
     assert_eq!(plan_string(&out.years[1]), "UCAAAACAAAAAAAAAAAAAACUUUUUU");
     assert!(
-        (out.achieved_cumulative_risk - 0.005962870545345167).abs() < 1e-12,
+        (out.achieved_cumulative_risk - 0.0059832860540809385).abs() < 1e-12,
         "risk {}",
         out.achieved_cumulative_risk
     );

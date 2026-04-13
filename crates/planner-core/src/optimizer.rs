@@ -1,16 +1,21 @@
 //! Whole-horizon greedy optimizer and output assembly. README ~788–1128.
 #![allow(clippy::too_many_arguments)]
 
-use crate::biology::raw_per_day_cycle_risk_for_age;
+use crate::biology::{ovulation_posterior, raw_per_day_cycle_risk_for_age};
 use crate::condoms::{reference_day_risks, solve_residual_for_annual_target, validate_against_sdm};
+use crate::methods::{
+    combined_protected_withdrawal_residual, effective_withdrawal_mode,
+    persistent_method_residual, protected_day_method_enabled, protected_day_method_residual,
+    withdrawal_mode_enabled, withdrawal_residual,
+};
 use crate::reference_curves::{
     scaled_cycle_length_for_age, scaled_cycle_sd_for_age, scaled_frequency_for_age,
 };
 use crate::types::{
     ActionCounts, CondomMode, CondomResidualsUsed, DayOverride, DayWeight, DerivedUxWeights,
-    GroupedCycleDays, HighVariabilityYear, OverrideCost, PlanDayDiff, PlannerResult,
-    PlannerValidation, PlannerWarning, RecommendedAction, ReplanPreview, SdmValidation,
-    UserOptions, YearOutput,
+    GroupedCycleDays, HighVariabilityYear, MethodLibraryUsed, OverrideCost, PlanDayDiff,
+    PlannerResult, PlannerValidation, PlannerWarning, RecommendedAction, ReplanPreview,
+    SdmValidation, SignalSummary, UserOptions, YearOutput,
 };
 use std::collections::HashSet;
 
@@ -47,8 +52,11 @@ struct YearData {
     age: i32,
     cycle_length_days: i32,
     cycle_sd_days: f64,
+    effective_cycles_per_year: f64,
+    literal_cycle: bool,
     acts_per_week: f64,
     base_risk_by_day: Vec<f64>,
+    signal_summary: Option<SignalSummary>,
 }
 
 struct UxWeights {
@@ -75,11 +83,16 @@ fn derived_ux(s: f64) -> UxWeights {
     }
 }
 
-fn multiplier_for_action(a: Act, condom_residual: f64, withdrawal_r: f64) -> f64 {
+fn multiplier_for_action(
+    a: Act,
+    persistent_residual: f64,
+    protected_residual: f64,
+    withdrawal_r: f64,
+) -> f64 {
     match a {
-        Act::U => 1.0,
-        Act::W => withdrawal_r,
-        Act::C => condom_residual,
+        Act::U => persistent_residual,
+        Act::W => persistent_residual * withdrawal_r,
+        Act::C => persistent_residual * protected_residual,
         Act::A => 0.0,
     }
 }
@@ -91,7 +104,14 @@ fn annual_from_cycle_risk(cycle_risk: f64, cycles_per_year: f64) -> f64 {
 struct Calibrate {
     years: Vec<YearData>,
     condom_residual: f64,
-    withdrawal_relative_risk: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_residual: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
+    best_non_abstinent_residual: f64,
+    withdrawal_mode_used: crate::types::WithdrawalMode,
+    combined_protected_withdrawal_residual: Option<f64>,
     perfect: f64,
     typical: f64,
     ux: UxWeights,
@@ -118,15 +138,55 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
         CondomMode::Typical => typical,
         CondomMode::Custom => opts.custom_condom_residual,
     };
+    let persistent_residual =
+        persistent_method_residual(opts.persistent_method, &ref_day_risks, opts.cycles_per_year);
+    let withdrawal_mode_used = effective_withdrawal_mode(opts);
+    let allow_protected_day_method = protected_day_method_enabled(opts.protected_day_method);
+    let allow_withdrawal = withdrawal_mode_enabled(withdrawal_mode_used);
+    let withdrawal_residual =
+        withdrawal_residual(opts, &ref_day_risks, opts.cycles_per_year);
+    let protected_day_residual = protected_day_method_residual(
+        opts.protected_day_method,
+        condom_residual,
+        &ref_day_risks,
+        opts.cycles_per_year,
+    );
+    let combined_protected_withdrawal_residual =
+        if opts.use_withdrawal_backup_on_protected_days
+            && allow_protected_day_method
+            && allow_withdrawal
+        {
+            Some(combined_protected_withdrawal_residual(
+                protected_day_residual,
+                withdrawal_residual,
+                opts.combined_method_independence,
+            ))
+        } else {
+            None
+        };
+    let effective_protected_day_residual = combined_protected_withdrawal_residual
+        .unwrap_or(protected_day_residual);
+    let best_non_abstinent_residual = if allow_protected_day_method && allow_withdrawal {
+        effective_protected_day_residual.min(withdrawal_residual)
+    } else if allow_protected_day_method {
+        effective_protected_day_residual
+    } else if allow_withdrawal {
+        withdrawal_residual
+    } else {
+        1.0
+    };
     let mut years: Vec<YearData> = Vec::new();
     if let Some(ref cc) = opts.calendar_cycles {
         if !cc.is_empty() {
             for (y, c) in cc.iter().enumerate() {
+                let posterior =
+                    ovulation_posterior(c.cycle_length_days, c.cycle_sd_days, c.body_signals.as_ref(), opts);
                 let raw = raw_per_day_cycle_risk_for_age(
                     c.age_years,
                     c.cycle_length_days,
                     c.acts_per_week,
                     c.cycle_sd_days,
+                    c.body_signals.as_ref(),
                     opts,
                 );
                 years.push(YearData {
@@ -134,8 +194,15 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
                     age: c.age_years,
                     cycle_length_days: c.cycle_length_days,
                     cycle_sd_days: c.cycle_sd_days,
+                    effective_cycles_per_year: 1.0,
+                    literal_cycle: true,
                     acts_per_week: c.acts_per_week,
                     base_risk_by_day: raw,
+                    signal_summary: c.body_signals.clone().map(|signals| SignalSummary {
+                        posterior_ovulation_mean_day: posterior.mean_day,
+                        posterior_ovulation_sd_days: posterior.sd_days,
+                        signals_used: signals,
+                    }),
                 });
             }
         }
@@ -146,14 +213,23 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
             let cycle_len = scaled_cycle_length_for_age(age, opts);
             let cycle_sd = scaled_cycle_sd_for_age(age, opts);
             let freq = scaled_frequency_for_age(age, opts);
-            let raw = raw_per_day_cycle_risk_for_age(age, cycle_len, freq, cycle_sd, opts);
+            let body_signals = if y == 0 { opts.body_signals.as_ref() } else { None };
+            let posterior = ovulation_posterior(cycle_len, cycle_sd, body_signals, opts);
+            let raw = raw_per_day_cycle_risk_for_age(age, cycle_len, freq, cycle_sd, body_signals, opts);
             years.push(YearData {
                 year_index: y,
                 age,
                 cycle_length_days: cycle_len,
                 cycle_sd_days: cycle_sd,
+                effective_cycles_per_year: 365.25 / f64::from(cycle_len),
+                literal_cycle: false,
                 acts_per_week: freq,
                 base_risk_by_day: raw,
+                signal_summary: body_signals.cloned().map(|signals| SignalSummary {
+                    posterior_ovulation_mean_day: posterior.mean_day,
+                    posterior_ovulation_sd_days: posterior.sd_days,
+                    signals_used: signals,
+                }),
             });
         }
     }
@@ -161,7 +237,14 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
     Ok(Calibrate {
         years,
         condom_residual,
-        withdrawal_relative_risk: opts.withdrawal_relative_risk,
+        persistent_residual,
+        protected_day_residual: effective_protected_day_residual,
+        withdrawal_residual,
+        allow_protected_day_method,
+        allow_withdrawal,
+        best_non_abstinent_residual,
+        withdrawal_mode_used,
+        combined_protected_withdrawal_residual,
         perfect,
         typical,
         ux,
@@ -184,8 +267,8 @@ fn risk_still_above_budget(current_risk: f64, budget: f64) -> bool {
 
 fn static_warnings(
     years: &[YearData],
-    opts: &UserOptions,
-    condom_residual: f64,
+    best_non_abstinent_residual: f64,
+    persistent_residual: f64,
     remaining_risk_budget: f64,
 ) -> Vec<PlannerWarning> {
     let mut warnings: Vec<PlannerWarning> = Vec::new();
@@ -193,17 +276,17 @@ fn static_warnings(
     for yr in years {
         let mut cycle_surv = 1.0;
         for r in &yr.base_risk_by_day {
-            cycle_surv *= 1.0 - r * condom_residual;
+            cycle_surv *= 1.0 - r * persistent_residual * best_non_abstinent_residual;
         }
         let cycle_risk = 1.0 - cycle_surv;
-        all_condom_surv *= (1.0 - cycle_risk).powf(opts.cycles_per_year);
+        all_condom_surv *= (1.0 - cycle_risk).powf(yr.effective_cycles_per_year);
     }
     let all_condom_cumulative_risk = 1.0 - all_condom_surv;
     if all_condom_cumulative_risk > remaining_risk_budget {
         warnings.push(PlannerWarning::TargetRequiresAbstinence {
             all_condom_cumulative_risk,
             message:
-                "Target cannot be met with condoms alone; some abstinence days will be required."
+                "Target cannot be met using only the currently enabled non-abstinent methods; some abstinence days will be required."
                     .to_string(),
         });
     }
@@ -242,40 +325,65 @@ fn recalc_burden(plans: &[Vec<Act>]) -> Vec<i32> {
 fn sync_risk_state(
     years: &[YearData],
     plans: &[Vec<Act>],
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
-    cycles_per_year: f64,
 ) -> (Vec<f64>, Vec<f64>) {
     let cycle_risks: Vec<f64> = (0..years.len())
-        .map(|y| cycle_risk_for_year(y, years, plans, condom_residual, withdrawal_r))
+        .map(|y| {
+            cycle_risk_for_year(
+                y,
+                years,
+                plans,
+                persistent_residual,
+                protected_day_residual,
+                withdrawal_r,
+            )
+        })
         .collect();
-    let annual_survival: Vec<f64> = cycle_risks
+    let row_survival: Vec<f64> = cycle_risks
         .iter()
-        .map(|r| (1.0 - r).powf(cycles_per_year))
+        .enumerate()
+        .map(|(idx, r)| (1.0 - r).powf(years[idx].effective_cycles_per_year))
         .collect();
-    (cycle_risks, annual_survival)
+    (cycle_risks, row_survival)
 }
 
-fn action_successors(cur: Act, condom_r: f64, withdrawal_r: f64) -> Vec<Act> {
+fn action_successors(
+    cur: Act,
+    allow_protected_day_method: bool,
+    protected_day_residual: f64,
+    allow_withdrawal: bool,
+    withdrawal_r: f64,
+) -> Vec<Act> {
     match cur {
         Act::U => {
-            let mut v = vec![Act::C];
-            if withdrawal_r + 1e-15 < 1.0 {
+            let mut v = Vec::new();
+            if allow_protected_day_method {
+                v.push(Act::C);
+            }
+            if allow_withdrawal && withdrawal_r + 1e-15 < 1.0 {
                 v.push(Act::W);
             }
             v
         }
         Act::W => {
             let mut v = Vec::new();
-            if condom_r + 1e-15 < withdrawal_r {
+            if allow_protected_day_method && protected_day_residual + 1e-15 < withdrawal_r {
                 v.push(Act::C);
             }
-            if withdrawal_r > 1e-15 {
+            if allow_withdrawal && withdrawal_r > 1e-15 {
                 v.push(Act::A);
             }
             v
         }
-        Act::C => vec![Act::A],
+        Act::C => {
+            if allow_protected_day_method {
+                vec![Act::A]
+            } else {
+                vec![]
+            }
+        }
         Act::A => vec![],
     }
 }
@@ -283,24 +391,30 @@ fn action_successors(cur: Act, condom_r: f64, withdrawal_r: f64) -> Vec<Act> {
 fn greedy_reduce_risk(
     years: &[YearData],
     opts: &UserOptions,
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
     ux: &UxWeights,
     mut plans: Vec<Vec<Act>>,
     mut year_burden_points: Vec<i32>,
     mut cycle_risks: Vec<f64>,
-    mut annual_survival: Vec<f64>,
+    mut row_survival: Vec<f64>,
     risk_budget: f64,
     skip: impl Fn(usize, usize) -> bool,
 ) -> (Vec<Vec<Act>>, Vec<i32>, Vec<f64>, Vec<f64>) {
-    let mut current_risk = total_cumulative_risk(&annual_survival);
+    let mut current_risk = total_cumulative_risk(&row_survival);
     while risk_still_above_budget(current_risk, risk_budget) {
         let Some(c) = best_marginal_upgrade(
             years,
             &plans,
             &year_burden_points,
-            condom_residual,
+            persistent_residual,
+            protected_day_residual,
             withdrawal_r,
+            allow_protected_day_method,
+            allow_withdrawal,
             opts,
             ux,
             &skip,
@@ -315,15 +429,15 @@ fn greedy_reduce_risk(
             &mut plans,
             &mut year_burden_points,
             years,
-            condom_residual,
+            persistent_residual,
+            protected_day_residual,
             withdrawal_r,
             &mut cycle_risks,
-            &mut annual_survival,
-            opts.cycles_per_year,
+            &mut row_survival,
         );
-        current_risk = total_cumulative_risk(&annual_survival);
+        current_risk = total_cumulative_risk(&row_survival);
     }
-    (plans, year_burden_points, cycle_risks, annual_survival)
+    (plans, year_burden_points, cycle_risks, row_survival)
 }
 
 fn append_heavy_abstinence(
@@ -353,7 +467,7 @@ fn build_planner_result(
     cal: &Calibrate,
     plans: &[Vec<Act>],
     cycle_risks: &[f64],
-    annual_survival: &[f64],
+    row_survival: &[f64],
     mut warnings: Vec<PlannerWarning>,
     target_met: bool,
 ) -> PlannerResult {
@@ -372,13 +486,30 @@ fn build_planner_result(
                     day: d as i32 + 1,
                     recommended_action: action.to_recommended(),
                     raw_risk_score: risk_scores[d],
+                    raw_risk_probability: yr.base_risk_by_day[d] * cal.persistent_residual,
+                    protected_risk_probability: yr.base_risk_by_day[d]
+                        * cal.persistent_residual
+                        * cal.protected_day_residual,
+                    withdrawal_risk_probability: yr.base_risk_by_day[d]
+                        * cal.persistent_residual
+                        * cal.withdrawal_residual,
+                    recommended_risk_probability: yr.base_risk_by_day[d]
+                        * multiplier_for_action(
+                            action,
+                            cal.persistent_residual,
+                            cal.protected_day_residual,
+                            cal.withdrawal_residual,
+                        ),
                     override_cost: estimate_override_cost_for_day(
                         y,
                         d,
                         &cal.years,
                         plan,
-                        cal.condom_residual,
-                        cal.withdrawal_relative_risk,
+                        cal.persistent_residual,
+                        cal.protected_day_residual,
+                        cal.withdrawal_residual,
+                        cal.allow_protected_day_method,
+                        cal.allow_withdrawal,
                     ),
                 })
                 .collect();
@@ -394,9 +525,12 @@ fn build_planner_result(
                 age: yr.age,
                 cycle_length_days: yr.cycle_length_days,
                 cycle_sd_days: yr.cycle_sd_days,
+                effective_cycles_per_year: yr.effective_cycles_per_year,
+                literal_cycle: yr.literal_cycle,
                 acts_per_week: yr.acts_per_week,
                 cycle_risk: cycle_risks[y],
-                annual_risk: annual_from_cycle_risk(cycle_risks[y], opts.cycles_per_year),
+                annual_risk: annual_from_cycle_risk(cycle_risks[y], yr.effective_cycles_per_year),
+                signal_summary: yr.signal_summary.clone(),
                 counts,
                 grouped_days: grouped,
                 day_weights,
@@ -420,8 +554,17 @@ fn build_planner_result(
                 custom: opts.custom_condom_residual,
             },
             selected_condom_residual: cal.condom_residual,
+            method_library: MethodLibraryUsed {
+                persistent_method: opts.persistent_method,
+                persistent_method_residual: cal.persistent_residual,
+                protected_day_method: opts.protected_day_method,
+                protected_day_method_residual: cal.protected_day_residual,
+                withdrawal_mode: cal.withdrawal_mode_used,
+                withdrawal_residual: cal.withdrawal_residual,
+                combined_protected_withdrawal_residual: cal.combined_protected_withdrawal_residual,
+            },
         },
-        achieved_cumulative_risk: total_cumulative_risk(annual_survival),
+        achieved_cumulative_risk: total_cumulative_risk(row_survival),
         target_met,
         warnings,
         years: year_outputs,
@@ -443,6 +586,8 @@ fn plans_from_result(result: &PlannerResult) -> Vec<Vec<Act>> {
 
 fn validate_action_locks(
     years: &[YearData],
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
     locks: &[DayOverride],
 ) -> Result<(), crate::PlannerError> {
     for o in locks {
@@ -454,6 +599,15 @@ fn validate_action_locks(
         if o.day < 1 || o.day > cl {
             return Err(crate::PlannerError::InvalidDayOverride);
         }
+        match o.action {
+            RecommendedAction::C if !allow_protected_day_method => {
+                return Err(crate::PlannerError::InvalidDayOverride);
+            }
+            RecommendedAction::W if !allow_withdrawal => {
+                return Err(crate::PlannerError::InvalidDayOverride);
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -461,14 +615,20 @@ fn validate_action_locks(
 fn apply_initial_action_locks(
     years: &[YearData],
     opts: &UserOptions,
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
     plans: &mut [Vec<Act>],
     year_burden_points: &mut [i32],
     cycle_risks: &mut [f64],
-    annual_survival: &mut [f64],
+    row_survival: &mut [f64],
 ) -> Result<HashSet<(usize, usize)>, crate::PlannerError> {
-    validate_action_locks(years, &opts.initial_action_locks)?;
+    validate_action_locks(
+        years,
+        protected_day_method_enabled(opts.protected_day_method),
+        withdrawal_mode_enabled(effective_withdrawal_mode(opts)),
+        &opts.initial_action_locks,
+    )?;
     let mut skip = HashSet::new();
     let mut sorted: Vec<&DayOverride> = opts.initial_action_locks.iter().collect();
     sorted.sort_by_key(|o| (o.year_index, o.day));
@@ -487,11 +647,11 @@ fn apply_initial_action_locks(
                 plans,
                 year_burden_points,
                 years,
-                condom_residual,
+                persistent_residual,
+                protected_day_residual,
                 withdrawal_r,
                 cycle_risks,
-                annual_survival,
-                opts.cycles_per_year,
+                row_survival,
             );
         }
     }
@@ -521,22 +681,37 @@ pub fn replan_preview(
     overrides: &[DayOverride],
 ) -> Result<ReplanPreview, crate::PlannerError> {
     let cal = calibrate(&opts)?;
-    validate_action_locks(&cal.years, &opts.initial_action_locks)?;
-    validate_action_locks(&cal.years, overrides)?;
+    validate_action_locks(
+        &cal.years,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
+        &opts.initial_action_locks,
+    )?;
+    validate_action_locks(
+        &cal.years,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
+        overrides,
+    )?;
     let eff = effective_cumulative_target(&opts);
-    let warnings = static_warnings(&cal.years, &opts, cal.condom_residual, eff);
+    let warnings = static_warnings(
+        &cal.years,
+        cal.best_non_abstinent_residual,
+        cal.persistent_residual,
+        eff,
+    );
     let mut plans0: Vec<Vec<Act>> = cal
         .years
         .iter()
         .map(|y| vec![Act::U; y.cycle_length_days as usize])
         .collect();
     let mut year_burden_points = vec![0_i32; cal.years.len()];
-    let (mut cycle_risks, mut annual_survival) = sync_risk_state(
+    let (mut cycle_risks, mut row_survival) = sync_risk_state(
         &cal.years,
         &plans0,
-        cal.condom_residual,
-        cal.withdrawal_relative_risk,
-        opts.cycles_per_year,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
     );
     let skip_initial = if opts.initial_action_locks.is_empty() {
         HashSet::new()
@@ -544,24 +719,28 @@ pub fn replan_preview(
         apply_initial_action_locks(
             &cal.years,
             &opts,
-            cal.condom_residual,
-            cal.withdrawal_relative_risk,
+            cal.persistent_residual,
+            cal.protected_day_residual,
+            cal.withdrawal_residual,
             &mut plans0,
             &mut year_burden_points,
             &mut cycle_risks,
-            &mut annual_survival,
+            &mut row_survival,
         )?
     };
     let (plans, _, cr, asurv) = greedy_reduce_risk(
         &cal.years,
         &opts,
-        cal.condom_residual,
-        cal.withdrawal_relative_risk,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
         &cal.ux,
         plans0,
         year_burden_points,
         cycle_risks,
-        annual_survival,
+        row_survival,
         eff,
         |y, d| skip_initial.contains(&(y, d)),
     );
@@ -596,15 +775,18 @@ pub fn replan_preview(
     let (cr0, as0) = sync_risk_state(
         &cal.years,
         &plans_p,
-        cal.condom_residual,
-        cal.withdrawal_relative_risk,
-        opts.cycles_per_year,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
     );
     let (plans_pv, _, cr_p, as_p) = greedy_reduce_risk(
         &cal.years,
         &opts,
-        cal.condom_residual,
-        cal.withdrawal_relative_risk,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
         &cal.ux,
         plans_p,
         burden,
@@ -623,7 +805,12 @@ pub fn replan_preview(
     } else {
         None
     };
-    let pw = static_warnings(&cal.years, &opts, cal.condom_residual, eff);
+    let pw = static_warnings(
+        &cal.years,
+        cal.best_non_abstinent_residual,
+        cal.persistent_residual,
+        eff,
+    );
     let preview = build_planner_result(opts, &cal, &plans_pv, &cr_p, &as_p, pw, preview_target_met);
     let diffs = diff_plans(&baseline, &preview);
     Ok(ReplanPreview {
@@ -638,21 +825,31 @@ pub fn replan_preview(
 
 pub fn fertility_risk_planner(opts: UserOptions) -> Result<PlannerResult, crate::PlannerError> {
     let cal = calibrate(&opts)?;
-    validate_action_locks(&cal.years, &opts.initial_action_locks)?;
+    validate_action_locks(
+        &cal.years,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
+        &opts.initial_action_locks,
+    )?;
     let eff = effective_cumulative_target(&opts);
-    let warnings = static_warnings(&cal.years, &opts, cal.condom_residual, eff);
+    let warnings = static_warnings(
+        &cal.years,
+        cal.best_non_abstinent_residual,
+        cal.persistent_residual,
+        eff,
+    );
     let mut plans0: Vec<Vec<Act>> = cal
         .years
         .iter()
         .map(|y| vec![Act::U; y.cycle_length_days as usize])
         .collect();
     let mut year_burden_points = vec![0_i32; cal.years.len()];
-    let (mut cycle_risks, mut annual_survival) = sync_risk_state(
+    let (mut cycle_risks, mut row_survival) = sync_risk_state(
         &cal.years,
         &plans0,
-        cal.condom_residual,
-        cal.withdrawal_relative_risk,
-        opts.cycles_per_year,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
     );
     let skip_initial = if opts.initial_action_locks.is_empty() {
         HashSet::new()
@@ -660,24 +857,28 @@ pub fn fertility_risk_planner(opts: UserOptions) -> Result<PlannerResult, crate:
         apply_initial_action_locks(
             &cal.years,
             &opts,
-            cal.condom_residual,
-            cal.withdrawal_relative_risk,
+            cal.persistent_residual,
+            cal.protected_day_residual,
+            cal.withdrawal_residual,
             &mut plans0,
             &mut year_burden_points,
             &mut cycle_risks,
-            &mut annual_survival,
+            &mut row_survival,
         )?
     };
     let (plans, _, cr, asurv) = greedy_reduce_risk(
         &cal.years,
         &opts,
-        cal.condom_residual,
-        cal.withdrawal_relative_risk,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
         &cal.ux,
         plans0,
         year_burden_points,
         cycle_risks,
-        annual_survival,
+        row_survival,
         eff,
         |y, d| skip_initial.contains(&(y, d)),
     );
@@ -687,9 +888,9 @@ pub fn fertility_risk_planner(opts: UserOptions) -> Result<PlannerResult, crate:
     ))
 }
 
-fn total_cumulative_risk(annual_survival: &[f64]) -> f64 {
+fn total_cumulative_risk(row_survival: &[f64]) -> f64 {
     let mut s = 1.0_f64;
-    for surv in annual_survival {
+    for surv in row_survival {
         s *= *surv;
     }
     1.0 - s
@@ -710,14 +911,22 @@ fn cycle_risk_for_year(
     y: usize,
     years: &[YearData],
     plans: &[Vec<Act>],
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
 ) -> f64 {
     let base = &years[y].base_risk_by_day;
     let plan = &plans[y];
     let mut surv = 1.0;
     for d in 0..base.len() {
-        surv *= 1.0 - base[d] * multiplier_for_action(plan[d], condom_residual, withdrawal_r);
+        surv *= 1.0
+            - base[d]
+                * multiplier_for_action(
+                    plan[d],
+                    persistent_residual,
+                    protected_day_residual,
+                    withdrawal_r,
+                );
     }
     (1.0 - surv).clamp(0.0, 1.0)
 }
@@ -774,8 +983,11 @@ fn best_marginal_upgrade(
     years: &[YearData],
     plans: &[Vec<Act>],
     year_burden_points: &[i32],
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
     opts: &UserOptions,
     ux: &UxWeights,
     skip: impl Fn(usize, usize) -> bool,
@@ -790,16 +1002,24 @@ fn best_marginal_upgrade(
             if years[y].base_risk_by_day[d] <= 0.0 {
                 continue;
             }
-            for &to in action_successors(cur, condom_residual, withdrawal_r).iter() {
+            for &to in action_successors(
+                cur,
+                allow_protected_day_method,
+                protected_day_residual,
+                allow_withdrawal,
+                withdrawal_r,
+            )
+            .iter()
+            {
                 let benefit = current_risk_reduction_if_change(
                     y,
                     d,
                     cur,
                     to,
                     years,
-                    condom_residual,
+                    persistent_residual,
+                    protected_day_residual,
                     withdrawal_r,
-                    opts.cycles_per_year,
                 );
                 if benefit <= 0.0 {
                     continue;
@@ -896,19 +1116,29 @@ fn current_risk_reduction_if_change(
     old_action: Act,
     new_action: Act,
     years: &[YearData],
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
-    cycles_per_year: f64,
 ) -> f64 {
-    let old_mult = multiplier_for_action(old_action, condom_residual, withdrawal_r);
-    let new_mult = multiplier_for_action(new_action, condom_residual, withdrawal_r);
+    let old_mult = multiplier_for_action(
+        old_action,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+    );
+    let new_mult = multiplier_for_action(
+        new_action,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+    );
     let base = years[year_index].base_risk_by_day[day_index];
     let old_day_surv = 1.0 - base * old_mult;
     let new_day_surv = 1.0 - base * new_mult;
     if old_day_surv <= 0.0 || new_day_surv <= 0.0 {
         return 0.0;
     }
-    (new_day_surv.ln() - old_day_surv.ln()) * cycles_per_year
+    (new_day_surv.ln() - old_day_surv.ln()) * years[year_index].effective_cycles_per_year
 }
 
 fn apply_change(
@@ -919,11 +1149,11 @@ fn apply_change(
     plans: &mut [Vec<Act>],
     year_burden_points: &mut [i32],
     years: &[YearData],
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
     cycle_risks: &mut [f64],
-    annual_survival: &mut [f64],
-    cycles_per_year: f64,
+    row_survival: &mut [f64],
 ) {
     plans[y][d] = new_action;
     let burden = |a: Act| -> i32 {
@@ -935,8 +1165,18 @@ fn apply_change(
     };
     year_burden_points[y] += burden(new_action) - burden(old_action);
 
-    let old_mult = multiplier_for_action(old_action, condom_residual, withdrawal_r);
-    let new_mult = multiplier_for_action(new_action, condom_residual, withdrawal_r);
+    let old_mult = multiplier_for_action(
+        old_action,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+    );
+    let new_mult = multiplier_for_action(
+        new_action,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+    );
     let base = years[y].base_risk_by_day[d];
     let old_surv = 1.0 - cycle_risks[y];
     let old_day_surv = 1.0 - base * old_mult;
@@ -948,7 +1188,7 @@ fn apply_change(
     };
     let cr = (1.0 - new_surv).clamp(0.0, 1.0);
     cycle_risks[y] = cr;
-    annual_survival[y] = (1.0 - cr).powf(cycles_per_year);
+    row_survival[y] = (1.0 - cr).powf(years[y].effective_cycles_per_year);
 }
 
 fn estimate_override_cost_for_day(
@@ -956,19 +1196,42 @@ fn estimate_override_cost_for_day(
     day_index: usize,
     years: &[YearData],
     plan: &[Act],
-    condom_residual: f64,
+    persistent_residual: f64,
+    protected_day_residual: f64,
     withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
 ) -> OverrideCost {
     let action = plan[day_index];
     let base = &years[year_index].base_risk_by_day;
 
     let (added_risk, label_opt) = match action {
-        Act::A => (base[day_index] * condom_residual, Some("Condom")),
+        Act::A => {
+            if allow_protected_day_method {
+                (
+                    base[day_index] * persistent_residual * protected_day_residual,
+                    Some("Protected method"),
+                )
+            } else if allow_withdrawal {
+                (
+                    base[day_index] * persistent_residual * withdrawal_r,
+                    Some("Withdrawal"),
+                )
+            } else {
+                (
+                    base[day_index] * persistent_residual,
+                    Some("Unprotected"),
+                )
+            }
+        }
         Act::C => (
-            base[day_index] * (1.0 - condom_residual),
+            base[day_index] * persistent_residual * (1.0 - protected_day_residual),
             Some("Unprotected"),
         ),
-        Act::W => (base[day_index] * (1.0 - withdrawal_r), Some("Unprotected")),
+        Act::W => (
+            base[day_index] * persistent_residual * (1.0 - withdrawal_r),
+            Some("Unprotected"),
+        ),
         Act::U => {
             return OverrideCost {
                 override_action: None,
@@ -989,23 +1252,28 @@ fn estimate_override_cost_for_day(
         }
         match plan[d] {
             Act::U => {
-                let save = base[d] * (1.0 - condom_residual);
-                if save > 0.0 {
-                    future_condom_savings.push(save);
+                if allow_protected_day_method {
+                    let save = base[d] * persistent_residual * (1.0 - protected_day_residual);
+                    if save > 0.0 {
+                        future_condom_savings.push(save);
+                    }
                 }
             }
             Act::W => {
-                let save_c = base[d] * (withdrawal_r - condom_residual);
-                if save_c > 0.0 {
-                    future_condom_savings.push(save_c);
+                if allow_protected_day_method {
+                    let save_c =
+                        base[d] * persistent_residual * (withdrawal_r - protected_day_residual);
+                    if save_c > 0.0 {
+                        future_condom_savings.push(save_c);
+                    }
                 }
-                let save_a = base[d] * withdrawal_r;
+                let save_a = base[d] * persistent_residual * withdrawal_r;
                 if save_a > 0.0 {
                     future_abstain_savings.push(save_a);
                 }
             }
             Act::C => {
-                let save = base[d] * condom_residual;
+                let save = base[d] * persistent_residual * protected_day_residual;
                 if save > 0.0 {
                     future_abstain_savings.push(save);
                 }

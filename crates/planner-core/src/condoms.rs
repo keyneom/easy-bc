@@ -34,11 +34,11 @@ pub fn solve_residual_for_annual_target(
 }
 
 pub fn reference_day_risks(opts: &UserOptions) -> Vec<f64> {
-    raw_per_day_cycle_risk_for_age(28, 28, 2.0, 2.0, opts)
+    raw_per_day_cycle_risk_for_age(28, 28, 2.0, 2.0, None, opts)
 }
 
 pub fn validate_against_sdm(opts: &UserOptions) -> crate::types::SdmValidation {
-    let sdm_ref_risk = raw_per_day_cycle_risk_for_age(28, 28, 1.5, 2.0, opts);
+    let sdm_ref_risk = raw_per_day_cycle_risk_for_age(28, 28, 1.5, 2.0, None, opts);
     let mut cycle_surv = 1.0;
     for (i, r) in sdm_ref_risk.iter().enumerate() {
         let day = i as i32 + 1;

@@ -11,6 +11,41 @@ pub enum CondomMode {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersistentMethod {
+    #[default]
+    None,
+    PillOrRing,
+    Patch,
+    Shot,
+    Implant,
+    HormonalIud,
+    CopperIud,
+    Vasectomy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectedDayMethod {
+    None,
+    #[default]
+    ExternalCondom,
+    InternalCondom,
+    Diaphragm,
+    Spermicide,
+    VaginalPhModulator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WithdrawalMode {
+    #[default]
+    None,
+    Typical,
+    Custom,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum RecommendedAction {
@@ -19,6 +54,15 @@ pub enum RecommendedAction {
     /// Withdrawal (coitus interruptus); modeled as fractional day risk vs unprotected.
     W,
     A,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BodySignalInputs {
+    pub cervical_mucus_peak_day: Option<i32>,
+    pub basal_body_temperature_shift_day: Option<i32>,
+    pub lh_surge_day: Option<i32>,
+    pub wearable_temperature_shift_day: Option<i32>,
 }
 
 /// One menstrual cycle in the planning horizon with explicit demographics (calendar-mode planning).
@@ -31,6 +75,8 @@ pub struct CycleInstance {
     pub cycle_sd_days: f64,
     pub acts_per_week: f64,
     pub age_years: i32,
+    #[serde(default)]
+    pub body_signals: Option<BodySignalInputs>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +92,10 @@ pub struct UserOptions {
     pub cycle_length_days: i32,
     #[serde(default = "default_acts")]
     pub acts_per_week: f64,
+    #[serde(default)]
+    pub persistent_method: PersistentMethod,
+    #[serde(default)]
+    pub protected_day_method: ProtectedDayMethod,
     #[serde(default)]
     pub condom_mode: CondomMode,
     #[serde(default = "default_custom_residual")]
@@ -70,12 +120,24 @@ pub struct UserOptions {
     pub year_crowding_penalty: f64,
     #[serde(default = "default_time_pref")]
     pub time_preference_rate: f64,
-    /// Fraction of unprotected per-day pregnancy risk retained when using withdrawal (e.g. 0.35 ≈ typical-use ballpark).
+    #[serde(default)]
+    pub withdrawal_mode: WithdrawalMode,
+    #[serde(default = "default_withdrawal_typical_annual_failure")]
+    pub withdrawal_typical_annual_failure: f64,
+    /// Fraction of unprotected per-day pregnancy risk retained when using withdrawal when `withdrawal_mode` is `custom`.
     #[serde(default = "default_withdrawal_relative")]
     pub withdrawal_relative_risk: f64,
+    #[serde(default)]
+    pub use_withdrawal_backup_on_protected_days: bool,
+    /// Fraction of the idealized independent-method benefit retained when combining a protected day method with withdrawal.
+    #[serde(default = "default_combined_method_independence")]
+    pub combined_method_independence: f64,
     /// When non-empty, ignore per-year `age_years + index` scaling for cycle shape; use each entry as one cycle.
     #[serde(default)]
     pub calendar_cycles: Option<Vec<CycleInstance>>,
+    /// Optional body-signal observations for the current cycle. In legacy year mode these apply to year 0 only.
+    #[serde(default)]
+    pub body_signals: Option<BodySignalInputs>,
     /// Cumulative pregnancy risk already attributed to logged exposures (reduces remaining budget).
     #[serde(default)]
     pub realized_cumulative_risk: f64,
@@ -130,7 +192,13 @@ fn default_year_crowding() -> f64 {
 fn default_time_pref() -> f64 {
     0.03
 }
+fn default_withdrawal_typical_annual_failure() -> f64 {
+    0.20
+}
 fn default_withdrawal_relative() -> f64 {
+    0.35
+}
+fn default_combined_method_independence() -> f64 {
     0.35
 }
 
@@ -142,6 +210,8 @@ impl Default for UserOptions {
             target_cumulative_failure: default_target(),
             cycle_length_days: default_cycle(),
             acts_per_week: default_acts(),
+            persistent_method: PersistentMethod::None,
+            protected_day_method: ProtectedDayMethod::ExternalCondom,
             condom_mode: CondomMode::Typical,
             custom_condom_residual: default_custom_residual(),
             streak_aversion: default_streak(),
@@ -154,8 +224,13 @@ impl Default for UserOptions {
             ovulation_window_half_width: default_ov_half(),
             year_crowding_penalty: default_year_crowding(),
             time_preference_rate: default_time_pref(),
+            withdrawal_mode: WithdrawalMode::None,
+            withdrawal_typical_annual_failure: default_withdrawal_typical_annual_failure(),
             withdrawal_relative_risk: default_withdrawal_relative(),
+            use_withdrawal_backup_on_protected_days: false,
+            combined_method_independence: default_combined_method_independence(),
             calendar_cycles: None,
+            body_signals: None,
             realized_cumulative_risk: 0.0,
             initial_action_locks: Vec::new(),
         }
@@ -186,6 +261,7 @@ impl UserOptions {
                     if !(0.0..=14.0).contains(&c.acts_per_week) {
                         return Err(crate::PlannerError::CalendarCyclesOutOfRange);
                     }
+                    validate_body_signals(c.cycle_length_days, c.body_signals.as_ref())?;
                 }
             }
         }
@@ -220,8 +296,39 @@ impl UserOptions {
         if !(0.0..=1.0).contains(&self.withdrawal_relative_risk) {
             return Err(crate::PlannerError::WithdrawalRelativeOutOfRange);
         }
+        if self.withdrawal_typical_annual_failure < 0.0
+            || self.withdrawal_typical_annual_failure > 0.5
+        {
+            return Err(crate::PlannerError::WithdrawalAnnualFailureOutOfRange);
+        }
+        if !(0.0..=1.0).contains(&self.combined_method_independence) {
+            return Err(crate::PlannerError::CombinedMethodIndependenceOutOfRange);
+        }
+        validate_body_signals(self.cycle_length_days, self.body_signals.as_ref())?;
         Ok(())
     }
+}
+
+fn validate_body_signals(
+    cycle_length_days: i32,
+    body_signals: Option<&BodySignalInputs>,
+) -> Result<(), crate::PlannerError> {
+    let Some(signals) = body_signals else {
+        return Ok(());
+    };
+    for maybe_day in [
+        signals.cervical_mucus_peak_day,
+        signals.basal_body_temperature_shift_day,
+        signals.lh_surge_day,
+        signals.wearable_temperature_shift_day,
+    ] {
+        if let Some(day) = maybe_day {
+            if day < 1 || day > cycle_length_days {
+                return Err(crate::PlannerError::BodySignalsOutOfRange);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,10 +360,24 @@ pub struct CondomResidualsUsed {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MethodLibraryUsed {
+    pub persistent_method: PersistentMethod,
+    pub persistent_method_residual: f64,
+    pub protected_day_method: ProtectedDayMethod,
+    pub protected_day_method_residual: f64,
+    pub withdrawal_mode: WithdrawalMode,
+    pub withdrawal_residual: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub combined_protected_withdrawal_residual: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlannerValidation {
     pub sdm_reference: SdmValidation,
     pub condom_residuals_used: CondomResidualsUsed,
     pub selected_condom_residual: f64,
+    pub method_library: MethodLibraryUsed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,7 +438,19 @@ pub struct DayWeight {
     pub day: i32,
     pub recommended_action: RecommendedAction,
     pub raw_risk_score: i32,
+    pub raw_risk_probability: f64,
+    pub protected_risk_probability: f64,
+    pub withdrawal_risk_probability: f64,
+    pub recommended_risk_probability: f64,
     pub override_cost: OverrideCost,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalSummary {
+    pub posterior_ovulation_mean_day: f64,
+    pub posterior_ovulation_sd_days: f64,
+    pub signals_used: BodySignalInputs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,9 +460,13 @@ pub struct YearOutput {
     pub age: i32,
     pub cycle_length_days: i32,
     pub cycle_sd_days: f64,
+    pub effective_cycles_per_year: f64,
+    pub literal_cycle: bool,
     pub acts_per_week: f64,
     pub cycle_risk: f64,
     pub annual_risk: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_summary: Option<SignalSummary>,
     pub counts: ActionCounts,
     pub grouped_days: GroupedCycleDays,
     pub day_weights: Vec<DayWeight>,

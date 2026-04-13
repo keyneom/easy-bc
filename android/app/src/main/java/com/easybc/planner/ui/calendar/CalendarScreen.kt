@@ -22,6 +22,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,7 +31,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.easybc.planner.data.ProtectedDayMethod
 import com.easybc.planner.data.RecommendedAction
+import com.easybc.planner.data.WithdrawalMode
 import com.easybc.planner.ui.theme.*
 import java.time.DayOfWeek
 import java.time.format.TextStyle as JavaTextStyle
@@ -175,16 +178,34 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                 )
             }
 
-            // Legend
-            ActionLegend(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            // Derive which action types are active based on the plan result
+            val activeActions = remember(plan) {
+                plan?.years?.flatMap { y -> y.dayWeights.map { it.recommendedAction } }
+                    ?.toSet()
+                    ?: setOf(RecommendedAction.U, RecommendedAction.C, RecommendedAction.A)
+            }
+
+            // Legend — dynamic based on which actions the planner is using
+            ActionLegend(
+                activeActions = activeActions,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+            )
         }
 
         // Day detail bottom sheet
         if (showDetail && selectedDetail != null) {
+            val activeActions = remember(plan) {
+                plan?.years?.flatMap { y -> y.dayWeights.map { it.recommendedAction } }
+                    ?.toSet()
+                    ?: setOf(RecommendedAction.U, RecommendedAction.C, RecommendedAction.A)
+            }
+
             DayDetailSheet(
                 cell = selectedDetail!!,
+                activeActions = activeActions,
                 onDismiss = { vm.dismissDayDetail() },
-                onLogPeriod = { vm.logPeriodStart(selectedDetail!!.date) },
+                onLogPeriodStart = { vm.logPeriodStart(selectedDetail!!.date) },
+                onLogPeriodEnd = { vm.endCurrentPeriod(selectedDetail!!.date) },
                 onLogAction = { action -> vm.logDayAction(selectedDetail!!.date, action) },
             )
         }
@@ -342,14 +363,26 @@ fun DayCell(
 }
 
 @Composable
-fun ActionLegend(modifier: Modifier = Modifier) {
+fun ActionLegend(
+    activeActions: Set<RecommendedAction>,
+    modifier: Modifier = Modifier,
+) {
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceEvenly,
     ) {
-        LegendItem(color = ActionUnprotected, label = "Unprotected")
-        LegendItem(color = ActionCondom, label = "Condom")
-        LegendItem(color = ActionAbstain, label = "Abstain")
+        if (RecommendedAction.U in activeActions) {
+            LegendItem(color = ActionUnprotected, label = "Unprotected")
+        }
+        if (RecommendedAction.W in activeActions) {
+            LegendItem(color = ActionWithdrawal, label = "Withdrawal")
+        }
+        if (RecommendedAction.C in activeActions) {
+            LegendItem(color = ActionCondom, label = "Protected")
+        }
+        if (RecommendedAction.A in activeActions) {
+            LegendItem(color = ActionAbstain, label = "Abstain")
+        }
         LegendItem(color = PeriodColor, label = "Period")
     }
 }

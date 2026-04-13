@@ -4,6 +4,7 @@
 mod biology;
 mod condoms;
 mod error;
+mod methods;
 mod optimizer;
 mod reference_curves;
 pub mod types;
@@ -11,8 +12,9 @@ pub mod types;
 pub use error::PlannerError;
 pub use optimizer::{effective_cumulative_target, fertility_risk_planner, replan_preview};
 pub use types::{
-    CondomMode, CycleInstance, DayOverride, PlanDayDiff, PlannerResult, RecommendedAction,
-    ReplanPreview, ReplanPreviewRequest, UserOptions,
+    BodySignalInputs, CondomMode, CycleInstance, DayOverride, PersistentMethod, PlanDayDiff,
+    PlannerResult, ProtectedDayMethod, RecommendedAction, ReplanPreview,
+    ReplanPreviewRequest, UserOptions, WithdrawalMode,
 };
 
 /// JSON API for FFI/WASM hosts.

@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import init, { planFertilityRiskJson, replanPreviewJson } from "../pkg/planner_core.js";
 import {
   buildCalendarCycles,
+  cycleLengthPosterior,
   currentCycleDayFromLastStart,
   inferCycleLengthsFromStarts,
   sampleStdDev,
   sdWidenFromVariance,
+  type BodySignalInputs,
   type CalendarCycleRow,
 } from "./periodTracker";
 import { migrateLegacyPeriodStartsIfNeeded, idbGet, idbSet, KV_SESSION } from "./idbStore";
@@ -32,10 +34,12 @@ import {
   defaultPersistedSession,
   dayLogKey,
   daysSinceFirstCycleStart,
+  estimateIncidentAdditionalRisk,
+  incidentActionForType,
   initialLocksForPastDays,
-  INCIDENT_REALIZED_DELTA,
   resolveHorizonRowAndDay,
   type DayLock,
+  type IncidentType,
   type PersistedSession,
   type PlannerAction,
 } from "./sessionUtils";
@@ -47,6 +51,10 @@ interface DayWeight {
   day: number;
   recommendedAction: PlannerAction;
   rawRiskScore: number;
+  rawRiskProbability: number;
+  protectedRiskProbability: number;
+  withdrawalRiskProbability: number;
+  recommendedRiskProbability: number;
   overrideCost: {
     condoms: number;
     abstinenceDays: number;
@@ -54,18 +62,60 @@ interface DayWeight {
   };
 }
 
+interface SignalSummary {
+  posteriorOvulationMeanDay: number;
+  posteriorOvulationSdDays: number;
+  signalsUsed: BodySignalInputs;
+}
+
 interface YearOut {
   yearIndex: number;
   age: number;
   cycleLengthDays: number;
   cycleSdDays: number;
+  effectiveCyclesPerYear: number;
+  literalCycle: boolean;
   actsPerWeek: number;
+  cycleRisk: number;
+  annualRisk: number;
+  signalSummary?: SignalSummary | null;
   dayWeights: DayWeight[];
+}
+
+type PersistentMethod =
+  | "none"
+  | "pill_or_ring"
+  | "patch"
+  | "shot"
+  | "implant"
+  | "hormonal_iud"
+  | "copper_iud"
+  | "vasectomy";
+type ProtectedDayMethod =
+  | "none"
+  | "external_condom"
+  | "internal_condom"
+  | "diaphragm"
+  | "spermicide"
+  | "vaginal_ph_modulator";
+type WithdrawalMode = "none" | "typical" | "custom";
+
+interface MethodLibraryUsed {
+  persistentMethod: PersistentMethod;
+  persistentMethodResidual: number;
+  protectedDayMethod: ProtectedDayMethod;
+  protectedDayMethodResidual: number;
+  withdrawalMode: WithdrawalMode;
+  withdrawalResidual: number;
+  combinedProtectedWithdrawalResidual?: number | null;
 }
 
 interface PlannerResult {
   achievedCumulativeRisk: number;
   targetMet: boolean;
+  validation?: {
+    methodLibrary?: MethodLibraryUsed;
+  };
   optionsUsed: Record<string, unknown>;
   years: YearOut[];
 }
@@ -92,12 +142,19 @@ export type WasmOptions = {
   targetCumulativeFailure: number;
   cycleLengthDays: number;
   actsPerWeek: number;
+  persistentMethod: PersistentMethod;
+  protectedDayMethod: ProtectedDayMethod;
   condomMode: "typical" | "perfect" | "custom";
   streakAversion: number;
   holdLifecycleConstant: boolean;
   realizedCumulativeRisk: number;
+  withdrawalMode: WithdrawalMode;
+  withdrawalTypicalAnnualFailure: number;
   withdrawalRelativeRisk: number;
+  useWithdrawalBackupOnProtectedDays: boolean;
+  combinedMethodIndependence: number;
   ovulationSdDays: number;
+  bodySignals?: BodySignalInputs;
   calendarCycles?: CalendarCycleRow[];
   customCondomResidual?: number;
 };
@@ -108,20 +165,77 @@ const defaultOptions = (): WasmOptions => ({
   targetCumulativeFailure: 0.05,
   cycleLengthDays: 28,
   actsPerWeek: 3.5,
+  persistentMethod: "none",
+  protectedDayMethod: "none",
   condomMode: "perfect",
   streakAversion: 0.5,
   holdLifecycleConstant: false,
   realizedCumulativeRisk: 0,
+  withdrawalMode: "none",
+  withdrawalTypicalAnnualFailure: 0.2,
   withdrawalRelativeRisk: 0.35,
+  useWithdrawalBackupOnProtectedDays: false,
+  combinedMethodIndependence: 0.35,
   ovulationSdDays: 3.0,
 });
+
+function compactBodySignals(
+  bodySignals?: BodySignalInputs | null,
+): BodySignalInputs | undefined {
+  if (!bodySignals) return undefined;
+  const out: BodySignalInputs = {};
+  if (bodySignals.cervicalMucusPeakDay != null) {
+    out.cervicalMucusPeakDay = bodySignals.cervicalMucusPeakDay;
+  }
+  if (bodySignals.basalBodyTemperatureShiftDay != null) {
+    out.basalBodyTemperatureShiftDay = bodySignals.basalBodyTemperatureShiftDay;
+  }
+  if (bodySignals.lhSurgeDay != null) {
+    out.lhSurgeDay = bodySignals.lhSurgeDay;
+  }
+  if (bodySignals.wearableTemperatureShiftDay != null) {
+    out.wearableTemperatureShiftDay = bodySignals.wearableTemperatureShiftDay;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function humanizeMethodLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function fallbackMethodLibrary(opts: WasmOptions): MethodLibraryUsed {
+  return {
+    persistentMethod: opts.persistentMethod,
+    persistentMethodResidual: Number.NaN,
+    protectedDayMethod: opts.protectedDayMethod,
+    protectedDayMethodResidual: Number.NaN,
+    withdrawalMode: opts.withdrawalMode,
+    withdrawalResidual: Number.NaN,
+    combinedProtectedWithdrawalResidual: null,
+  };
+}
 
 function optionsForWasm(
   o: WasmOptions,
   initialActionLocks?: DayLock[],
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...o };
-  if (!o.calendarCycles?.length) delete out.calendarCycles;
+  const bodySignals = compactBodySignals(o.bodySignals);
+  if (bodySignals) out.bodySignals = bodySignals;
+  else delete out.bodySignals;
+  if (o.withdrawalMode !== "custom") {
+    out.withdrawalRelativeRisk = 0.35;
+  }
+  if (o.calendarCycles?.length) {
+    out.calendarCycles = o.calendarCycles.map((row, idx) => {
+      const rowSignals = compactBodySignals(row.bodySignals ?? (idx === 0 ? bodySignals : undefined));
+      if (rowSignals) return { ...row, bodySignals: rowSignals };
+      const { bodySignals: _bodySignals, ...rest } = row;
+      return rest;
+    });
+  } else {
+    delete out.calendarCycles;
+  }
   if (initialActionLocks?.length) {
     out.initialActionLocks = initialActionLocks.map((l) => ({
       yearIndex: l.yearIndex,
@@ -135,6 +249,7 @@ function optionsForWasm(
 type AppTab = "tracker" | "planner" | "history";
 
 export default function App() {
+  const resultRef = useRef<HTMLElement | null>(null);
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState(false);
@@ -155,7 +270,8 @@ export default function App() {
   const [locks, setLocks] = useState<DayLock[]>([]);
   const [session, setSession] = useState<PersistedSession>(defaultPersistedSession);
   const [applyPastLocks, setApplyPastLocks] = useState(true);
-  const [incidentChoice, setIncidentChoice] = useState<string>("");
+  const [incidentChoice, setIncidentChoice] = useState<IncidentType | "">("");
+  const [incidentDay, setIncidentDay] = useState(1);
   const [calendarDensity, setCalendarDensity] = useState<CalendarDensity>("comfortable");
 
   const sortedStarts = useMemo(() => periodStartsFromRecords(periodRecords), [periodRecords]);
@@ -219,7 +335,7 @@ export default function App() {
         const daysSince = daysSinceFirstCycleStart(first);
         const pos = resolveHorizonRowAndDay(lengths, daysSince);
         if (pos) {
-          initialLocks = initialLocksForPastDays(lengths, pos, session.dayLogs, "U");
+          initialLocks = initialLocksForPastDays(lengths, pos, session.dayLogs);
         }
       }
       const json = planFertilityRiskJson(
@@ -317,15 +433,35 @@ export default function App() {
     });
   }, []);
 
+  const updateBodySignal = useCallback(
+    (key: keyof BodySignalInputs, value: string) => {
+      setOpts((o) => {
+        const nextSignals = { ...(o.bodySignals ?? {}) };
+        if (value === "") delete nextSignals[key];
+        else nextSignals[key] = Number(value);
+        return {
+          ...o,
+          bodySignals: Object.keys(nextSignals).length > 0 ? nextSignals : undefined,
+        };
+      });
+    },
+    [],
+  );
+
   const applyIncident = useCallback(() => {
-    if (!incidentChoice || !(incidentChoice in INCIDENT_REALIZED_DELTA)) return;
-    const d = INCIDENT_REALIZED_DELTA[incidentChoice];
-    setOpts((o) => ({
-      ...o,
-      realizedCumulativeRisk: Math.min(0.5, o.realizedCumulativeRisk + d),
+    if (!incidentChoice || !plan?.years?.[yearIdx]) return;
+    const action = incidentActionForType(incidentChoice);
+    mergeLock(yearIdx, incidentDay, action);
+    setSession((s) => ({
+      ...s,
+      dayLogs: {
+        ...s.dayLogs,
+        [dayLogKey(yearIdx, incidentDay)]: action,
+      },
     }));
+    setPreview(null);
     setIncidentChoice("");
-  }, [incidentChoice]);
+  }, [incidentChoice, incidentDay, mergeLock, plan, yearIdx]);
 
   const plannerMetaForDate = useCallback(
     (iso: string) => {
@@ -361,6 +497,10 @@ export default function App() {
     () => inferCycleLengthsFromStarts(sortedStarts),
     [sortedStarts],
   );
+  const lengthPosterior = useMemo(
+    () => cycleLengthPosterior(historyLengths, opts.ageYears),
+    [historyLengths, opts.ageYears],
+  );
   const lengthSampleSd = historyLengths.length >= 2 ? sampleStdDev(historyLengths) : null;
   const varianceWidenExtra = sdWidenFromVariance(historyLengths);
   const effectiveRowSd = opts.calendarCycles?.[0]?.cycleSdDays ?? null;
@@ -386,6 +526,14 @@ export default function App() {
   }, []);
 
   const y = plan?.years[yearIdx];
+  useEffect(() => {
+    if (!y) {
+      setIncidentDay(1);
+      return;
+    }
+    setIncidentDay((prev) => Math.max(1, Math.min(prev, y.cycleLengthDays)));
+  }, [y]);
+
   const lastStart = sortedStarts.length > 0 ? sortedStarts[sortedStarts.length - 1] : null;
   const cycleDayToday = lastStart ? currentCycleDayFromLastStart(lastStart) : null;
 
@@ -402,6 +550,17 @@ export default function App() {
     : null;
 
   const creditCount = Object.keys(session.voluntaryAbstinenceDates).length;
+  const incidentDayWeight = y?.dayWeights.find((d) => d.day === incidentDay) ?? null;
+  const incidentAddedRisk =
+    incidentChoice && incidentDayWeight
+      ? estimateIncidentAdditionalRisk(incidentDayWeight, incidentChoice)
+      : 0;
+  const methodLibrary = plan ? (plan.validation?.methodLibrary ?? fallbackMethodLibrary(opts)) : null;
+
+  useEffect(() => {
+    if (!plan || !resultRef.current) return;
+    resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [plan]);
 
   return (
     <>
@@ -657,22 +816,6 @@ export default function App() {
                   </span>
                 </label>
                 <label>
-                  Withdrawal relative risk (0–1)
-                  <input
-                    type="number"
-                    step={0.05}
-                    min={0}
-                    max={1}
-                    value={opts.withdrawalRelativeRisk}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        withdrawalRelativeRisk: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-                <label>
                   Acts per week
                   <input
                     type="number"
@@ -697,21 +840,170 @@ export default function App() {
                   />
                 </label>
                 <label>
-                  Condom mode
+                  Persistent method
                   <select
-                    value={opts.condomMode}
+                    value={opts.persistentMethod}
                     onChange={(e) =>
                       setOpts((o) => ({
                         ...o,
-                        condomMode: e.target.value as WasmOptions["condomMode"],
+                        persistentMethod: e.target.value as PersistentMethod,
                       }))
                     }
                   >
-                    <option value="typical">typical</option>
-                    <option value="perfect">perfect</option>
-                    <option value="custom">custom</option>
+                    <option value="none">none</option>
+                    <option value="pill_or_ring">pill or ring</option>
+                    <option value="patch">patch</option>
+                    <option value="shot">shot</option>
+                    <option value="implant">implant</option>
+                    <option value="hormonal_iud">hormonal IUD</option>
+                    <option value="copper_iud">copper IUD</option>
+                    <option value="vasectomy">vasectomy</option>
                   </select>
                 </label>
+                <label>
+                  Protected-day method
+                  <select
+                    value={opts.protectedDayMethod}
+                    onChange={(e) =>
+                      setOpts((o) => ({
+                        ...o,
+                        protectedDayMethod: e.target.value as ProtectedDayMethod,
+                      }))
+                    }
+                  >
+                    <option value="none">none</option>
+                    <option value="external_condom">external condom</option>
+                    <option value="internal_condom">internal condom</option>
+                    <option value="diaphragm">diaphragm</option>
+                    <option value="spermicide">spermicide</option>
+                    <option value="vaginal_ph_modulator">vaginal pH modulator</option>
+                  </select>
+                </label>
+                {opts.protectedDayMethod === "external_condom" && (
+                  <label>
+                    External condom calibration
+                    <select
+                      value={opts.condomMode}
+                      onChange={(e) =>
+                        setOpts((o) => ({
+                          ...o,
+                          condomMode: e.target.value as WasmOptions["condomMode"],
+                        }))
+                      }
+                    >
+                      <option value="typical">typical</option>
+                      <option value="perfect">perfect</option>
+                      <option value="custom">custom</option>
+                    </select>
+                  </label>
+                )}
+                {opts.protectedDayMethod === "external_condom" &&
+                  opts.condomMode === "custom" && (
+                    <label>
+                      Custom condom residual (0-1)
+                      <input
+                        type="number"
+                        step={0.01}
+                        min={0}
+                        max={1}
+                        value={opts.customCondomResidual ?? ""}
+                        onChange={(e) =>
+                          setOpts((o) => ({
+                            ...o,
+                            customCondomResidual:
+                              e.target.value === "" ? undefined : Number(e.target.value),
+                          }))
+                        }
+                      />
+                    </label>
+                  )}
+                <label>
+                  Withdrawal mode
+                  <select
+                    value={opts.withdrawalMode}
+                    onChange={(e) =>
+                      setOpts((o) => ({
+                        ...o,
+                        withdrawalMode: e.target.value as WithdrawalMode,
+                      }))
+                    }
+                  >
+                    <option value="none">not used</option>
+                    <option value="typical">typical-use calibration</option>
+                    <option value="custom">custom relative risk</option>
+                  </select>
+                </label>
+                {opts.withdrawalMode === "custom" ? (
+                  <label>
+                    Withdrawal relative risk (0-1)
+                    <input
+                      type="number"
+                      step={0.05}
+                      min={0}
+                      max={1}
+                      value={opts.withdrawalRelativeRisk}
+                      onChange={(e) =>
+                        setOpts((o) => ({
+                          ...o,
+                          withdrawalRelativeRisk: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                ) : opts.withdrawalMode === "typical" ? (
+                  <label>
+                    Withdrawal typical annual failure
+                    <input
+                      type="number"
+                      step={0.01}
+                      min={0}
+                      max={0.5}
+                      value={opts.withdrawalTypicalAnnualFailure}
+                      onChange={(e) =>
+                        setOpts((o) => ({
+                          ...o,
+                          withdrawalTypicalAnnualFailure: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                ) : null}
+                {opts.protectedDayMethod !== "none" && opts.withdrawalMode !== "none" && (
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={opts.useWithdrawalBackupOnProtectedDays}
+                      onChange={(e) =>
+                        setOpts((o) => ({
+                          ...o,
+                          useWithdrawalBackupOnProtectedDays: e.target.checked,
+                        }))
+                      }
+                    />{" "}
+                    Layer withdrawal behind the selected protected-day method
+                  </label>
+                )}
+                {opts.protectedDayMethod !== "none" && opts.withdrawalMode !== "none" && (
+                  <label>
+                    Combined-method independence (0-1)
+                    <input
+                      type="number"
+                      step={0.05}
+                      min={0}
+                      max={1}
+                      value={opts.combinedMethodIndependence}
+                      onChange={(e) =>
+                        setOpts((o) => ({
+                          ...o,
+                          combinedMethodIndependence: Number(e.target.value),
+                        }))
+                      }
+                    />
+                    <span className="field-hint">
+                      0 keeps no extra benefit from layering methods; 1 assumes full independence.
+                    </span>
+                  </label>
+                )}
                 <label>
                   <input
                     type="checkbox"
@@ -731,9 +1023,62 @@ export default function App() {
                     checked={applyPastLocks}
                     onChange={(e) => setApplyPastLocks(e.target.checked)}
                   />{" "}
-                  With calendar cycles, lock past days from as-lived logs (default U if missing)
-                  before computing
+                  With calendar cycles, lock past days only from explicit as-lived logs before
+                  computing
                 </label>
+                <div className="card">
+                  <h3>Optional body signals</h3>
+                  <p className="hint compact">
+                    Applied to horizon year 0 in legacy mode, or the first projected cycle in
+                    calendar mode.
+                  </p>
+                  <label>
+                    LH surge day
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={opts.bodySignals?.lhSurgeDay ?? ""}
+                      onChange={(e) => updateBodySignal("lhSurgeDay", e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Cervical mucus peak day
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={opts.bodySignals?.cervicalMucusPeakDay ?? ""}
+                      onChange={(e) =>
+                        updateBodySignal("cervicalMucusPeakDay", e.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    BBT shift day
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={opts.bodySignals?.basalBodyTemperatureShiftDay ?? ""}
+                      onChange={(e) =>
+                        updateBodySignal("basalBodyTemperatureShiftDay", e.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    Wearable temperature shift day
+                    <input
+                      type="number"
+                      min={1}
+                      max={60}
+                      value={opts.bodySignals?.wearableTemperatureShiftDay ?? ""}
+                      onChange={(e) =>
+                        updateBodySignal("wearableTemperatureShiftDay", e.target.value)
+                      }
+                    />
+                  </label>
+                </div>
                 <button type="button" onClick={runPlan}>
                   Compute plan
                 </button>
@@ -771,11 +1116,19 @@ export default function App() {
                   </p>
                 ) : null}
                 <div className="variance-card card">
-                  <h3>Cycle length variance → planner ovulation SD</h3>
+                  <h3>Cycle length posterior → planner uncertainty</h3>
                   <p className="hint compact">
                     From your logged period starts we infer <strong>{historyLengths.length}</strong>{" "}
                     completed cycle length(s). With fewer than two, cycle-to-cycle spread is unknown
                     and we use age-based defaults only.
+                  </p>
+                  <p className="meta">
+                    Posterior mean next-cycle length:{" "}
+                    <strong>{lengthPosterior.mean.toFixed(1)}</strong> day(s). Predictive range:{" "}
+                    <strong>
+                      {lengthPosterior.lower}-{lengthPosterior.upper}
+                    </strong>{" "}
+                    day(s).
                   </p>
                   {historyLengths.length >= 2 ? (
                     <p className="meta">
@@ -797,17 +1150,19 @@ export default function App() {
                   {varianceWidenExtra > 0 && (
                     <p className="hint">
                       Higher length variability widens the <strong>modeled</strong> fertile window in
-                      the optimizer, which usually pushes the plan toward more condom/abstinence days
-                      for the same cumulative target — not a diagnosis.
+                      the optimizer, which usually pushes the plan toward more protected or abstinent
+                      days for the same cumulative target, not a diagnosis.
                     </p>
                   )}
                 </div>
               </section>
 
               <section className="incident-panel">
-                <h2>Log incident (placeholder Δ risk)</h2>
+                <h2>Log incident on a modeled day</h2>
                 <p className="hint">
-                  See <code>docs/incidents.md</code>. Adds to <strong>already-used risk</strong>.
+                  Logs the as-lived action for that day and estimates the extra risk versus the
+                  recommendation on the current row. Use <strong>already-used risk</strong> only for
+                  exposures outside the modeled horizon.
                 </p>
                 <div className="row">
                   <select
@@ -816,16 +1171,34 @@ export default function App() {
                     aria-label="Incident type"
                   >
                     <option value="">Choose incident…</option>
-                    {(Object.keys(INCIDENT_REALIZED_DELTA) as string[]).map((k) => (
-                      <option key={k} value={k}>
-                        {k} (+{(INCIDENT_REALIZED_DELTA[k] * 100).toFixed(2)}%)
-                      </option>
-                    ))}
+                    <option value="unprotected_on_abstinence">unprotected on abstinence</option>
+                    <option value="condom_on_abstinence">
+                      selected protected method on abstinence
+                    </option>
+                    <option value="condom_failure">protected-method failure</option>
+                    <option value="unprotected_instead_of_condom">
+                      unprotected instead of protected
+                    </option>
                   </select>
-                  <button type="button" disabled={!incidentChoice} onClick={applyIncident}>
-                    Apply to realized risk
+                  <input
+                    type="number"
+                    min={1}
+                    max={y?.cycleLengthDays ?? 1}
+                    value={incidentDay}
+                    onChange={(e) => setIncidentDay(Number(e.target.value))}
+                    aria-label="Incident cycle day"
+                  />
+                  <button type="button" disabled={!incidentChoice || !y} onClick={applyIncident}>
+                    Log incident day
                   </button>
                 </div>
+                {incidentChoice && incidentDayWeight && (
+                  <p className="meta">
+                    Estimated extra risk versus the current recommendation for day {incidentDay}:{" "}
+                    <strong>{(incidentAddedRisk * 100).toFixed(3)}%</strong>. Logged action:{" "}
+                    <strong>{incidentActionForType(incidentChoice)}</strong>.
+                  </p>
+                )}
               </section>
 
               <section className="ec-panel">
@@ -852,13 +1225,32 @@ export default function App() {
 
               {plan && (
                 <>
-                  <section>
+                  <section ref={resultRef}>
                     <h2>Result</h2>
                     <p>
                       Achieved cumulative risk:{" "}
                       <strong>{(plan.achievedCumulativeRisk * 100).toFixed(2)}%</strong>
                       {" — "}
                       target met: <strong>{plan.targetMet ? "yes" : "no"}</strong>
+                    </p>
+                    <p className="hint compact">
+                      Planner output appears here after you click <strong>Compute plan</strong>.
+                    </p>
+                    <p className="meta">
+                      Persistent method:{" "}
+                      <strong>
+                        {humanizeMethodLabel(methodLibrary!.persistentMethod)}
+                      </strong>{" "}
+                      ·
+                      protected-day method:{" "}
+                      <strong>
+                        {humanizeMethodLabel(methodLibrary!.protectedDayMethod)}
+                      </strong>{" "}
+                      ·
+                      withdrawal mode:{" "}
+                      <strong>
+                        {humanizeMethodLabel(methodLibrary!.withdrawalMode)}
+                      </strong>
                     </p>
                   </section>
 
@@ -882,7 +1274,19 @@ export default function App() {
                     {y && (
                       <p className="meta">
                         Age {y.age} · {y.cycleLengthDays} days · SD {y.cycleSdDays.toFixed(2)} ·{" "}
-                        {y.actsPerWeek.toFixed(2)} acts/wk
+                        {y.actsPerWeek.toFixed(2)} acts/wk · cycle risk{" "}
+                        {(y.cycleRisk * 100).toFixed(2)}% · annualized risk{" "}
+                        {(y.annualRisk * 100).toFixed(2)}% ·{" "}
+                        {y.literalCycle
+                          ? "literal projected cycle"
+                          : `${y.effectiveCyclesPerYear.toFixed(2)} cycles/year`}
+                      </p>
+                    )}
+                    {y?.signalSummary && (
+                      <p className="meta">
+                        Signal-adjusted ovulation posterior: mean day{" "}
+                        <strong>{y.signalSummary.posteriorOvulationMeanDay.toFixed(1)}</strong>,
+                        SD <strong>{y.signalSummary.posteriorOvulationSdDays.toFixed(2)}</strong>.
                       </p>
                     )}
                     {locks.length > 0 && (

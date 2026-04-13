@@ -4,6 +4,22 @@
 
 export type PlannerAction = "U" | "C" | "A" | "W";
 export type DayLock = { yearIndex: number; day: number; action: PlannerAction };
+export type IncidentType =
+  | "unprotected_on_abstinence"
+  | "condom_on_abstinence"
+  | "condom_failure"
+  | "unprotected_instead_of_condom";
+export type RescueMethod =
+  | "none"
+  | "levonorgestrel_ec"
+  | "ulipristal_ec"
+  | "copper_iud_ec";
+export type PlannerDayRiskLike = {
+  recommendedAction: PlannerAction;
+  rawRiskProbability: number;
+  protectedRiskProbability: number;
+  recommendedRiskProbability: number;
+};
 
 export type PersistedSession = {
   locks: DayLock[];
@@ -55,7 +71,7 @@ export function initialLocksForPastDays(
   cycleLengths: number[],
   pos: { row: number; dayInCycle: number },
   dayLogs: Record<string, PlannerAction>,
-  defaultAsLived: PlannerAction = "U",
+  defaultAsLived?: PlannerAction | null,
 ): DayLock[] {
   const out: DayLock[] = [];
   for (let row = 0; row < cycleLengths.length; row++) {
@@ -64,6 +80,7 @@ export function initialLocksForPastDays(
     for (let day = 1; day <= endDay; day++) {
       const k = dayLogKey(row, day);
       const action = dayLogs[k] ?? defaultAsLived;
+      if (!action) continue;
       out.push({ yearIndex: row, day, action });
     }
   }
@@ -78,10 +95,25 @@ export function daysSinceFirstCycleStart(firstPeriodStartIso: string, today = ne
   return Math.floor((t.getTime() - start.getTime()) / 86_400_000);
 }
 
-/** v1 placeholder increments per docs/incidents.md (non-clinical). */
-export const INCIDENT_REALIZED_DELTA: Record<string, number> = {
-  unprotected_on_abstinence: 0.005,
-  condom_on_abstinence: 0.0005,
-  condom_failure: 0.008,
-  unprotected_instead_of_condom: 0.006,
-};
+export function incidentActionForType(type: IncidentType): PlannerAction {
+  switch (type) {
+    case "condom_on_abstinence":
+      return "C";
+    case "condom_failure":
+    case "unprotected_instead_of_condom":
+    case "unprotected_on_abstinence":
+      return "U";
+  }
+}
+
+export function estimateIncidentAdditionalRisk(
+  dayWeight: PlannerDayRiskLike | null | undefined,
+  type: IncidentType,
+): number {
+  if (!dayWeight) return 0;
+  const actualRisk =
+    type === "condom_on_abstinence"
+      ? dayWeight.protectedRiskProbability
+      : dayWeight.rawRiskProbability;
+  return Math.max(0, actualRisk - dayWeight.recommendedRiskProbability);
+}

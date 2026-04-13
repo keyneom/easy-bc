@@ -23,8 +23,11 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun DayDetailSheet(
     cell: DayCellData,
+    /** Which action types the planner is actually using (drives which log buttons appear). */
+    activeActions: Set<RecommendedAction>,
     onDismiss: () -> Unit,
-    onLogPeriod: () -> Unit,
+    onLogPeriodStart: () -> Unit,
+    onLogPeriodEnd: () -> Unit,
     onLogAction: (RecommendedAction) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -164,7 +167,7 @@ fun DayDetailSheet(
                                             color = ActionCondom,
                                             fontWeight = FontWeight.Bold,
                                         )
-                                        Text("condom days", style = MaterialTheme.typography.labelSmall)
+                                        Text("protected days", style = MaterialTheme.typography.labelSmall)
                                     }
                                 }
                                 if (cell.overrideCost.abstinenceDays > 0) {
@@ -191,25 +194,55 @@ fun DayDetailSheet(
                 text = "Log what happened",
                 style = MaterialTheme.typography.titleSmall,
             )
+
+            // Build the list of action buttons dynamically based on active methods.
+            // U and A are always available; W and C depend on the user's method config.
+            val logActions = buildList {
+                add(RecommendedAction.U)
+                if (RecommendedAction.W in activeActions) add(RecommendedAction.W)
+                if (RecommendedAction.C in activeActions) add(RecommendedAction.C)
+                add(RecommendedAction.A)
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                ActionLogButton(RecommendedAction.U, cell.dayLog?.actualAction == "U", Modifier.weight(1f)) {
-                    onLogAction(RecommendedAction.U)
-                }
-                ActionLogButton(RecommendedAction.C, cell.dayLog?.actualAction == "C", Modifier.weight(1f)) {
-                    onLogAction(RecommendedAction.C)
-                }
-                ActionLogButton(RecommendedAction.A, cell.dayLog?.actualAction == "A", Modifier.weight(1f)) {
-                    onLogAction(RecommendedAction.A)
+                logActions.forEach { action ->
+                    ActionLogButton(
+                        action = action,
+                        isActive = cell.dayLog?.actualAction == action.shortLabel,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        onLogAction(action)
+                    }
                 }
             }
 
-            // Period logging
-            if (!cell.isPeriod) {
+            HorizontalDivider()
+
+            // ── Period logging ──
+            Text(
+                text = "Period tracking",
+                style = MaterialTheme.typography.titleSmall,
+            )
+
+            if (cell.isPeriod) {
+                // This day is already inside a period — offer to mark it as the end date
+                FilledTonalButton(
+                    onClick = onLogPeriodEnd,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = PeriodColor.copy(alpha = 0.15f),
+                    ),
+                ) {
+                    Icon(Icons.Default.WaterDrop, null, Modifier.size(18.dp), tint = PeriodColor)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Mark period ended on this day")
+                }
+            } else {
                 OutlinedButton(
-                    onClick = onLogPeriod,
+                    onClick = onLogPeriodStart,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.Default.WaterDrop, null, Modifier.size(18.dp), tint = PeriodColor)

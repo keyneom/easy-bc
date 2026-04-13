@@ -18,6 +18,12 @@ pub enum PlannerError {
     StreakAversionOutOfRange,
     #[error("withdrawal_relative_risk must be between 0 and 1")]
     WithdrawalRelativeOutOfRange,
+    #[error("withdrawal_typical_annual_failure must be >= 0 and <= 0.5")]
+    WithdrawalAnnualFailureOutOfRange,
+    #[error("combined_method_independence must be between 0 and 1")]
+    CombinedMethodIndependenceOutOfRange,
+    #[error("body signal day must fall within the cycle length")]
+    BodySignalsOutOfRange,
     #[error("day override: invalid year_index or day for horizon")]
     InvalidDayOverride,
     #[error("calendar_cycles invalid or horizon length out of range")]

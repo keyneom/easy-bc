@@ -41,6 +41,21 @@ class PlannerRepository(
         } catch (_: Exception) {
             CondomMode.Typical
         }
+        val persistentMethod = try {
+            PersistentMethod.entries.first { it.name.equals(settings.persistentMethod, ignoreCase = true) }
+        } catch (_: Exception) {
+            PersistentMethod.None
+        }
+        val protectedDayMethod = try {
+            ProtectedDayMethod.entries.first { it.name.equals(settings.protectedDayMethod, ignoreCase = true) }
+        } catch (_: Exception) {
+            ProtectedDayMethod.ExternalCondom
+        }
+        val withdrawalMode = try {
+            WithdrawalMode.entries.first { it.name.equals(settings.withdrawalMode, ignoreCase = true) }
+        } catch (_: Exception) {
+            WithdrawalMode.None
+        }
 
         val observedCycles = cycleCalc.deriveCycles(periods)
         val calendarCycles = if (observedCycles.size >= 2) {
@@ -58,11 +73,17 @@ class PlannerRepository(
             targetCumulativeFailure = settings.targetCumulativeFailure,
             cycleLengthDays = settings.cycleLengthDays,
             actsPerWeek = settings.actsPerWeek,
+            persistentMethod = persistentMethod,
+            protectedDayMethod = protectedDayMethod,
             condomMode = condomMode,
             customCondomResidual = settings.customCondomResidual,
             streakAversion = settings.streakAversion,
             holdLifecycleConstant = settings.holdLifecycleConstant,
+            withdrawalMode = withdrawalMode,
+            withdrawalTypicalAnnualFailure = settings.withdrawalTypicalAnnualFailure,
             withdrawalRelativeRisk = settings.withdrawalRelativeRisk,
+            useWithdrawalBackupOnProtectedDays = settings.useWithdrawalBackupOnProtectedDays,
+            combinedMethodIndependence = settings.combinedMethodIndependence,
             ovulationSdDays = settings.ovulationSdDays,
             calendarCycles = calendarCycles?.takeIf { it.isNotEmpty() },
             realizedCumulativeRisk = realizedRisk.coerceAtMost(settings.targetCumulativeFailure),

@@ -15,8 +15,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.easybc.planner.data.PersistentMethod
+import com.easybc.planner.data.ProtectedDayMethod
+import com.easybc.planner.data.WithdrawalMode
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
     val draft by vm.draft.collectAsState()
@@ -90,21 +93,136 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                 vm.updateDraft { d -> d.copy(actsPerWeek = v) }
             }
 
-            // Condom mode
-            Text("Condom mode", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("perfect", "typical", "custom").forEach { mode ->
+            // ── Method Library ──
+            SectionHeader("Contraceptive Methods")
+
+            // Persistent method
+            Text("Persistent / background method", style = MaterialTheme.typography.labelLarge)
+            Text(
+                "An always-on method that reduces baseline risk for all days.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            val currentPersistent = try {
+                PersistentMethod.entries.first { it.name.equals(draft.persistentMethod, ignoreCase = true) }
+            } catch (_: Exception) { PersistentMethod.None }
+
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PersistentMethod.entries.forEach { method ->
                     FilterChip(
-                        selected = draft.condomMode == mode,
-                        onClick = { vm.updateDraft { d -> d.copy(condomMode = mode) } },
-                        label = { Text(mode.replaceFirstChar { c -> c.uppercase() }) },
+                        selected = currentPersistent == method,
+                        onClick = {
+                            vm.updateDraft { d -> d.copy(persistentMethod = method.name.lowercase()) }
+                        },
+                        label = { Text(method.label, style = MaterialTheme.typography.labelSmall) },
                     )
                 }
             }
 
-            if (draft.condomMode == "custom") {
-                DoubleField("Custom condom residual", draft.customCondomResidual, 0.0..1.0) { v ->
-                    vm.updateDraft { d -> d.copy(customCondomResidual = v) }
+            Spacer(Modifier.height(8.dp))
+
+            // Protected day method
+            Text("Protected-day method", style = MaterialTheme.typography.labelLarge)
+            Text(
+                "Barrier method used on days marked 'C' (protected). Controls what 'condom' means in the plan.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            val currentProtected = try {
+                ProtectedDayMethod.entries.first { it.name.equals(draft.protectedDayMethod, ignoreCase = true) }
+            } catch (_: Exception) { ProtectedDayMethod.ExternalCondom }
+
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ProtectedDayMethod.entries.forEach { method ->
+                    FilterChip(
+                        selected = currentProtected == method,
+                        onClick = {
+                            vm.updateDraft { d -> d.copy(protectedDayMethod = method.name.lowercase()) }
+                        },
+                        label = { Text(method.label, style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+            }
+
+            // Condom calibration (only if protected day method is external condom)
+            if (currentProtected == ProtectedDayMethod.ExternalCondom) {
+                Spacer(Modifier.height(4.dp))
+                Text("Condom use quality", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("perfect", "typical", "custom").forEach { mode ->
+                        FilterChip(
+                            selected = draft.condomMode == mode,
+                            onClick = { vm.updateDraft { d -> d.copy(condomMode = mode) } },
+                            label = { Text(mode.replaceFirstChar { c -> c.uppercase() }) },
+                        )
+                    }
+                }
+
+                if (draft.condomMode == "custom") {
+                    DoubleField("Custom condom residual", draft.customCondomResidual, 0.0..1.0) { v ->
+                        vm.updateDraft { d -> d.copy(customCondomResidual = v) }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // Withdrawal
+            Text("Withdrawal", style = MaterialTheme.typography.labelLarge)
+            Text(
+                "If enabled, the planner can recommend withdrawal (W) on moderate-risk days.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(4.dp))
+            val currentWithdrawal = try {
+                WithdrawalMode.entries.first { it.name.equals(draft.withdrawalMode, ignoreCase = true) }
+            } catch (_: Exception) { WithdrawalMode.None }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                WithdrawalMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = currentWithdrawal == mode,
+                        onClick = {
+                            vm.updateDraft { d -> d.copy(withdrawalMode = mode.name.lowercase()) }
+                        },
+                        label = { Text(mode.label) },
+                    )
+                }
+            }
+
+            if (currentWithdrawal == WithdrawalMode.Custom) {
+                DoubleField("Withdrawal relative risk", draft.withdrawalRelativeRisk, 0.0..1.0) { v ->
+                    vm.updateDraft { d -> d.copy(withdrawalRelativeRisk = v) }
+                }
+            }
+
+            // Combined method layering
+            if (currentProtected != ProtectedDayMethod.None && currentWithdrawal != WithdrawalMode.None) {
+                Spacer(Modifier.height(4.dp))
+                SwitchRow(
+                    label = "Layer withdrawal on protected days",
+                    checked = draft.useWithdrawalBackupOnProtectedDays,
+                    onCheckedChange = { checked ->
+                        vm.updateDraft { d -> d.copy(useWithdrawalBackupOnProtectedDays = checked) }
+                    },
+                )
+                if (draft.useWithdrawalBackupOnProtectedDays) {
+                    SliderField(
+                        label = "Combined method independence",
+                        value = draft.combinedMethodIndependence,
+                        range = 0f..1f,
+                        format = { v ->
+                            when {
+                                v < 0.2 -> "%.0f%% — Conservative".format(v * 100)
+                                v > 0.7 -> "%.0f%% — Assumes high independence".format(v * 100)
+                                else -> "%.0f%%".format(v * 100)
+                            }
+                        },
+                        onValueChange = { v -> vm.updateDraft { d -> d.copy(combinedMethodIndependence = v.toDouble()) } },
+                    )
                 }
             }
 
@@ -132,21 +250,11 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                 vm.updateDraft { d -> d.copy(ovulationSdDays = v) }
             }
 
-            DoubleField("Withdrawal relative risk", draft.withdrawalRelativeRisk, 0.0..1.0) { v ->
-                vm.updateDraft { d -> d.copy(withdrawalRelativeRisk = v) }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text("Hold lifecycle constant", style = MaterialTheme.typography.bodyMedium)
-                Switch(
-                    checked = draft.holdLifecycleConstant,
-                    onCheckedChange = { checked -> vm.updateDraft { d -> d.copy(holdLifecycleConstant = checked) } },
-                )
-            }
+            SwitchRow(
+                label = "Hold lifecycle constant",
+                checked = draft.holdLifecycleConstant,
+                onCheckedChange = { checked -> vm.updateDraft { d -> d.copy(holdLifecycleConstant = checked) } },
+            )
 
             Spacer(Modifier.height(8.dp))
 
@@ -186,6 +294,22 @@ private fun SectionHeader(title: String) {
         color = MaterialTheme.colorScheme.primary,
     )
     HorizontalDivider()
+}
+
+@Composable
+private fun SwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
 }
 
 @Composable

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   blendedCycleLength,
   buildCalendarCycles,
+  cycleLengthPosterior,
   predictCycleLengthsV15,
   sampleStdDev,
   sdWidenFromVariance,
@@ -9,6 +10,7 @@ import {
 } from "./periodTracker";
 import {
   daysSinceFirstCycleStart,
+  estimateIncidentAdditionalRisk,
   initialLocksForPastDays,
   resolveHorizonRowAndDay,
 } from "./sessionUtils";
@@ -45,6 +47,15 @@ describe("periodTracker v1.5", () => {
     const lens = predictCycleLengthsV15(2, [28, 29], 34);
     expect(lens).toEqual([expect.any(Number), expect.any(Number)]);
   });
+
+  it("cycleLengthPosterior shrinks toward observed history", () => {
+    const prior = cycleLengthPosterior([], 34);
+    const posterior = cycleLengthPosterior([26, 27, 27, 28], 34);
+    expect(prior.observedCount).toBe(0);
+    expect(posterior.observedCount).toBe(4);
+    expect(posterior.predictiveSd).toBeLessThan(prior.predictiveSd);
+    expect(posterior.mean).toBeLessThan(prior.mean);
+  });
 });
 
 describe("sessionUtils horizon grid", () => {
@@ -64,8 +75,33 @@ describe("sessionUtils horizon grid", () => {
     ]);
   });
 
+  it("initialLocksForPastDays does not assume unprotected when logs are missing", () => {
+    const locks = initialLocksForPastDays(
+      [3, 3],
+      { row: 1, dayInCycle: 2 },
+      { "0:2": "C", "1:1": "W" },
+    );
+    expect(locks).toEqual([
+      { yearIndex: 0, day: 2, action: "C" },
+      { yearIndex: 1, day: 1, action: "W" },
+    ]);
+  });
+
   it("daysSinceFirstCycleStart is whole days from anchor", () => {
     const d = daysSinceFirstCycleStart("2026-04-01", new Date("2026-04-05T12:00:00"));
     expect(d).toBe(4);
+  });
+
+  it("estimateIncidentAdditionalRisk uses modeled day probabilities", () => {
+    const extra = estimateIncidentAdditionalRisk(
+      {
+        recommendedAction: "C",
+        rawRiskProbability: 0.02,
+        protectedRiskProbability: 0.004,
+        recommendedRiskProbability: 0.004,
+      },
+      "unprotected_instead_of_condom",
+    );
+    expect(extra).toBeCloseTo(0.016, 10);
   });
 });

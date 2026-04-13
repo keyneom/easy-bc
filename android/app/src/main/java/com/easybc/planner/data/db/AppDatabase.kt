@@ -33,12 +33,21 @@ data class UserSettingsEntity(
     val targetCumulativeFailure: Double = 0.05,
     val cycleLengthDays: Int = 28,
     val actsPerWeek: Double = 3.0,
+    /** Stored as lowercase string: "none", "pill_or_ring", "patch", etc. */
+    val persistentMethod: String = "none",
+    /** Stored as lowercase string: "none", "external_condom", "internal_condom", etc. */
+    val protectedDayMethod: String = "external_condom",
     /** Stored as lowercase string: "perfect", "typical", "custom". */
     val condomMode: String = "typical",
     val customCondomResidual: Double = 0.08,
     val streakAversion: Double = 0.5,
     val holdLifecycleConstant: Boolean = false,
+    /** Stored as lowercase string: "none", "typical", "custom". */
+    val withdrawalMode: String = "none",
+    val withdrawalTypicalAnnualFailure: Double = 0.20,
     val withdrawalRelativeRisk: Double = 0.35,
+    val useWithdrawalBackupOnProtectedDays: Boolean = false,
+    val combinedMethodIndependence: Double = 0.35,
     val ovulationSdDays: Double = 3.0,
     val onboardingComplete: Boolean = false,
 )
@@ -103,7 +112,7 @@ interface UserSettingsDao {
 
 @Database(
     entities = [PeriodRecord::class, DayLog::class, UserSettingsEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -121,7 +130,8 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "easybc.db",
-                ).build().also { INSTANCE = it }
+                ).fallbackToDestructiveMigration()
+                    .build().also { INSTANCE = it }
             }
     }
 }

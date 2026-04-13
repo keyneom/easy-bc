@@ -35,7 +35,7 @@ fn scenario_34yo_5pct_over_20y_35_acts_perfect() {
         out.achieved_cumulative_risk
     );
     assert!(
-        (out.achieved_cumulative_risk - 0.047536).abs() < 1e-5,
+        (out.achieved_cumulative_risk - 0.047103486227473734).abs() < 1e-12,
         "golden cumulative risk (if this drifts, re-run narrative_json + compare-narrative.mjs)"
     );
 

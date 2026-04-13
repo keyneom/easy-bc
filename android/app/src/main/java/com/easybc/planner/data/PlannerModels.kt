@@ -26,6 +26,69 @@ enum class CondomMode {
 }
 
 @Serializable
+enum class PersistentMethod {
+    @SerialName("none") None,
+    @SerialName("pill_or_ring") PillOrRing,
+    @SerialName("patch") Patch,
+    @SerialName("shot") Shot,
+    @SerialName("implant") Implant,
+    @SerialName("hormonal_iud") HormonalIud,
+    @SerialName("copper_iud") CopperIud,
+    @SerialName("vasectomy") Vasectomy;
+
+    val label: String get() = when (this) {
+        None -> "None"
+        PillOrRing -> "Pill / Ring"
+        Patch -> "Patch"
+        Shot -> "Shot"
+        Implant -> "Implant"
+        HormonalIud -> "Hormonal IUD"
+        CopperIud -> "Copper IUD"
+        Vasectomy -> "Vasectomy"
+    }
+}
+
+@Serializable
+enum class ProtectedDayMethod {
+    @SerialName("none") None,
+    @SerialName("external_condom") ExternalCondom,
+    @SerialName("internal_condom") InternalCondom,
+    @SerialName("diaphragm") Diaphragm,
+    @SerialName("spermicide") Spermicide,
+    @SerialName("vaginal_ph_modulator") VaginalPhModulator;
+
+    val label: String get() = when (this) {
+        None -> "None (NFP only)"
+        ExternalCondom -> "External condom"
+        InternalCondom -> "Internal condom"
+        Diaphragm -> "Diaphragm"
+        Spermicide -> "Spermicide"
+        VaginalPhModulator -> "Vaginal pH modulator"
+    }
+}
+
+@Serializable
+enum class WithdrawalMode {
+    @SerialName("none") None,
+    @SerialName("typical") Typical,
+    @SerialName("custom") Custom;
+
+    val label: String get() = when (this) {
+        None -> "None"
+        Typical -> "Typical use"
+        Custom -> "Custom"
+    }
+}
+
+@Serializable
+data class BodySignalInputs(
+    val cervicalMucusPeakDay: Int? = null,
+    val basalBodyTemperatureShiftDay: Int? = null,
+    val lhSurgeDay: Int? = null,
+    val wearableTemperatureShiftDay: Int? = null,
+)
+
+@Serializable
 enum class RecommendedAction {
     @SerialName("U") U,
     @SerialName("W") W,
@@ -35,7 +98,7 @@ enum class RecommendedAction {
     val label: String get() = when (this) {
         U -> "Unprotected"
         W -> "Withdrawal"
-        C -> "Condom"
+        C -> "Protected"
         A -> "Abstain"
     }
 
@@ -48,6 +111,7 @@ data class CycleInstance(
     val cycleSdDays: Double,
     val actsPerWeek: Double,
     val ageYears: Int,
+    val bodySignals: BodySignalInputs? = null,
 )
 
 @Serializable
@@ -64,6 +128,8 @@ data class UserOptions(
     val targetCumulativeFailure: Double = 0.05,
     val cycleLengthDays: Int = 28,
     val actsPerWeek: Double = 3.0,
+    val persistentMethod: PersistentMethod = PersistentMethod.None,
+    val protectedDayMethod: ProtectedDayMethod = ProtectedDayMethod.ExternalCondom,
     val condomMode: CondomMode = CondomMode.Typical,
     val customCondomResidual: Double = 0.08,
     val streakAversion: Double = 0.5,
@@ -76,8 +142,13 @@ data class UserOptions(
     val ovulationWindowHalfWidth: Int = 7,
     val yearCrowdingPenalty: Double = 0.8,
     val timePreferenceRate: Double = 0.03,
+    val withdrawalMode: WithdrawalMode = WithdrawalMode.None,
+    val withdrawalTypicalAnnualFailure: Double = 0.20,
     val withdrawalRelativeRisk: Double = 0.35,
+    val useWithdrawalBackupOnProtectedDays: Boolean = false,
+    val combinedMethodIndependence: Double = 0.35,
     val calendarCycles: List<CycleInstance>? = null,
+    val bodySignals: BodySignalInputs? = null,
     val realizedCumulativeRisk: Double = 0.0,
     val initialActionLocks: List<DayOverride> = emptyList(),
 )
@@ -97,6 +168,10 @@ data class DayWeight(
     val day: Int,
     val recommendedAction: RecommendedAction,
     val rawRiskScore: Int,
+    val rawRiskProbability: Double = 0.0,
+    val protectedRiskProbability: Double = 0.0,
+    val withdrawalRiskProbability: Double = 0.0,
+    val recommendedRiskProbability: Double = 0.0,
     val overrideCost: OverrideCost,
 )
 
@@ -117,14 +192,24 @@ data class GroupedCycleDays(
 )
 
 @Serializable
+data class SignalSummary(
+    val posteriorOvulationMeanDay: Double,
+    val posteriorOvulationSdDays: Double,
+    val signalsUsed: BodySignalInputs,
+)
+
+@Serializable
 data class YearOutput(
     val yearIndex: Int,
     val age: Int,
     val cycleLengthDays: Int,
     val cycleSdDays: Double,
+    val effectiveCyclesPerYear: Double = 13.0,
+    val literalCycle: Boolean = false,
     val actsPerWeek: Double,
     val cycleRisk: Double,
     val annualRisk: Double,
+    val signalSummary: SignalSummary? = null,
     val counts: ActionCounts,
     val groupedDays: GroupedCycleDays,
     val dayWeights: List<DayWeight>,
@@ -165,10 +250,22 @@ data class CondomResidualsUsed(
 )
 
 @Serializable
+data class MethodLibraryUsed(
+    val persistentMethod: PersistentMethod = PersistentMethod.None,
+    val persistentMethodResidual: Double = 1.0,
+    val protectedDayMethod: ProtectedDayMethod = ProtectedDayMethod.ExternalCondom,
+    val protectedDayMethodResidual: Double = 0.0,
+    val withdrawalMode: WithdrawalMode = WithdrawalMode.None,
+    val withdrawalResidual: Double = 1.0,
+    val combinedProtectedWithdrawalResidual: Double? = null,
+)
+
+@Serializable
 data class PlannerValidation(
     val sdmReference: SdmValidation,
     val condomResidualsUsed: CondomResidualsUsed,
     val selectedCondomResidual: Double,
+    val methodLibrary: MethodLibraryUsed = MethodLibraryUsed(),
 )
 
 @Serializable

@@ -58,6 +58,22 @@ export type CalendarCycleRow = {
   cycleSdDays: number;
   actsPerWeek: number;
   ageYears: number;
+  bodySignals?: BodySignalInputs;
+};
+
+export type CycleLengthPosterior = {
+  mean: number;
+  predictiveSd: number;
+  lower: number;
+  upper: number;
+  observedCount: number;
+};
+
+export type BodySignalInputs = {
+  cervicalMucusPeakDay?: number;
+  basalBodyTemperatureShiftDay?: number;
+  lhSurgeDay?: number;
+  wearableTemperatureShiftDay?: number;
 };
 
 export function buildCalendarCycles(
@@ -67,10 +83,11 @@ export function buildCalendarCycles(
   cycleSdDays: number,
   historyLengths: number[],
 ): CalendarCycleRow[] {
+  const posterior = cycleLengthPosterior(historyLengths, ageYears);
   const lengths = predictCycleLengthsV15(count, historyLengths, ageYears);
   const baseSd = cycleSdDays;
   const widen = sdWidenFromVariance(historyLengths);
-  const rowSd = Math.min(10, baseSd + widen);
+  const rowSd = Math.min(10, baseSd + widen + posterior.predictiveSd * 0.35);
   return lengths.map((cycleLengthDays) => ({
     cycleLengthDays,
     cycleSdDays: rowSd,
@@ -117,6 +134,44 @@ export function sdWidenFromVariance(historyLengths: number[]): number {
   return Math.min(4, (sd - 1.5) * 0.6);
 }
 
+export function cycleLengthPosterior(
+  historyLengths: number[],
+  ageYears: number,
+): CycleLengthPosterior {
+  const priorMean = referenceCycleLengthForAge(ageYears);
+  const priorSd = 4;
+  if (historyLengths.length === 0) {
+    const lower = Math.max(21, Math.round(priorMean - 1.28 * priorSd));
+    const upper = Math.min(60, Math.round(priorMean + 1.28 * priorSd));
+    return {
+      mean: priorMean,
+      predictiveSd: priorSd,
+      lower,
+      upper,
+      observedCount: 0,
+    };
+  }
+
+  const trimmedMean = trimmedMeanLength(historyLengths, historyLengths.length >= 5 ? 1 : 0);
+  const empiricalSd = Math.max(1.75, sampleStdDev(historyLengths) || 2.5);
+  const priorVar = priorSd ** 2;
+  const obsVar = empiricalSd ** 2;
+  const n = historyLengths.length;
+  const posteriorPrecision = 1 / priorVar + n / obsVar;
+  const posteriorMean = ((priorMean / priorVar) + (n * trimmedMean) / obsVar) / posteriorPrecision;
+  const posteriorVar = 1 / posteriorPrecision;
+  const predictiveSd = Math.sqrt(posteriorVar + obsVar);
+  const lower = Math.max(21, Math.round(posteriorMean - 1.28 * predictiveSd));
+  const upper = Math.min(60, Math.round(posteriorMean + 1.28 * predictiveSd));
+  return {
+    mean: posteriorMean,
+    predictiveSd,
+    lower,
+    upper,
+    observedCount: n,
+  };
+}
+
 export function blendedCycleLength(personalMean: number, ageYears: number, nObserved: number): number {
   const ref = referenceCycleLengthForAge(ageYears);
   const w = Math.min(1, nObserved / 6);
@@ -130,13 +185,9 @@ export function predictCycleLengthsV15(
   ageYears: number,
 ): number[] {
   if (count <= 0) return [];
-  const tm = trimmedMeanLength(historyLengths, historyLengths.length >= 5 ? 1 : 0);
+  const posterior = cycleLengthPosterior(historyLengths, ageYears);
   const n = historyLengths.length;
-  const L = blendedCycleLength(
-    n === 0 ? 28 : tm,
-    ageYears,
-    n,
-  );
+  const L = blendedCycleLength(posterior.mean, ageYears, Math.max(n, 1));
   return Array.from({ length: count }, () => L);
 }
 
