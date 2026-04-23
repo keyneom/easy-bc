@@ -710,13 +710,13 @@ export default function App() {
                   <tbody>
                     {sortedRecords.map((r) => {
                       const end = derivedBleedingEnd(r, sortedRecords);
-                      const len =
-                        end != null ? daysBetweenInclusive(r.start, end) : null;
+                      const isOpen = r.end == null;
+                      const len = daysBetweenInclusive(r.start, end);
                       return (
                         <tr key={r.start}>
                           <td>{r.start}</td>
-                          <td>{end ?? "— (open / until today)"}</td>
-                          <td>{len ?? "—"}</td>
+                          <td>{isOpen ? `${end} (estimated)` : end}</td>
+                          <td>{len}</td>
                           <td>
                             <button
                               type="button"

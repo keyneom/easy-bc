@@ -19,17 +19,53 @@ function sortRecords(records: PeriodRecord[]): PeriodRecord[] {
   return [...records].sort((a, b) => compareIso(a.start, b.start));
 }
 
-/** Effective last bleeding day for a record (inclusive), capped before next period. */
-export function derivedBleedingEnd(rec: PeriodRecord, sorted: PeriodRecord[]): string | undefined {
+/**
+ * Effective last bleeding day for a record (inclusive). Unified with the
+ * Android `CycleCalculator.effectiveBleedingEndEpochDay` rule:
+ *
+ * 1. Use logged `rec.end` if present.
+ * 2. Else use the user's mean closed-period duration (requires ≥3 closed
+ *    periods for stability), otherwise 5 days.
+ * 3. Cap at the day before the next period start.
+ *
+ * We deliberately do **not** cap at today: for an unresolved period we want
+ * to show the predicted remaining bleeding days forward so the user sees
+ * when their period is expected to end. `todayIso` is kept in the signature
+ * for API stability but no longer truncates.
+ */
+export function derivedBleedingEnd(
+  rec: PeriodRecord,
+  sorted: PeriodRecord[],
+  _todayIso: string = toIsoDate(new Date()),
+): string {
   if (rec.end) return rec.end;
-  const idx = sorted.findIndex((x) => x.start === rec.start);
-  if (idx < 0) return undefined;
-  const next = sorted[idx + 1];
-  if (next) return addDaysIso(next.start, -1);
-  return undefined;
+
+  const closedOthers = sorted.filter((r) => r.end && r.start !== rec.start);
+  let fallbackDays = 5;
+  if (closedOthers.length >= 3) {
+    const total = closedOthers.reduce(
+      (acc, r) => acc + (daysFromTo(r.start, r.end as string) + 1),
+      0,
+    );
+    const mean = total / closedOthers.length;
+    fallbackDays = Math.round(mean);
+    if (fallbackDays < 2) fallbackDays = 2;
+    if (fallbackDays > 14) fallbackDays = 14;
+  }
+
+  const estimated = addDaysIso(rec.start, fallbackDays - 1);
+  const next = sorted.find((r) => compareIso(r.start, rec.start) > 0);
+  const nextCap = next ? addDaysIso(next.start, -1) : null;
+
+  // min over (estimated, nextCap)
+  let end = estimated;
+  if (nextCap && compareIso(end, nextCap) > 0) end = nextCap;
+  // Don't let end fall before start (possible if nextCap < start — shouldn't happen)
+  if (compareIso(end, rec.start) < 0) end = rec.start;
+  return end;
 }
 
-/** Ongoing period (no end) is treated as bleeding only through `todayIso`, not forever forward. */
+/** True if `dateIso` is within any period's bleeding window. */
 export function isBleedingOnDate(
   dateIso: string,
   records: PeriodRecord[],
@@ -38,15 +74,8 @@ export function isBleedingOnDate(
   const sorted = sortRecords(records);
   for (const rec of sorted) {
     if (compareIso(dateIso, rec.start) < 0) continue;
-    const end = derivedBleedingEnd(rec, sorted);
-    if (!end) {
-      if (
-        compareIso(dateIso, rec.start) >= 0 &&
-        compareIso(dateIso, todayIso) <= 0
-      ) {
-        return true;
-      }
-    } else if (compareIso(dateIso, rec.start) >= 0 && compareIso(dateIso, end) <= 0) {
+    const end = derivedBleedingEnd(rec, sorted, todayIso);
+    if (compareIso(dateIso, rec.start) >= 0 && compareIso(dateIso, end) <= 0) {
       return true;
     }
   }
@@ -168,7 +197,7 @@ export function allBleedingDates(records: PeriodRecord[], upToIso: string): Set<
   const sorted = sortRecords(records);
   const set = new Set<string>();
   for (const rec of sorted) {
-    const end = derivedBleedingEnd(rec, sorted) ?? upToIso;
+    const end = derivedBleedingEnd(rec, sorted, upToIso);
     const last = compareIso(end, upToIso) > 0 ? upToIso : end;
     if (compareIso(last, rec.start) < 0) continue;
     for (const iso of eachIsoInRange(rec.start, last)) {

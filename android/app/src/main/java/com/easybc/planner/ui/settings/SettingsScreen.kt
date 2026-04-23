@@ -1,12 +1,20 @@
 package com.easybc.planner.ui.settings
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,6 +26,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.easybc.planner.data.PersistentMethod
 import com.easybc.planner.data.ProtectedDayMethod
 import com.easybc.planner.data.WithdrawalMode
+import com.easybc.planner.io.DataBackup
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -243,6 +252,14 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                 onValueChange = { v -> vm.updateDraft { d -> d.copy(streakAversion = v.toDouble()) } },
             )
 
+            // ── Device Calendar ──
+            SectionHeader("Device Calendar")
+            DeviceCalendarSection(vm)
+
+            // ── Backup & Restore ──
+            SectionHeader("Backup & Restore")
+            BackupRestoreSection(vm)
+
             // ── Advanced ──
             SectionHeader("Advanced")
 
@@ -281,6 +298,297 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
 
             Spacer(Modifier.height(80.dp)) // Room for FAB
         }
+    }
+}
+
+@Composable
+private fun DeviceCalendarSection(vm: SettingsViewModel) {
+    val status by vm.calendarStatus.collectAsState()
+    val saved by vm.settings.collectAsState()
+    val syncEnabled = saved?.calendarSyncEnabled == true
+
+    // "enable-after-permission" trampoline: if the user flips the switch on
+    // before granting calendar permission, we remember the intent and turn
+    // it on as soon as the grant comes back.
+    var pendingEnableAfterPermission by remember { mutableStateOf(false) }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        val ok = grants[Manifest.permission.READ_CALENDAR] == true &&
+            grants[Manifest.permission.WRITE_CALENDAR] == true
+        if (ok) {
+            if (pendingEnableAfterPermission) vm.setCalendarSyncEnabled(true)
+            else vm.syncCalendar()
+        }
+        pendingEnableAfterPermission = false
+    }
+
+    fun ensurePermissionThen(block: () -> Unit) {
+        if (vm.calendarPermissionGranted()) {
+            block()
+        } else {
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.READ_CALENDAR,
+                    Manifest.permission.WRITE_CALENDAR,
+                ),
+            )
+        }
+    }
+
+    Text(
+        "Keep an \"EasyBC Planner\" calendar on this device in sync with your " +
+            "logged periods, predicted cycles, fertile windows, and daily " +
+            "planner recommendations. Updates automatically whenever your " +
+            "data changes. No data leaves your phone — sharing it onward to " +
+            "Google Calendar etc. is your call.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    // Primary toggle — owns the persistent on/off switch.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Auto-sync to device calendar", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (syncEnabled) "Events update automatically."
+                else "Off — turn on to create the calendar and keep it fresh.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = syncEnabled,
+            onCheckedChange = { wantOn ->
+                if (wantOn) {
+                    if (vm.calendarPermissionGranted()) {
+                        vm.setCalendarSyncEnabled(true)
+                    } else {
+                        pendingEnableAfterPermission = true
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.READ_CALENDAR,
+                                Manifest.permission.WRITE_CALENDAR,
+                            ),
+                        )
+                    }
+                } else {
+                    vm.setCalendarSyncEnabled(false)
+                }
+            },
+        )
+    }
+    if (syncEnabled) {
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Using Google Calendar? Events live in a local \"EasyBC Planner\" " +
+                "calendar that Google Calendar hides by default. Open Google " +
+                "Calendar → menu → Settings → tap \"EasyBC Planner\" and turn " +
+                "on Sync / Show in calendar list.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedButton(
+            onClick = { ensurePermissionThen { vm.syncCalendar() } },
+            enabled = status !is SettingsViewModel.SyncStatus.Running,
+            modifier = Modifier.weight(1f),
+        ) {
+            Icon(Icons.Default.Sync, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Sync now")
+        }
+        OutlinedButton(
+            onClick = { vm.removeCalendar() },
+            enabled = status !is SettingsViewModel.SyncStatus.Running,
+            modifier = Modifier.weight(1f),
+        ) {
+            Icon(Icons.Default.Delete, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Remove")
+        }
+    }
+
+    StatusRow(status = status, onDismiss = { vm.dismissCalendarStatus() })
+
+    // Privacy: customizable event labels.
+    Spacer(Modifier.height(8.dp))
+    val draft by vm.draft.collectAsState()
+    var showLabels by remember { mutableStateOf(false) }
+    TextButton(
+        onClick = { showLabels = !showLabels },
+        contentPadding = PaddingValues(horizontal = 0.dp),
+    ) {
+        Text(if (showLabels) "Hide event labels" else "Customize event labels")
+    }
+    if (showLabels) {
+        Text(
+            "These are the exact strings the device calendar shows for each " +
+                "kind of event. Defaults are single letters so a glance at " +
+                "your calendar by someone else doesn't reveal anything — " +
+                "change or blank them however you like. Edits apply on the " +
+                "next sync.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
+        LabelField("Period (logged or predicted)", draft.calendarLabelPeriod) { v ->
+            vm.updateDraft { d -> d.copy(calendarLabelPeriod = v) }
+        }
+        LabelField("Fertile window", draft.calendarLabelFertile) { v ->
+            vm.updateDraft { d -> d.copy(calendarLabelFertile = v) }
+        }
+        LabelField("Plan action: U (unprotected)", draft.calendarLabelActionU) { v ->
+            vm.updateDraft { d -> d.copy(calendarLabelActionU = v) }
+        }
+        LabelField("Plan action: C (protected)", draft.calendarLabelActionC) { v ->
+            vm.updateDraft { d -> d.copy(calendarLabelActionC = v) }
+        }
+        LabelField("Plan action: A (abstain)", draft.calendarLabelActionA) { v ->
+            vm.updateDraft { d -> d.copy(calendarLabelActionA = v) }
+        }
+        LabelField("Plan action: W (withdrawal)", draft.calendarLabelActionW) { v ->
+            vm.updateDraft { d -> d.copy(calendarLabelActionW = v) }
+        }
+        Text(
+            "Remember to tap Save at the top of the screen, then Sync now, " +
+                "to push the new labels to your device calendar.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun LabelField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+    )
+}
+
+@Composable
+private fun BackupRestoreSection(vm: SettingsViewModel) {
+    val status by vm.backupStatus.collectAsState()
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(DataBackup.MIME_TYPE),
+    ) { uri -> uri?.let { vm.exportBackup(it) } }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> uri?.let { vm.importBackup(it) } }
+
+    var confirmImport by remember { mutableStateOf(false) }
+
+    Text(
+        "Save all your cycle data, planner settings, and day logs to a JSON " +
+            "file, or restore from one. Use this to move between devices — " +
+            "no account required. Importing replaces everything on this device.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            onClick = { exportLauncher.launch(vm.defaultBackupFilename()) },
+            enabled = status !is SettingsViewModel.SyncStatus.Running,
+            modifier = Modifier.weight(1f),
+        ) {
+            Icon(Icons.Default.Upload, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Export")
+        }
+        OutlinedButton(
+            onClick = { confirmImport = true },
+            enabled = status !is SettingsViewModel.SyncStatus.Running,
+            modifier = Modifier.weight(1f),
+        ) {
+            Icon(Icons.Default.Download, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Import")
+        }
+    }
+
+    StatusRow(status = status, onDismiss = { vm.dismissBackupStatus() })
+
+    if (confirmImport) {
+        AlertDialog(
+            onDismissRequest = { confirmImport = false },
+            title = { Text("Replace all data?") },
+            text = {
+                Text(
+                    "Importing a backup wipes this device's period logs, day " +
+                        "logs, and settings and replaces them with the backup. " +
+                        "Your device calendar will not be changed — hit \"Sync " +
+                        "now\" afterward to push the imported data to your " +
+                        "device calendar.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmImport = false
+                    importLauncher.launch(arrayOf(DataBackup.MIME_TYPE, "*/*"))
+                }) { Text("Choose file") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmImport = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun StatusRow(
+    status: SettingsViewModel.SyncStatus,
+    onDismiss: () -> Unit,
+) {
+    when (status) {
+        is SettingsViewModel.SyncStatus.Running -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Working…", style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        is SettingsViewModel.SyncStatus.Success -> {
+            AssistChip(
+                onClick = onDismiss,
+                label = { Text(status.message, style = MaterialTheme.typography.labelSmall) },
+            )
+        }
+        is SettingsViewModel.SyncStatus.Error -> {
+            AssistChip(
+                onClick = onDismiss,
+                label = {
+                    Text(
+                        status.message,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                },
+            )
+        }
+        SettingsViewModel.SyncStatus.Idle -> { /* no-op */ }
     }
 }
 

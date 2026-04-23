@@ -2,6 +2,8 @@ package com.easybc.planner.data.db
 
 import android.content.Context
 import androidx.room.*
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 // ── Entities ──
@@ -50,6 +52,24 @@ data class UserSettingsEntity(
     val combinedMethodIndependence: Double = 0.35,
     val ovulationSdDays: Double = 3.0,
     val onboardingComplete: Boolean = false,
+    /**
+     * When true, the app keeps the on-device "EasyBC Planner" calendar in
+     * sync automatically whenever periods / day-logs / settings change.
+     * Turning this on prompts for WRITE_CALENDAR permission the first time.
+     */
+    val calendarSyncEnabled: Boolean = false,
+    // ── Calendar event labels ──
+    // What the app writes as the event title in the device calendar.
+    // Defaults are deliberately cryptic single letters so a glance at the
+    // phone's calendar by a bystander doesn't reveal what's being tracked.
+    // The event's *description* is set to the same value (see
+    // EasyBCCalendarSync) so tapping an event also reveals nothing new.
+    val calendarLabelPeriod: String = "P",
+    val calendarLabelFertile: String = "F",
+    val calendarLabelActionU: String = "U",
+    val calendarLabelActionC: String = "C",
+    val calendarLabelActionA: String = "A",
+    val calendarLabelActionW: String = "W",
 )
 
 // ── DAOs ──
@@ -76,6 +96,9 @@ interface PeriodRecordDao {
 
     @Delete
     suspend fun delete(record: PeriodRecord)
+
+    @Query("DELETE FROM period_records")
+    suspend fun deleteAll()
 }
 
 @Dao
@@ -94,6 +117,12 @@ interface DayLogDao {
 
     @Delete
     suspend fun delete(log: DayLog)
+
+    @Query("SELECT * FROM day_logs ORDER BY date ASC")
+    suspend fun getAll(): List<DayLog>
+
+    @Query("DELETE FROM day_logs")
+    suspend fun deleteAll()
 }
 
 @Dao
@@ -112,7 +141,7 @@ interface UserSettingsDao {
 
 @Database(
     entities = [PeriodRecord::class, DayLog::class, UserSettingsEntity::class],
-    version = 2,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -124,13 +153,57 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
+        /**
+         * v1 → v2: added method-library fields to user_settings.
+         * The columns all have non-null defaults matching the Kotlin entity
+         * defaults, so existing rows get sane values after the migration.
+         */
+        val MIGRATION_1_2: Migration = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN persistentMethod TEXT NOT NULL DEFAULT 'none'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN protectedDayMethod TEXT NOT NULL DEFAULT 'external_condom'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN withdrawalMode TEXT NOT NULL DEFAULT 'none'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN withdrawalTypicalAnnualFailure REAL NOT NULL DEFAULT 0.20")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN useWithdrawalBackupOnProtectedDays INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN combinedMethodIndependence REAL NOT NULL DEFAULT 0.35")
+            }
+        }
+
+        /** v2 → v3: added calendarSyncEnabled to user_settings. */
+        val MIGRATION_2_3: Migration = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarSyncEnabled INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v3 → v4: added six calendarLabel* columns for privacy-friendly
+         * custom titles in the device calendar. Defaults are the same cryptic
+         * single-letter values the entity declares.
+         */
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarLabelPeriod TEXT NOT NULL DEFAULT 'P'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarLabelFertile TEXT NOT NULL DEFAULT 'F'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarLabelActionU TEXT NOT NULL DEFAULT 'U'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarLabelActionC TEXT NOT NULL DEFAULT 'C'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarLabelActionA TEXT NOT NULL DEFAULT 'A'")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN calendarLabelActionW TEXT NOT NULL DEFAULT 'W'")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "easybc.db",
-                ).fallbackToDestructiveMigration()
+                )
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    // NOTE: no fallbackToDestructiveMigration — we never want
+                    // to silently wipe user data. If a future schema bump
+                    // lacks a migration the build will crash loudly on open,
+                    // which is the right failure mode.
                     .build().also { INSTANCE = it }
             }
     }

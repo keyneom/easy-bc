@@ -129,8 +129,10 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     fun endCurrentPeriod(date: LocalDate) {
         viewModelScope.launch {
             val epochDay = date.toEpochDay()
+            // Use a generous 30-day window here (vs. the display rule's cap at
+            // today) so the user can retroactively end an old forgotten period.
             val period = periods.value.find { record ->
-                val end = record.endDate ?: (record.startDate + 30) // generous window for open periods
+                val end = record.endDate ?: (record.startDate + 30)
                 epochDay in record.startDate..end
             }
             if (period != null) {
@@ -189,26 +191,24 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         isCurrentMonth: Boolean,
     ): DayCellData {
         val today = LocalDate.now()
-        val isPeriod = isDateInPeriod(date, periodList)
+        val isPeriod = cycleCalc.isDateInPeriod(date, periodList, today)
         val dayLog = dayLogs.find { LocalDate.ofEpochDay(it.date) == date }
 
-        // Map date to cycle/day using period data
-        val observedCycles = cycleCalc.deriveCycles(periodList)
-        val stats = cycleCalc.computeStats(observedCycles)
-        val avgLen = stats?.averageLength ?: settings.value?.cycleLengthDays?.toDouble() ?: 28.0
-        val lastPeriod = periodList.maxByOrNull { it.startDate }
-        val predictedCycles = if (lastPeriod != null) {
-            cycleCalc.predictFutureCycles(LocalDate.ofEpochDay(lastPeriod.startDate), avgLen, 60)
+        // Single combined cycle list: observed + active + predicted. Must stay
+        // aligned with the cycle list the planner saw (see buildCalendarCycles),
+        // because plan.years[i] corresponds to allCycles[i].
+        val settingsNow = settings.value
+        val allCycles = if (settingsNow != null) {
+            cycleCalc.buildCoverageCycles(periodList, settingsNow)
         } else {
-            emptyList()
+            cycleCalc.deriveCycles(periodList)
         }
 
-        val cycleInfo = cycleCalc.dateToyCycleDay(date, observedCycles, predictedCycles)
+        val cycleInfo = cycleCalc.dateToCycleDay(date, allCycles)
         val cycleDay = cycleInfo?.second
         val cycleIdx = cycleInfo?.first
 
         val cycleLenForDate = if (cycleIdx != null) {
-            val allCycles = observedCycles + predictedCycles
             allCycles.getOrNull(cycleIdx)?.lengthDays
         } else null
 
@@ -249,11 +249,4 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    private fun isDateInPeriod(date: LocalDate, periods: List<PeriodRecord>): Boolean {
-        val epochDay = date.toEpochDay()
-        return periods.any { record ->
-            val end = record.endDate ?: (record.startDate + 5) // default 5-day period
-            epochDay in record.startDate..end
-        }
-    }
 }

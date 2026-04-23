@@ -7,3 +7,6 @@ web/dist/
 android/.gradle/
 android/**/build/
 android/local.properties
+
+# Claude Code local session state
+.claude/

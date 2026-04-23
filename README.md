@@ -268,6 +268,7 @@ This deviation is expected and acceptable:
 - Wilcox biological data may overestimate conception risk for general populations vs TTC populations
 - Published contraceptive effectiveness rates (2%, 5%, 13%) depend on the frequency distribution of the study populations and cannot be directly compared to a personalized per-act model
 - The model's estimates should be interpreted as "given my specific frequency, age, and cycle, here is the biology-derived risk" — not "this should match published rates"
+- **Double-check logic:** the current implementation spreads `actsPerWeek` into an average daily rate (`actsPerWeek / 7`) and applies day-level risk once per day. This may not fully capture days with multiple intercourse instances, and should be verified against study assumptions that report per-day conception likelihood rather than per-instance likelihood.
 
 ---
 
@@ -390,6 +391,18 @@ The **web client** adds a **calendar-first** layer on top of WASM:
 - **Rolling horizon** UX that always highlights plan diffs when period data changes.
 - **Credits → planner policy** (how journal entries affect optimization).
 - **Incident replay** wired end-to-end (see *Dynamic Replanning After Violations*).
+- **Current-cycle wall-calendar continuity audit** — verify/fix cases where after logging a new period start, immediately following days in the current cycle lose phase/recommendation coloring until roughly one cycle later. The most important surface is the active cycle.
+- **Optional per-day body signals** — mucus / Mittelschmerz / breast-tenderness / manual BBT / manual OPK, logged opt-in, never prompted for. Used to shift and narrow the predicted fertile window for users who want it (zero effort for users who don't).
+- **Anovulatory cycle flag** — auto-detect atypical cycles (length or bleeding-duration outlier vs user's own posterior, floored to avoid over-flagging very-regular users; backstopped by population hard bounds 21–40 days / 2–8 bleed days). Widens the fertile window for that cycle and shows a small 'atypical' chip. Zero user effort.
+- **Reconciliation chip + cycle risk ledger** — when yesterday's planned C/U day is unreconciled, show a single-tap chip (As planned / Abstained / Breakage / No activity) on the home screen. Day-level reconciliation over arbitrary ranges supported for batch entry. Realized-risk budget is tracked against target, so abstained-on-a-planned-C days earn credit the user can spend on a U day later without exceeding the cycle's cumulative risk target.
+- **Opt-in daily nudge** — off by default, a user-configurable single-time-per-day notification that just deep-links to the reconciliation chip (no interactive buttons in v1).
+
+### Recently added (Android)
+
+- **Period-end prediction for open periods** — `effectiveBleedingEndEpochDay` (Android) and `derivedBleedingEnd` (web) no longer cap bleeding-end at today for an unresolved period. They predict forward to `startDate + personalMeanBleedDays - 1` (falling back to 5 days with <3 closed samples), capped only at the day before the next logged period start. Fertile-window and risk math are unaffected — cycle length is measured start-to-start, so only the painted "P" range changes.
+- **Native device calendar sync (`EasyBCCalendarSync`)** — creates a local-only "EasyBC Planner" calendar via `CalendarContract` with `ACCOUNT_TYPE_LOCAL` (never leaves the device unless the user explicitly moves events). One composite all-day event per day joining period / fertile / action components with ` + ` (e.g. `P + C`, `P + A`). Auto-sync via `CalendarAutoSync` watches all four data flows and debounces writes at 1.5s. Event titles default to cryptic single letters (P/F/U/C/A/W), user-editable in Settings for bystander privacy.
+- **JSON backup/restore (`DataBackup`)** — versioned export of periods + day logs + settings via SAF, one-tap re-import on another device. No account needed.
+- **Explicit Room migrations** — `MIGRATION_1_2`, `MIGRATION_2_3`, `MIGRATION_3_4` replace the previous `fallbackToDestructiveMigration()` footgun. User data is preserved across app updates; Auto Backup (`android:allowBackup="true"`) covers reinstall and device-swap.
 
 ---
 

@@ -58,14 +58,19 @@ class PlannerRepository(
         }
 
         val observedCycles = cycleCalc.deriveCycles(periods)
+        // Wall-calendar mode requires at least 2 closed observed cycles to
+        // anchor the user's personal length/variability. Below that, we let
+        // the core run in abstract-horizon mode.
         val calendarCycles = if (observedCycles.size >= 2) {
-            cycleCalc.buildCalendarCycles(observedCycles, settings)
+            cycleCalc.buildCalendarCycles(periods, settings)
         } else {
             null
         }
 
-        // Compute realized risk from past day logs
-        val realizedRisk = computeRealizedRisk(dayLogs, observedCycles, settings)
+        // Realized risk needs to see the active cycle too (a logged U/W day
+        // during the current cycle would otherwise be skipped).
+        val coverageCycles = cycleCalc.buildCoverageCycles(periods, settings)
+        val realizedRisk = computeRealizedRisk(dayLogs, coverageCycles, settings)
 
         val options = UserOptions(
             ageYears = settings.ageYears,
@@ -107,10 +112,10 @@ class PlannerRepository(
      */
     private fun computeRealizedRisk(
         dayLogs: List<DayLog>,
-        observedCycles: List<CycleCalculator.DerivedCycle>,
+        coverageCycles: List<CycleCalculator.DerivedCycle>,
         settings: UserSettingsEntity,
     ): Double {
-        if (dayLogs.isEmpty() || observedCycles.isEmpty()) return 0.0
+        if (dayLogs.isEmpty() || coverageCycles.isEmpty()) return 0.0
 
         val today = LocalDate.now()
         var survivalProduct = 1.0
@@ -119,11 +124,11 @@ class PlannerRepository(
             val date = LocalDate.ofEpochDay(log.date)
             if (date.isAfter(today)) continue
 
-            val cycleInfo = cycleCalc.dateToyCycleDay(date, observedCycles, emptyList()) ?: continue
+            val cycleInfo = cycleCalc.dateToCycleDay(date, coverageCycles) ?: continue
             val (_, dayInCycle) = cycleInfo
 
             // Simple fertile-window risk estimate
-            val cycle = observedCycles.getOrNull(cycleInfo.first) ?: continue
+            val cycle = coverageCycles.getOrNull(cycleInfo.first) ?: continue
             val ovuDay = cycle.lengthDays - 14
             val dist = kotlin.math.abs(dayInCycle - ovuDay)
             val baseRisk = when {
