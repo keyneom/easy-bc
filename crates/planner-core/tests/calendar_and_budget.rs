@@ -39,6 +39,31 @@ fn calendar_cycles_two_rows_differ_from_legacy_age_grid() {
 }
 
 #[test]
+fn calendar_cycles_support_full_long_horizon() {
+    let cc = (0..263)
+        .map(|_| CycleInstance {
+            cycle_length_days: 28,
+            cycle_sd_days: 3.9,
+            acts_per_week: 3.5,
+            age_years: 34,
+            body_signals: None,
+        })
+        .collect();
+
+    let cal = fertility_risk_planner(UserOptions {
+        calendar_cycles: Some(cc),
+        target_cumulative_failure: 0.05,
+        horizon_years: 20,
+        condom_mode: CondomMode::Perfect,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_eq!(cal.years.len(), 263);
+    assert!(cal.target_met);
+}
+
+#[test]
 fn realized_cumulative_risk_tightens_effective_target() {
     let base_opts = UserOptions {
         target_cumulative_failure: 0.05,
@@ -66,6 +91,43 @@ fn realized_cumulative_risk_tightens_effective_target() {
     assert!(
         tight.achieved_cumulative_risk <= base.achieved_cumulative_risk + 1e-9,
         "tighter budget should not increase achieved risk vs looser baseline"
+    );
+}
+
+#[test]
+fn locked_actuals_can_spend_reserve_without_forcing_full_recovery() {
+    let calendar_cycles = (0..40)
+        .map(|_| CycleInstance {
+            cycle_length_days: 28,
+            cycle_sd_days: 3.0,
+            acts_per_week: 3.5,
+            age_years: 34,
+            body_signals: None,
+        })
+        .collect();
+    let out = fertility_risk_planner(UserOptions {
+        calendar_cycles: Some(calendar_cycles),
+        target_cumulative_failure: 0.01,
+        condom_mode: CondomMode::Perfect,
+        initial_action_locks: vec![DayOverride {
+            year_index: 0,
+            day: 12,
+            action: RecommendedAction::C,
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let budget_used = out.achieved_cumulative_risk / out.options_used.target_cumulative_failure;
+    assert!(out.target_met);
+    assert!(
+        budget_used > 0.85 && budget_used < 0.94,
+        "locked actual should spend reserve but remain below recovery ceiling, got {:.1}% used",
+        budget_used * 100.0
+    );
+    assert_eq!(
+        out.years[0].day_weights[11].recommended_action,
+        RecommendedAction::C
     );
 }
 

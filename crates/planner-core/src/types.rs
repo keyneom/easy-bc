@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_CALENDAR_CYCLES: usize = 800;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CondomMode {
@@ -245,7 +247,7 @@ impl UserOptions {
 
         if let Some(ref cc) = self.calendar_cycles {
             if !cc.is_empty() {
-                if cc.len() > 40 {
+                if cc.len() > MAX_CALENDAR_CYCLES {
                     return Err(crate::PlannerError::CalendarCyclesOutOfRange);
                 }
                 for c in cc {

@@ -70,12 +70,18 @@ object DataBackup {
         val calendarLabelActionC: String = "C",
         val calendarLabelActionA: String = "A",
         val calendarLabelActionW: String = "W",
+        // Reminder fields (v6+) are defaulted so older exports still import.
+        val reminderEnabled: Boolean = false,
+        val reminderHour: Int = 9,
+        val reminderMinute: Int = 0,
     )
 
     @Serializable
     data class PeriodDto(
         val startDate: Long,
         val endDate: Long? = null,
+        val note: String? = null,
+        val excludeFromStats: Boolean = false,
         val createdAt: Long = 0L,
     )
 
@@ -84,6 +90,14 @@ object DataBackup {
         val date: Long,
         val actualAction: String,
         val notes: String? = null,
+        // All body-signal and reconciliation fields are defaulted so older
+        // (v1) backups that pre-date the v2 day_logs schema round-trip cleanly.
+        val mucus: String? = null,
+        val bbtCelsius: Double? = null,
+        val opk: String? = null,
+        val mittelschmerz: Boolean = false,
+        val breastTender: Boolean = false,
+        val reconciled: Boolean = false,
     )
 
     // ── Export ───────────────────────────────────────────────────────────
@@ -146,13 +160,25 @@ object DataBackup {
                     PeriodRecord(
                         startDate = p.startDate,
                         endDate = p.endDate,
+                        note = p.note,
+                        excludeFromStats = p.excludeFromStats,
                         createdAt = if (p.createdAt > 0) p.createdAt else System.currentTimeMillis(),
                     )
                 )
             }
             for (d in payload.dayLogs) {
                 db.dayLogDao().upsert(
-                    DayLog(date = d.date, actualAction = d.actualAction, notes = d.notes)
+                    DayLog(
+                        date = d.date,
+                        actualAction = d.actualAction,
+                        notes = d.notes,
+                        mucus = d.mucus,
+                        bbtCelsius = d.bbtCelsius,
+                        opk = d.opk,
+                        mittelschmerz = d.mittelschmerz,
+                        breastTender = d.breastTender,
+                        reconciled = d.reconciled,
+                    )
                 )
             }
             payload.settings?.let { db.userSettingsDao().save(it.toEntity()) }
@@ -183,6 +209,7 @@ object DataBackup {
 
     // ── DTO adapters ─────────────────────────────────────────────────────
 
+    @Suppress("DuplicatedCode")
     private fun UserSettingsEntity.toDto() = SettingsDto(
         ageYears = ageYears,
         horizonYears = horizonYears,
@@ -209,6 +236,9 @@ object DataBackup {
         calendarLabelActionC = calendarLabelActionC,
         calendarLabelActionA = calendarLabelActionA,
         calendarLabelActionW = calendarLabelActionW,
+        reminderEnabled = reminderEnabled,
+        reminderHour = reminderHour,
+        reminderMinute = reminderMinute,
     )
 
     private fun SettingsDto.toEntity() = UserSettingsEntity(
@@ -238,11 +268,16 @@ object DataBackup {
         calendarLabelActionC = calendarLabelActionC,
         calendarLabelActionA = calendarLabelActionA,
         calendarLabelActionW = calendarLabelActionW,
+        reminderEnabled = reminderEnabled,
+        reminderHour = reminderHour,
+        reminderMinute = reminderMinute,
     )
 
     private fun PeriodRecord.toDto() = PeriodDto(
         startDate = startDate,
         endDate = endDate,
+        note = note,
+        excludeFromStats = excludeFromStats,
         createdAt = createdAt,
     )
 
@@ -252,7 +287,17 @@ object DataBackup {
         // just read via a raw query. Use a suspend helper added below in
         // DayLogDao — if absent, fall through to an all-range lookup.
         return db.dayLogDao().getAll().map {
-            DayLogDto(date = it.date, actualAction = it.actualAction, notes = it.notes)
+            DayLogDto(
+                date = it.date,
+                actualAction = it.actualAction,
+                notes = it.notes,
+                mucus = it.mucus,
+                bbtCelsius = it.bbtCelsius,
+                opk = it.opk,
+                mittelschmerz = it.mittelschmerz,
+                breastTender = it.breastTender,
+                reconciled = it.reconciled,
+            )
         }
     }
 }

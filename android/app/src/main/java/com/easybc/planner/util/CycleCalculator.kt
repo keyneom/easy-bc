@@ -52,6 +52,11 @@ class CycleCalculator {
      * Compute **closed** observed cycle lengths from consecutive period starts.
      * A period whose start has no successor (the active cycle) is deliberately
      * excluded — see the class doc.
+     *
+     * Periods with `excludeFromStats == true` invalidate BOTH the cycle ending
+     * at them and the cycle starting at them. We deliberately don't bridge
+     * across an excluded record (start at A, skip B, end at C) — that would
+     * invent a 2x-length phantom cycle that misrepresents the user's data.
      */
     fun deriveCycles(periods: List<PeriodRecord>): List<DerivedCycle> {
         val sorted = periods.sortedBy { it.startDate }
@@ -59,8 +64,11 @@ class CycleCalculator {
 
         val cycles = mutableListOf<DerivedCycle>()
         for (i in 0 until sorted.size - 1) {
-            val start = LocalDate.ofEpochDay(sorted[i].startDate)
-            val nextStart = LocalDate.ofEpochDay(sorted[i + 1].startDate)
+            val a = sorted[i]
+            val b = sorted[i + 1]
+            if (a.excludeFromStats || b.excludeFromStats) continue
+            val start = LocalDate.ofEpochDay(a.startDate)
+            val nextStart = LocalDate.ofEpochDay(b.startDate)
             val length = ChronoUnit.DAYS.between(start, nextStart).toInt()
             if (length in 21..60) {
                 cycles.add(DerivedCycle(start, length, isObserved = true))
@@ -336,17 +344,17 @@ class CycleCalculator {
      * 1. If [record.endDate] is set, use it.
      * 2. Else use the user's mean closed-period duration (requires ≥3 closed
      *    periods for stability), otherwise a 5-day default.
-     * 3. Cap at the day before the next period start (so bleeding can't
+     * 3. **If today is past the estimated end, extend through today** —
+     *    when the user hasn't logged an end yet and we're already past the
+     *    prediction, the safe assumption is they're still bleeding (and
+     *    they need the calendar to show today so they can confirm an end
+     *    here). Capped at start + [BLEED_DURATION_MAX_DAYS] so a forgotten
+     *    period doesn't sprawl indefinitely.
+     * 4. Cap at the day before the next period start (so bleeding can't
      *    overlap into the next cycle).
-     *
-     * We deliberately **do not** cap at today anymore: for an unresolved
-     * period we show the predicted remaining bleeding days going forward so
-     * the user sees when their period is expected to end. The `today`
-     * parameter is kept for API stability but no longer truncates.
      *
      * Mirrors the web `derivedBleedingEnd` in spirit; both platforms agree.
      */
-    @Suppress("UNUSED_PARAMETER")
     fun effectiveBleedingEndEpochDay(
         record: PeriodRecord,
         allPeriods: List<PeriodRecord>,
@@ -354,7 +362,9 @@ class CycleCalculator {
     ): Long {
         record.endDate?.let { return it }
 
-        val closedOthers = allPeriods.filter { it.endDate != null && it.id != record.id }
+        val closedOthers = allPeriods.filter {
+            it.endDate != null && it.id != record.id && !it.excludeFromStats
+        }
         val fallbackDays = if (closedOthers.size >= 3) {
             val mean = closedOthers
                 .sumOf { (it.endDate!! - it.startDate + 1).toDouble() } / closedOthers.size
@@ -364,13 +374,21 @@ class CycleCalculator {
         }
 
         val estimatedEnd = record.startDate + fallbackDays - 1 // inclusive
+        val todayEpoch = today.toEpochDay()
+        val maxOpenEnd = record.startDate + BLEED_DURATION_MAX_DAYS - 1
+        val openEnd = if (todayEpoch > estimatedEnd) {
+            todayEpoch.coerceAtMost(maxOpenEnd)
+        } else {
+            estimatedEnd
+        }
+
         val nextStartMinus1 = allPeriods
             .filter { it.startDate > record.startDate }
             .minByOrNull { it.startDate }
             ?.let { it.startDate - 1 }
             ?: Long.MAX_VALUE
 
-        return minOf(estimatedEnd, nextStartMinus1)
+        return minOf(openEnd, nextStartMinus1)
     }
 
     /** True if [date] falls within any period's bleeding window. */
@@ -384,5 +402,183 @@ class CycleCalculator {
             val end = effectiveBleedingEndEpochDay(record, periods, today)
             epochDay in record.startDate..end
         }
+    }
+
+    /**
+     * Average bleed duration in days, derived from the user's closed periods.
+     * Falls back to 5 (population mean) when there aren't enough samples.
+     * Used both as a within-period extrapolation when the user hasn't ended
+     * the current period yet AND as the bleed-window length for predicted
+     * future cycles. Periods flagged `excludeFromStats` are skipped.
+     */
+    fun averageBleedDuration(periods: List<PeriodRecord>): Int {
+        val closed = periods.filter { it.endDate != null && !it.excludeFromStats }
+        if (closed.size < 3) return 5
+        val mean = closed
+            .sumOf { (it.endDate!! - it.startDate + 1).toDouble() } / closed.size
+        return mean.roundToInt().coerceIn(2, 14)
+    }
+
+    /**
+     * Epoch-day set of every day inside a *predicted* future bleed window —
+     * i.e., the first N days of each cycle in [cycles] whose start is after
+     * today and which doesn't already correspond to a recorded period start.
+     * Lets the calendar render predicted future periods so the user can plan
+     * around them; pairs with `isPeriodPredicted` to render hollow markers.
+     */
+    fun predictedFutureBleedDays(
+        cycles: List<DerivedCycle>,
+        periods: List<PeriodRecord>,
+        today: LocalDate = LocalDate.now(),
+    ): Set<Long> {
+        val bleedDuration = averageBleedDuration(periods)
+        val recordedStarts = periods.map { it.startDate }.toSet()
+        val out = mutableSetOf<Long>()
+        for (cycle in cycles) {
+            if (!cycle.startDate.isAfter(today)) continue
+            val startEpoch = cycle.startDate.toEpochDay()
+            if (startEpoch in recordedStarts) continue
+            for (offset in 0 until bleedDuration) {
+                out.add(startEpoch + offset)
+            }
+        }
+        return out
+    }
+
+    // ── Anovulatory / atypical-cycle flag ───────────────────────────────
+
+    /**
+     * Outcome of anovulatory-heuristic scoring for a single closed cycle.
+     *
+     * **Why flag at all:** a cycle that's unusually short or unusually long,
+     * or has very short / very long bleeding, is more likely to be
+     * anovulatory. In that case our standard "ovulation = cycle_length − 14"
+     * heuristic can miss the actual fertile window, so we widen it.
+     *
+     * This is a coarse signal — it never shifts fertile-window location,
+     * only widens it. It is zero-user-effort: computed from period start
+     * and end dates only.
+     */
+    enum class CycleFlag {
+        /** No atypical signal — predictions use normal widths. */
+        NORMAL,
+        /** Cycle length is outside the user's typical range or population bounds. */
+        ATYPICAL_LENGTH,
+        /** Bleeding duration is outside the user's typical range or population bounds. */
+        ATYPICAL_BLEED,
+        /** Both length and bleeding duration are atypical — strongest hint. */
+        ATYPICAL_BOTH,
+    }
+
+    companion object {
+        /** Population hard bounds — always flag outside these, regardless of history. */
+        const val CYCLE_LENGTH_MIN_DAYS = 21
+        const val CYCLE_LENGTH_MAX_DAYS = 40
+        const val BLEED_DURATION_MIN_DAYS = 2
+        const val BLEED_DURATION_MAX_DAYS = 8
+
+        /** SD floors — keep very-regular users from getting spurious flags. */
+        const val CYCLE_LENGTH_SD_FLOOR_DAYS = 2.0
+        const val BLEED_DURATION_SD_FLOOR_DAYS = 1.5
+
+        /** Z-score threshold for personal outlier. ~8% false-positive under normal. */
+        const val ATYPICAL_Z_THRESHOLD = 1.75
+
+        /** Minimum closed samples before we trust a personal SD estimate. */
+        const val MIN_SAMPLES_FOR_PERSONAL_THRESHOLD = 4
+
+        /**
+         * Extra days added on *each* side of the fertile window for a cycle
+         * flagged ATYPICAL. The window already widens with overall cycle
+         * variance via [sdWidenFromVariance]; this is a per-cycle bump on
+         * top of that for the specific cycles we don't trust.
+         */
+        const val ATYPICAL_CYCLE_FERTILE_WINDOW_EXTRA_DAYS = 2
+    }
+
+    /**
+     * Flag a single cycle as atypical based on its own length and the
+     * bleeding duration of [record] (the period that starts it), compared
+     * against the user's history.
+     *
+     * Rule:
+     * 1. **Hard bounds:** cycle length outside [21, 40] or bleeding outside
+     *    [2, 8] always flags.
+     * 2. **Personal outlier:** with ≥ 4 closed samples, flag if
+     *    |value − mean| > 1.75 × max(sample_sd, floor). Floors prevent
+     *    very-regular users from flagging on natural small variation.
+     *
+     * If `record.endDate` is null the bleeding side is not evaluated — we
+     * only flag based on what we can actually measure.
+     */
+    fun flagForCycle(
+        cycle: DerivedCycle,
+        allCycleLengths: List<Int>,
+        record: PeriodRecord?,
+        allClosedBleedDurations: List<Int>,
+    ): CycleFlag {
+        val lengthAtypical = isLengthAtypical(cycle.lengthDays, allCycleLengths)
+        val bleedDuration = record?.endDate?.let { end ->
+            (end - record.startDate + 1).toInt()
+        }
+        val bleedAtypical = bleedDuration?.let {
+            isBleedDurationAtypical(it, allClosedBleedDurations)
+        } ?: false
+        return when {
+            lengthAtypical && bleedAtypical -> CycleFlag.ATYPICAL_BOTH
+            lengthAtypical -> CycleFlag.ATYPICAL_LENGTH
+            bleedAtypical -> CycleFlag.ATYPICAL_BLEED
+            else -> CycleFlag.NORMAL
+        }
+    }
+
+    /**
+     * Convenience: compute a map of cycle-start → [CycleFlag] across all
+     * observed closed cycles for the given periods. Unflagged cycles are
+     * not in the map (callers should treat missing as [CycleFlag.NORMAL]).
+     */
+    fun flagObservedCycles(periods: List<PeriodRecord>): Map<LocalDate, CycleFlag> {
+        val cycles = deriveCycles(periods)
+        if (cycles.isEmpty()) return emptyMap()
+        val lengths = cycles.map { it.lengthDays }
+        val bleedDurations = periods
+            .filter { it.endDate != null }
+            .map { (it.endDate!! - it.startDate + 1).toInt() }
+        val periodByStart = periods.associateBy { it.startDate }
+        val result = mutableMapOf<LocalDate, CycleFlag>()
+        for (cycle in cycles) {
+            val rec = periodByStart[cycle.startDate.toEpochDay()]
+            val flag = flagForCycle(cycle, lengths, rec, bleedDurations)
+            if (flag != CycleFlag.NORMAL) result[cycle.startDate] = flag
+        }
+        return result
+    }
+
+    private fun isLengthAtypical(value: Int, history: List<Int>): Boolean {
+        if (value < CYCLE_LENGTH_MIN_DAYS || value > CYCLE_LENGTH_MAX_DAYS) return true
+        return isPersonalOutlier(
+            value.toDouble(),
+            history.map { it.toDouble() },
+            CYCLE_LENGTH_SD_FLOOR_DAYS,
+        )
+    }
+
+    private fun isBleedDurationAtypical(value: Int, history: List<Int>): Boolean {
+        if (value < BLEED_DURATION_MIN_DAYS || value > BLEED_DURATION_MAX_DAYS) return true
+        return isPersonalOutlier(
+            value.toDouble(),
+            history.map { it.toDouble() },
+            BLEED_DURATION_SD_FLOOR_DAYS,
+        )
+    }
+
+    private fun isPersonalOutlier(value: Double, history: List<Double>, sdFloor: Double): Boolean {
+        if (history.size < MIN_SAMPLES_FOR_PERSONAL_THRESHOLD) return false
+        val mean = history.average()
+        val sampleSd = sqrt(
+            history.sumOf { (it - mean) * (it - mean) } / (history.size - 1)
+        )
+        val effectiveSd = maxOf(sampleSd, sdFloor)
+        return kotlin.math.abs(value - mean) > ATYPICAL_Z_THRESHOLD * effectiveSd
     }
 }

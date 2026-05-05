@@ -1,11 +1,13 @@
 package com.easybc.planner.ui.calendar
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.*
@@ -25,10 +27,21 @@ fun DayDetailSheet(
     cell: DayCellData,
     /** Which action types the planner is actually using (drives which log buttons appear). */
     activeActions: Set<RecommendedAction>,
+    /** If true, auto-expand the optional Body Signals section. */
+    signalsDefaultExpanded: Boolean,
     onDismiss: () -> Unit,
     onLogPeriodStart: () -> Unit,
+    onClearPeriodStart: () -> Unit,
     onLogPeriodEnd: () -> Unit,
+    onClearPeriodEnd: () -> Unit,
     onLogAction: (RecommendedAction) -> Unit,
+    onLogObservations: (
+        mucus: String?,
+        bbtCelsius: Double?,
+        opk: String?,
+        mittelschmerz: Boolean,
+        breastTender: Boolean,
+    ) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -86,6 +99,16 @@ fun DayDetailSheet(
                         label = { Text("Period") },
                         icon = { Icon(Icons.Default.WaterDrop, null, Modifier.size(16.dp), tint = PeriodColor) },
                     )
+                }
+                if (cell.cycleFlag != null) {
+                    val (label, tooltip) = atypicalChipCopy(cell.cycleFlag)
+                    SuggestionChip(
+                        onClick = {},
+                        label = { Text(label) },
+                    )
+                    // Keep `tooltip` around so the compiler doesn't strip it —
+                    // a future polish pass can move this into a PlainTooltipBox.
+                    @Suppress("UNUSED_EXPRESSION") tooltip
                 }
             }
 
@@ -227,31 +250,67 @@ fun DayDetailSheet(
                 style = MaterialTheme.typography.titleSmall,
             )
 
-            if (cell.isPeriod) {
-                // This day is already inside a period — offer to mark it as the end date
-                FilledTonalButton(
-                    onClick = onLogPeriodEnd,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.filledTonalButtonColors(
-                        containerColor = PeriodColor.copy(alpha = 0.15f),
-                    ),
-                ) {
-                    Icon(Icons.Default.WaterDrop, null, Modifier.size(18.dp), tint = PeriodColor)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Mark period ended on this day")
+            if (cell.hasPeriodRecord) {
+                if (cell.isPeriodStartDay) {
+                    PeriodConfirmedRow(
+                        label = "Period started this day",
+                        onUndo = onClearPeriodStart,
+                    )
+                }
+                if (cell.isPeriodEndDay) {
+                    PeriodConfirmedRow(
+                        label = "Period ended this day",
+                        onUndo = onClearPeriodEnd,
+                    )
+                } else {
+                    FilledTonalButton(
+                        onClick = onLogPeriodEnd,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = PeriodColor.copy(alpha = 0.15f),
+                        ),
+                    ) {
+                        Icon(Icons.Default.WaterDrop, null, Modifier.size(18.dp), tint = PeriodColor)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (cell.isPeriodPredicted) "Confirm period ended on this day"
+                            else "Mark period ended on this day"
+                        )
+                    }
                 }
             } else {
+                // Either a non-period day or a predicted future bleed day —
+                // both reduce to "log a period start here" if the user
+                // wants to commit the prediction (or correct it).
                 OutlinedButton(
                     onClick = onLogPeriodStart,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(Icons.Default.WaterDrop, null, Modifier.size(18.dp), tint = PeriodColor)
                     Spacer(Modifier.width(8.dp))
-                    Text("Mark period start")
+                    Text(
+                        if (cell.isPeriod) "Confirm period started on this day"
+                        else "Mark period start"
+                    )
                 }
             }
 
-            if (cell.dayLog != null) {
+            HorizontalDivider()
+
+            // ── Optional body signals ──
+            //
+            // Always present but collapsed by default for new users so the
+            // sheet stays minimal. Once a user has ever logged a signal we
+            // auto-expand (via [signalsDefaultExpanded]) so repeat use is
+            // one tap away. We never nag or hint — per the "super low
+            // maintenance" design constraint.
+            BodySignalsSection(
+                dayLog = cell.dayLog,
+                defaultExpanded = signalsDefaultExpanded,
+                onSave = onLogObservations,
+            )
+
+            if (cell.dayLog != null && cell.dayLog.actualAction.isNotBlank()) {
                 Text(
                     text = "Logged: ${cell.dayLog.actualAction}" +
                         (cell.dayLog.notes?.let { " — $it" } ?: ""),
@@ -262,6 +321,188 @@ fun DayDetailSheet(
         }
     }
 }
+
+/**
+ * Confirmed-period row with an inline Undo. Used for both the recorded
+ * start and the recorded end day so a mistaken tap is reversible without
+ * leaving the sheet.
+ */
+@Composable
+private fun PeriodConfirmedRow(label: String, onUndo: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilledTonalButton(
+            onClick = {},
+            modifier = Modifier.weight(1f),
+            enabled = false,
+            colors = ButtonDefaults.filledTonalButtonColors(
+                disabledContainerColor = PeriodColor.copy(alpha = 0.15f),
+                disabledContentColor = PeriodColor,
+            ),
+        ) {
+            Icon(Icons.Default.Check, null, Modifier.size(18.dp), tint = PeriodColor)
+            Spacer(Modifier.width(8.dp))
+            Text(label)
+        }
+        OutlinedButton(onClick = onUndo) {
+            Text("Undo")
+        }
+    }
+}
+
+/**
+ * Expandable section for mucus / BBT / OPK / Mittelschmerz / breast
+ * tenderness. All fields optional. Editing any one field and tapping Save
+ * merges into the existing day log without touching action or notes.
+ */
+@Composable
+private fun BodySignalsSection(
+    dayLog: com.easybc.planner.data.db.DayLog?,
+    defaultExpanded: Boolean,
+    onSave: (
+        mucus: String?,
+        bbtCelsius: Double?,
+        opk: String?,
+        mittelschmerz: Boolean,
+        breastTender: Boolean,
+    ) -> Unit,
+) {
+    // Expanded state is keyed by the log identity so switching days keeps
+    // the collapse state sticky per-day. The default comes from whether
+    // the user has ever logged *any* signal across their history.
+    var expanded by remember(dayLog?.date, defaultExpanded) {
+        mutableStateOf(defaultExpanded || dayLog?.hasAnySignal() == true)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded },
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Body signals (optional)",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Text(
+            if (expanded) "Hide" else "Add",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+
+    if (!expanded) return
+
+    // Initial values come from the log so re-opening a day shows prior entries.
+    var mucus by remember(dayLog?.date) { mutableStateOf(dayLog?.mucus) }
+    var bbtText by remember(dayLog?.date) {
+        mutableStateOf(dayLog?.bbtCelsius?.let { "%.2f".format(it) } ?: "")
+    }
+    var opk by remember(dayLog?.date) { mutableStateOf(dayLog?.opk) }
+    var mittelschmerz by remember(dayLog?.date) {
+        mutableStateOf(dayLog?.mittelschmerz ?: false)
+    }
+    var breastTender by remember(dayLog?.date) {
+        mutableStateOf(dayLog?.breastTender ?: false)
+    }
+
+    // Mucus — exclusive single-select. Order is rising fertility.
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Cervical mucus", style = MaterialTheme.typography.labelSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (opt in listOf("dry", "sticky", "creamy", "eggwhite", "spotting")) {
+                FilterChip(
+                    selected = mucus == opt,
+                    onClick = { mucus = if (mucus == opt) null else opt },
+                    label = { Text(opt, style = MaterialTheme.typography.labelSmall) },
+                )
+            }
+        }
+    }
+
+    // OPK — three-state.
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Ovulation test (LH)", style = MaterialTheme.typography.labelSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (opt in listOf("negative", "positive", "peak")) {
+                FilterChip(
+                    selected = opk == opt,
+                    onClick = { opk = if (opk == opt) null else opt },
+                    label = { Text(opt, style = MaterialTheme.typography.labelSmall) },
+                )
+            }
+        }
+    }
+
+    // BBT — manual °C entry. Digits + one decimal.
+    OutlinedTextField(
+        value = bbtText,
+        onValueChange = { input ->
+            // Permit partial edits but only digits + one decimal separator
+            if (input.matches(Regex("^\\d{0,3}(\\.\\d{0,2})?$"))) bbtText = input
+        },
+        label = { Text("Basal body temp (°C)") },
+        placeholder = { Text("e.g. 36.65") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilterChip(
+            selected = mittelschmerz,
+            onClick = { mittelschmerz = !mittelschmerz },
+            label = { Text("Ovulation pain", style = MaterialTheme.typography.labelSmall) },
+        )
+        FilterChip(
+            selected = breastTender,
+            onClick = { breastTender = !breastTender },
+            label = { Text("Breast tender", style = MaterialTheme.typography.labelSmall) },
+        )
+    }
+
+    FilledTonalButton(
+        onClick = {
+            onSave(
+                mucus,
+                bbtText.toDoubleOrNull(),
+                opk,
+                mittelschmerz,
+                breastTender,
+            )
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Save signals")
+    }
+}
+
+private fun com.easybc.planner.data.db.DayLog.hasAnySignal(): Boolean =
+    mucus != null || bbtCelsius != null || opk != null || mittelschmerz || breastTender
+
+/**
+ * Short chip label + longer tooltip copy for an atypical-cycle flag. Kept
+ * here (UI layer) rather than in [CycleCalculator] so the core stays pure.
+ */
+private fun atypicalChipCopy(flag: com.easybc.planner.util.CycleCalculator.CycleFlag): Pair<String, String> =
+    when (flag) {
+        com.easybc.planner.util.CycleCalculator.CycleFlag.NORMAL ->
+            "" to ""
+        com.easybc.planner.util.CycleCalculator.CycleFlag.ATYPICAL_LENGTH ->
+            "Atypical length" to
+                "Cycle length fell outside your usual range — fertile window widened for this cycle."
+        com.easybc.planner.util.CycleCalculator.CycleFlag.ATYPICAL_BLEED ->
+            "Atypical bleeding" to
+                "Bleeding duration fell outside your usual range — fertile window widened for this cycle."
+        com.easybc.planner.util.CycleCalculator.CycleFlag.ATYPICAL_BOTH ->
+            "Atypical cycle" to
+                "Cycle length and bleeding both fell outside your usual range — fertile window widened for this cycle."
+    }
 
 @Composable
 private fun ActionLogButton(

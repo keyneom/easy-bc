@@ -24,6 +24,7 @@ import androidx.navigation.compose.rememberNavController
 import com.easybc.planner.ui.calendar.CalendarScreen
 import com.easybc.planner.ui.history.HistoryScreen
 import com.easybc.planner.ui.planner.PlannerScreen
+import com.easybc.planner.ui.reconcile.ReconcileScreen
 import com.easybc.planner.ui.settings.SettingsScreen
 
 enum class Screen(
@@ -39,10 +40,25 @@ enum class Screen(
 }
 
 @Composable
-fun AppNavigation() {
+fun AppNavigation(
+    /** True when the app was opened from the reminder notification. */
+    pendingReconcileDeepLink: Boolean = false,
+    /** Called once we've navigated to the reconcile screen. */
+    onReconcileDeepLinkConsumed: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+
+    // Handle the reminder notification deep-link. We push the reconcile
+    // route onto the back stack so hitting back still returns to the
+    // Calendar tab, which is the mental model the user expects.
+    androidx.compose.runtime.LaunchedEffect(pendingReconcileDeepLink) {
+        if (pendingReconcileDeepLink) {
+            navController.navigate("reconcile")
+            onReconcileDeepLinkConsumed()
+        }
+    }
 
     Scaffold(
         bottomBar = {
@@ -77,10 +93,17 @@ fun AppNavigation() {
             startDestination = Screen.Calendar.route,
             modifier = Modifier.padding(innerPadding),
         ) {
-            composable(Screen.Calendar.route) { CalendarScreen() }
+            composable(Screen.Calendar.route) {
+                CalendarScreen(onOpenReconcile = { navController.navigate("reconcile") })
+            }
             composable(Screen.Planner.route) { PlannerScreen() }
             composable(Screen.History.route) { HistoryScreen() }
             composable(Screen.Settings.route) { SettingsScreen() }
+            // "reconcile" isn't a bottom-nav destination — it's a full-screen
+            // child pushed from the Calendar screen's chip.
+            composable("reconcile") {
+                ReconcileScreen(onBack = { navController.popBackStack() })
+            }
         }
     }
 }

@@ -101,6 +101,25 @@ fn annual_from_cycle_risk(cycle_risk: f64, cycles_per_year: f64) -> f64 {
     1.0 - (1.0 - cycle_risk).powf(cycles_per_year)
 }
 
+const PLANNED_BUDGET_UTILIZATION: f64 = 0.85;
+const RECOVERY_BUDGET_UTILIZATION: f64 = 0.94;
+
+fn planning_risk_budget(target: f64) -> f64 {
+    if target <= 0.0 {
+        0.0
+    } else {
+        target * PLANNED_BUDGET_UTILIZATION
+    }
+}
+
+fn recovery_risk_budget(target: f64) -> f64 {
+    if target <= 0.0 {
+        0.0
+    } else {
+        target * RECOVERY_BUDGET_UTILIZATION
+    }
+}
+
 struct Calibrate {
     years: Vec<YearData>,
     condom_residual: f64,
@@ -403,6 +422,7 @@ fn greedy_reduce_risk(
     mut row_survival: Vec<f64>,
     risk_budget: f64,
     skip: impl Fn(usize, usize) -> bool,
+    relax_to_budget: bool,
 ) -> (Vec<Vec<Act>>, Vec<i32>, Vec<f64>, Vec<f64>) {
     let mut current_risk = total_cumulative_risk(&row_survival);
     while risk_still_above_budget(current_risk, risk_budget) {
@@ -437,7 +457,121 @@ fn greedy_reduce_risk(
         );
         current_risk = total_cumulative_risk(&row_survival);
     }
+    if relax_to_budget {
+        relax_toward_budget(
+            years,
+            opts,
+            persistent_residual,
+            protected_day_residual,
+            withdrawal_r,
+            allow_protected_day_method,
+            allow_withdrawal,
+            ux,
+            &mut plans,
+            &mut year_burden_points,
+            &mut cycle_risks,
+            &mut row_survival,
+            risk_budget,
+            skip,
+        );
+    }
     (plans, year_burden_points, cycle_risks, row_survival)
+}
+
+type PlanState = (
+    Vec<Vec<Act>>,
+    Vec<i32>,
+    Vec<f64>,
+    Vec<f64>,
+    HashSet<(usize, usize)>,
+);
+
+fn optimize_with_initial_locks(
+    cal: &Calibrate,
+    opts: &UserOptions,
+    planned_budget: f64,
+    recovery_budget: f64,
+) -> Result<PlanState, crate::PlannerError> {
+    let plans0: Vec<Vec<Act>> = cal
+        .years
+        .iter()
+        .map(|y| vec![Act::U; y.cycle_length_days as usize])
+        .collect();
+    let year_burden_points = vec![0_i32; cal.years.len()];
+    let (cycle_risks, row_survival) = sync_risk_state(
+        &cal.years,
+        &plans0,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+    );
+
+    let (mut plans, mut year_burden_points, mut cycle_risks, mut row_survival) =
+        greedy_reduce_risk(
+            &cal.years,
+            opts,
+            cal.persistent_residual,
+            cal.protected_day_residual,
+            cal.withdrawal_residual,
+            cal.allow_protected_day_method,
+            cal.allow_withdrawal,
+            &cal.ux,
+            plans0,
+            year_burden_points,
+            cycle_risks,
+            row_survival,
+            planned_budget,
+            |_, _| false,
+            true,
+        );
+
+    if opts.initial_action_locks.is_empty() {
+        return Ok((
+            plans,
+            year_burden_points,
+            cycle_risks,
+            row_survival,
+            HashSet::new(),
+        ));
+    }
+
+    let skip_initial = apply_initial_action_locks(
+        &cal.years,
+        opts,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+        &mut plans,
+        &mut year_burden_points,
+        &mut cycle_risks,
+        &mut row_survival,
+    )?;
+
+    let (plans, year_burden_points, cycle_risks, row_survival) = greedy_reduce_risk(
+        &cal.years,
+        opts,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
+        &cal.ux,
+        plans,
+        year_burden_points,
+        cycle_risks,
+        row_survival,
+        recovery_budget,
+        |y, d| skip_initial.contains(&(y, d)),
+        false,
+    );
+
+    Ok((
+        plans,
+        year_burden_points,
+        cycle_risks,
+        row_survival,
+        skip_initial,
+    ))
 }
 
 fn append_heavy_abstinence(
@@ -694,56 +828,16 @@ pub fn replan_preview(
         overrides,
     )?;
     let eff = effective_cumulative_target(&opts);
+    let planning_eff = planning_risk_budget(eff);
+    let recovery_eff = recovery_risk_budget(eff);
     let warnings = static_warnings(
         &cal.years,
         cal.best_non_abstinent_residual,
         cal.persistent_residual,
         eff,
     );
-    let mut plans0: Vec<Vec<Act>> = cal
-        .years
-        .iter()
-        .map(|y| vec![Act::U; y.cycle_length_days as usize])
-        .collect();
-    let mut year_burden_points = vec![0_i32; cal.years.len()];
-    let (mut cycle_risks, mut row_survival) = sync_risk_state(
-        &cal.years,
-        &plans0,
-        cal.persistent_residual,
-        cal.protected_day_residual,
-        cal.withdrawal_residual,
-    );
-    let skip_initial = if opts.initial_action_locks.is_empty() {
-        HashSet::new()
-    } else {
-        apply_initial_action_locks(
-            &cal.years,
-            &opts,
-            cal.persistent_residual,
-            cal.protected_day_residual,
-            cal.withdrawal_residual,
-            &mut plans0,
-            &mut year_burden_points,
-            &mut cycle_risks,
-            &mut row_survival,
-        )?
-    };
-    let (plans, _, cr, asurv) = greedy_reduce_risk(
-        &cal.years,
-        &opts,
-        cal.persistent_residual,
-        cal.protected_day_residual,
-        cal.withdrawal_residual,
-        cal.allow_protected_day_method,
-        cal.allow_withdrawal,
-        &cal.ux,
-        plans0,
-        year_burden_points,
-        cycle_risks,
-        row_survival,
-        eff,
-        |y, d| skip_initial.contains(&(y, d)),
-    );
+    let (plans, _, cr, asurv, skip_initial) =
+        optimize_with_initial_locks(&cal, &opts, planning_eff, recovery_eff)?;
     let baseline_target_met = cumulative_target_met(total_cumulative_risk(&asurv), eff);
     let baseline = build_planner_result(
         opts.clone(),
@@ -792,8 +886,9 @@ pub fn replan_preview(
         burden,
         cr0,
         as0,
-        eff,
+        recovery_eff,
         |y, d| locked.contains(&(y, d)),
+        false,
     );
     let preview_target_met = cumulative_target_met(total_cumulative_risk(&as_p), eff);
     let feasible = preview_target_met;
@@ -832,56 +927,16 @@ pub fn fertility_risk_planner(opts: UserOptions) -> Result<PlannerResult, crate:
         &opts.initial_action_locks,
     )?;
     let eff = effective_cumulative_target(&opts);
+    let planning_eff = planning_risk_budget(eff);
+    let recovery_eff = recovery_risk_budget(eff);
     let warnings = static_warnings(
         &cal.years,
         cal.best_non_abstinent_residual,
         cal.persistent_residual,
         eff,
     );
-    let mut plans0: Vec<Vec<Act>> = cal
-        .years
-        .iter()
-        .map(|y| vec![Act::U; y.cycle_length_days as usize])
-        .collect();
-    let mut year_burden_points = vec![0_i32; cal.years.len()];
-    let (mut cycle_risks, mut row_survival) = sync_risk_state(
-        &cal.years,
-        &plans0,
-        cal.persistent_residual,
-        cal.protected_day_residual,
-        cal.withdrawal_residual,
-    );
-    let skip_initial = if opts.initial_action_locks.is_empty() {
-        HashSet::new()
-    } else {
-        apply_initial_action_locks(
-            &cal.years,
-            &opts,
-            cal.persistent_residual,
-            cal.protected_day_residual,
-            cal.withdrawal_residual,
-            &mut plans0,
-            &mut year_burden_points,
-            &mut cycle_risks,
-            &mut row_survival,
-        )?
-    };
-    let (plans, _, cr, asurv) = greedy_reduce_risk(
-        &cal.years,
-        &opts,
-        cal.persistent_residual,
-        cal.protected_day_residual,
-        cal.withdrawal_residual,
-        cal.allow_protected_day_method,
-        cal.allow_withdrawal,
-        &cal.ux,
-        plans0,
-        year_burden_points,
-        cycle_risks,
-        row_survival,
-        eff,
-        |y, d| skip_initial.contains(&(y, d)),
-    );
+    let (plans, _, cr, asurv, _) =
+        optimize_with_initial_locks(&cal, &opts, planning_eff, recovery_eff)?;
     let target_met = cumulative_target_met(total_cumulative_risk(&asurv), eff);
     Ok(build_planner_result(
         opts, &cal, &plans, &cr, &asurv, warnings, target_met,
@@ -938,6 +993,15 @@ struct MarginalCandidate {
     to_action: Act,
     score: f64,
     benefit: f64,
+}
+
+struct RelaxCandidate {
+    y: usize,
+    d: usize,
+    from_action: Act,
+    to_action: Act,
+    score: f64,
+    relief: f64,
 }
 
 /// Relative UX cost of withdrawal steps vs condom (README lattice).
@@ -1059,6 +1123,216 @@ fn best_marginal_upgrade(
         }
     }
     best
+}
+
+fn action_predecessors(
+    cur: Act,
+    allow_protected_day_method: bool,
+    protected_day_residual: f64,
+    allow_withdrawal: bool,
+    withdrawal_r: f64,
+) -> Vec<Act> {
+    match cur {
+        Act::U => vec![],
+        Act::W => vec![Act::U],
+        Act::C => {
+            let mut v = vec![Act::U];
+            if allow_withdrawal && protected_day_residual + 1e-15 < withdrawal_r {
+                v.push(Act::W);
+            }
+            v
+        }
+        Act::A => {
+            let mut v = Vec::new();
+            if allow_protected_day_method {
+                v.push(Act::C);
+            }
+            if allow_withdrawal && withdrawal_r > 1e-15 {
+                v.push(Act::W);
+            }
+            v
+        }
+    }
+}
+
+fn relax_toward_budget(
+    years: &[YearData],
+    opts: &UserOptions,
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
+    ux: &UxWeights,
+    plans: &mut [Vec<Act>],
+    year_burden_points: &mut [i32],
+    cycle_risks: &mut [f64],
+    row_survival: &mut [f64],
+    risk_budget: f64,
+    skip: impl Fn(usize, usize) -> bool,
+) {
+    loop {
+        let current_risk = total_cumulative_risk(row_survival);
+        if current_risk >= risk_budget {
+            break;
+        }
+        let Some(c) = best_marginal_downgrade(
+            years,
+            plans,
+            year_burden_points,
+            persistent_residual,
+            protected_day_residual,
+            withdrawal_r,
+            allow_protected_day_method,
+            allow_withdrawal,
+            opts,
+            ux,
+            cycle_risks,
+            row_survival,
+            risk_budget,
+            &skip,
+        ) else {
+            break;
+        };
+        apply_change(
+            c.y,
+            c.d,
+            c.from_action,
+            c.to_action,
+            plans,
+            year_burden_points,
+            years,
+            persistent_residual,
+            protected_day_residual,
+            withdrawal_r,
+            cycle_risks,
+            row_survival,
+        );
+    }
+}
+
+fn best_marginal_downgrade(
+    years: &[YearData],
+    plans: &[Vec<Act>],
+    year_burden_points: &[i32],
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
+    opts: &UserOptions,
+    ux: &UxWeights,
+    cycle_risks: &[f64],
+    row_survival: &[f64],
+    risk_budget: f64,
+    skip: impl Fn(usize, usize) -> bool,
+) -> Option<RelaxCandidate> {
+    let current_risk = total_cumulative_risk(row_survival);
+    let mut best: Option<RelaxCandidate> = None;
+    for y in 0..years.len() {
+        for d in 0..years[y].cycle_length_days as usize {
+            if skip(y, d) || years[y].base_risk_by_day[d] <= 0.0 {
+                continue;
+            }
+            let cur = plans[y][d];
+            for &to in action_predecessors(
+                cur,
+                allow_protected_day_method,
+                protected_day_residual,
+                allow_withdrawal,
+                withdrawal_r,
+            )
+            .iter()
+            {
+                let new_risk = cumulative_risk_if_change(
+                    y,
+                    d,
+                    cur,
+                    to,
+                    years,
+                    persistent_residual,
+                    protected_day_residual,
+                    withdrawal_r,
+                    cycle_risks,
+                    row_survival,
+                );
+                let risk_increase = new_risk - current_risk;
+                if risk_increase <= 1e-18 || new_risk > risk_budget + 1e-12 {
+                    continue;
+                }
+                let Some(relief) =
+                    marginal_upgrade_cost(y, d, to, cur, years, plans, year_burden_points, opts, ux)
+                else {
+                    continue;
+                };
+                if relief <= 0.0 {
+                    continue;
+                }
+                let score = relief / risk_increase;
+                let replace = match &best {
+                    None => true,
+                    Some(b) => {
+                        score > b.score + 1e-18
+                            || ((score - b.score).abs() <= 1e-18
+                                && relief > b.relief + 1e-18)
+                    }
+                };
+                if replace {
+                    best = Some(RelaxCandidate {
+                        y,
+                        d,
+                        from_action: cur,
+                        to_action: to,
+                        score,
+                        relief,
+                    });
+                }
+            }
+        }
+    }
+    best
+}
+
+fn cumulative_risk_if_change(
+    y: usize,
+    d: usize,
+    old_action: Act,
+    new_action: Act,
+    years: &[YearData],
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    cycle_risks: &[f64],
+    row_survival: &[f64],
+) -> f64 {
+    let old_mult = multiplier_for_action(
+        old_action,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+    );
+    let new_mult = multiplier_for_action(
+        new_action,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+    );
+    let base = years[y].base_risk_by_day[d];
+    let old_surv = 1.0 - cycle_risks[y];
+    let old_day_surv = 1.0 - base * old_mult;
+    let new_day_surv = 1.0 - base * new_mult;
+    let new_cycle_surv = if old_day_surv > 0.0 {
+        old_surv * (new_day_surv / old_day_surv)
+    } else {
+        0.0
+    };
+    let new_cycle_risk = (1.0 - new_cycle_surv).clamp(0.0, 1.0);
+    let new_row_survival = (1.0 - new_cycle_risk).powf(years[y].effective_cycles_per_year);
+    let mut survival = 1.0_f64;
+    for (idx, row) in row_survival.iter().enumerate() {
+        survival *= if idx == y { new_row_survival } else { *row };
+    }
+    1.0 - survival
 }
 
 fn time_weight(year_index: usize, opts: &UserOptions) -> f64 {
@@ -1307,11 +1581,11 @@ fn estimate_override_cost_for_day(
     let recovered = remaining <= 0.0;
     let note = if recovered {
         format!(
-            "Approx. recovery if overridden with {}: +{} condom day(s) and +{} abstinence day(s) elsewhere in the same cycle.",
+            "Approx. reserve recovery if overridden with {}: +{} condom day(s) and +{} abstinence day(s) elsewhere in the same cycle to restore the plan's risk cushion.",
             label, condom_days, abstain_days
         )
     } else {
-        "Approx. same-cycle recovery not fully available; this override would likely force a broader replanning of the current cycle and/or future cycles.".to_string()
+        "Approx. same-cycle reserve recovery is not fully available; this override would spend risk reserve and may require broader replanning of the current cycle and/or future cycles to restore the cushion.".to_string()
     };
 
     OverrideCost {

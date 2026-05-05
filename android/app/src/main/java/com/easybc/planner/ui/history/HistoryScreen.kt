@@ -43,11 +43,23 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
     val stats: StateFlow<CycleStatsState> = periods.map { periodList ->
         val cycles = cycleCalc.deriveCycles(periodList)
         val s = cycleCalc.computeStats(cycles)
-        CycleStatsState(s?.averageLength, s?.sdDays, s?.count ?: 0)
+        val count = s?.count ?: 0
+        CycleStatsState(
+            averageLength = s?.averageLength,
+            // Sample SD needs at least 2 cycle-length samples to be meaningful;
+            // computeStats returns 0.0 for count==1 which would render as "0.0 d SD"
+            // and lie to the user.
+            sdDays = if (count >= 2) s?.sdDays else null,
+            count = count,
+        )
     }.stateIn(viewModelScope, SharingStarted.Lazily, CycleStatsState())
 
     fun deletePeriod(record: PeriodRecord) {
         viewModelScope.launch { repo.deletePeriod(record) }
+    }
+
+    fun updatePeriod(record: PeriodRecord) {
+        viewModelScope.launch { repo.updatePeriod(record) }
     }
 }
 
@@ -80,9 +92,10 @@ fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
                         fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.height(12.dp))
-                    if (stats.count < 2) {
+                    if (periods.size < 2) {
                         Text(
-                            "Log at least 2 periods to see cycle statistics.",
+                            "Log at least 2 periods to see cycle statistics. " +
+                                "(${periods.size}/2 logged)",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -94,6 +107,14 @@ fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
                             StatItem("Cycles", stats.count.toString())
                             StatItem("Avg Length", stats.averageLength?.let { "%.1f d".format(it) } ?: "–")
                             StatItem("Variability", stats.sdDays?.let { "%.1f d SD".format(it) } ?: "–")
+                        }
+                        if (stats.count < 2) {
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Variability appears once you've logged at least 3 periods (2 full cycles).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -135,6 +156,7 @@ fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
             }
 
             var showDeleteConfirm by remember { mutableStateOf(false) }
+            var showEdit by remember { mutableStateOf(false) }
 
             OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
@@ -163,9 +185,26 @@ fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
+                            if (record.excludeFromStats) {
+                                Text(
+                                    "Excluded from stats",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                )
+                            }
+                        }
+                        if (!record.note.isNullOrBlank()) {
+                            Text(
+                                record.note,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
 
+                    IconButton(onClick = { showEdit = true }) {
+                        Icon(Icons.Default.Edit, "Edit")
+                    }
                     IconButton(onClick = { showDeleteConfirm = true }) {
                         Icon(
                             Icons.Default.Delete,
@@ -192,8 +231,80 @@ fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
                     },
                 )
             }
+
+            if (showEdit) {
+                EditPeriodDialog(
+                    record = record,
+                    onDismiss = { showEdit = false },
+                    onSave = { updated ->
+                        vm.updatePeriod(updated)
+                        showEdit = false
+                    },
+                )
+            }
         }
     }
+}
+
+/**
+ * Edit dialog for a single period: optional free-text note + a checkbox to
+ * exclude the period from stats. Stats-affecting changes propagate
+ * automatically through the period flow.
+ */
+@Composable
+private fun EditPeriodDialog(
+    record: PeriodRecord,
+    onDismiss: () -> Unit,
+    onSave: (PeriodRecord) -> Unit,
+) {
+    var note by remember(record.id) { mutableStateOf(record.note ?: "") }
+    var excludeFromStats by remember(record.id) { mutableStateOf(record.excludeFromStats) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit period") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text("Note (optional)") },
+                    placeholder = { Text("e.g. on antibiotics, traveling, heavier than usual") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Checkbox(
+                        checked = excludeFromStats,
+                        onCheckedChange = { excludeFromStats = it },
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Exclude from cycle statistics")
+                        Text(
+                            "Use for atypical periods (illness, medication, missed pill) so they don't skew your averages.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onSave(
+                    record.copy(
+                        note = note.takeIf { it.isNotBlank() },
+                        excludeFromStats = excludeFromStats,
+                    )
+                )
+            }) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
 }
 
 @Composable

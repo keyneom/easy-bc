@@ -100,10 +100,13 @@ fun PlannerScreen(vm: PlannerViewModel = viewModel()) {
 
 @Composable
 private fun RiskSummaryCard(result: PlannerResult) {
+    val projectedCumulativeRisk = totalProjectedRisk(result)
+    val target = result.optionsUsed.targetCumulativeFailure
+    val targetMet = projectedCumulativeRisk <= target + 1e-9
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (result.targetMet) {
+            containerColor = if (targetMet) {
                 MaterialTheme.colorScheme.primaryContainer
             } else {
                 MaterialTheme.colorScheme.errorContainer
@@ -116,16 +119,16 @@ private fun RiskSummaryCard(result: PlannerResult) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    if (result.targetMet) Icons.Default.CheckCircle else Icons.Default.Warning,
+                    if (targetMet) Icons.Default.CheckCircle else Icons.Default.Warning,
                     null,
-                    tint = if (result.targetMet) {
+                    tint = if (targetMet) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.error
                     },
                 )
                 Text(
-                    text = if (result.targetMet) "Target met" else "Target not met",
+                    text = if (targetMet) "Target met" else "Target not met",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                 )
@@ -139,11 +142,11 @@ private fun RiskSummaryCard(result: PlannerResult) {
             ) {
                 RiskStat(
                     label = "Achieved",
-                    value = formatPercent(result.achievedCumulativeRisk),
+                    value = formatPercent(projectedCumulativeRisk),
                 )
                 RiskStat(
                     label = "Target",
-                    value = formatPercent(result.optionsUsed.targetCumulativeFailure),
+                    value = formatPercent(target),
                 )
                 RiskStat(
                     label = "Horizon",
@@ -154,8 +157,13 @@ private fun RiskSummaryCard(result: PlannerResult) {
             Spacer(Modifier.height(12.dp))
 
             // Progress bar
-            val progress = (result.achievedCumulativeRisk / result.optionsUsed.targetCumulativeFailure)
-                .coerceIn(0.0, 1.5).toFloat()
+            val progress = if (target > 0.0) {
+                (projectedCumulativeRisk / target).coerceIn(0.0, 1.5).toFloat()
+            } else if (projectedCumulativeRisk > 0.0) {
+                1.5f
+            } else {
+                0f
+            }
             Column {
                 LinearProgressIndicator(
                     progress = { progress.coerceAtMost(1f) },
@@ -163,7 +171,7 @@ private fun RiskSummaryCard(result: PlannerResult) {
                         .fillMaxWidth()
                         .height(8.dp)
                         .clip(RoundedCornerShape(4.dp)),
-                    color = if (result.targetMet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    color = if (targetMet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
                 Spacer(Modifier.height(4.dp))
@@ -175,6 +183,12 @@ private fun RiskSummaryCard(result: PlannerResult) {
             }
         }
     }
+}
+
+private fun totalProjectedRisk(result: PlannerResult): Double {
+    val realized = result.optionsUsed.realizedCumulativeRisk.coerceIn(0.0, 1.0)
+    val planned = result.achievedCumulativeRisk.coerceIn(0.0, 1.0)
+    return (1.0 - (1.0 - realized) * (1.0 - planned)).coerceIn(0.0, 1.0)
 }
 
 @Composable

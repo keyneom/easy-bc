@@ -252,6 +252,10 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
                 onValueChange = { v -> vm.updateDraft { d -> d.copy(streakAversion = v.toDouble()) } },
             )
 
+            // ── Reminders ──
+            SectionHeader("Reminders")
+            ReminderSection(vm)
+
             // ── Device Calendar ──
             SectionHeader("Device Calendar")
             DeviceCalendarSection(vm)
@@ -298,6 +302,95 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
 
             Spacer(Modifier.height(80.dp)) // Room for FAB
         }
+    }
+}
+
+/**
+ * Opt-in daily reminder. The notification always prompts about **yesterday**
+ * because we can't know what happened today until it's fully elapsed —
+ * hence the morning-after default time and the copy below.
+ */
+@Composable
+private fun ReminderSection(vm: SettingsViewModel) {
+    val saved by vm.settings.collectAsState()
+    val enabled = saved?.reminderEnabled == true
+    val hour = saved?.reminderHour ?: 9
+    val minute = saved?.reminderMinute ?: 0
+
+    // Android 13+ requires POST_NOTIFICATIONS at runtime. Older API levels
+    // don't surface a launcher at all — the permission is implicitly granted.
+    var pendingEnableAfterPermission by remember { mutableStateOf(false) }
+    val notifPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted && pendingEnableAfterPermission) {
+            vm.setReminderEnabled(true)
+        }
+        pendingEnableAfterPermission = false
+    }
+
+    Text(
+        "Ask me each morning to confirm what actually happened yesterday. " +
+            "Keeps the plan accurate without any daily effort from you — " +
+            "the notification only fires about a day that's already complete.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Daily reconcile reminder", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                if (enabled) "On — asks about the previous day."
+                else "Off — no notifications are scheduled.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = { wantOn ->
+                if (!wantOn) {
+                    vm.setReminderEnabled(false)
+                    return@Switch
+                }
+                // Android 13+: request POST_NOTIFICATIONS before scheduling.
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    pendingEnableAfterPermission = true
+                    notifPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                } else {
+                    vm.setReminderEnabled(true)
+                }
+            },
+        )
+    }
+
+    if (enabled) {
+        Spacer(Modifier.height(8.dp))
+        Text("Time of day", style = MaterialTheme.typography.labelLarge)
+        IntField(
+            label = "Hour (0–23, 24-hour clock)",
+            value = hour,
+            range = 0..23,
+            onValueChange = { h -> vm.setReminderTime(h, minute) },
+        )
+        IntField(
+            label = "Minute",
+            value = minute,
+            range = 0..59,
+            onValueChange = { m -> vm.setReminderTime(hour, m) },
+        )
+        Text(
+            "Alarm uses inexact scheduling (±10 min) to avoid draining your " +
+                "battery. Reboot your phone and the alarm re-arms itself.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

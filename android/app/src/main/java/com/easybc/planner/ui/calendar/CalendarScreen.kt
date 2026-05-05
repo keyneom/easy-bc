@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -22,10 +23,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -41,7 +45,10 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
+fun CalendarScreen(
+    onOpenReconcile: () -> Unit = {},
+    vm: CalendarViewModel = viewModel(),
+) {
     val currentMonth by vm.currentMonth.collectAsState()
     val viewMode by vm.viewMode.collectAsState()
     val monthCells by vm.monthCells.collectAsState()
@@ -51,6 +58,8 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
     val selectedDetail by vm.selectedDayDetail.collectAsState()
     val settings by vm.settings.collectAsState()
     val plan by vm.plannerResult.collectAsState()
+    val unreconciledCount by vm.unreconciledCount.collectAsState()
+    val cycleLedger by vm.currentCycleLedger.collectAsState()
 
     Scaffold(
         topBar = {
@@ -161,21 +170,113 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                         )
                     }
                 }
+
+                // Open-period nudge — appears when there's a period whose
+                // predicted end is already past. Tapping selects today and
+                // opens the day-detail sheet so the user can confirm the
+                // end date in one move.
+                val openPeriodPast by vm.openPeriodPastPrediction.collectAsState()
+                if (openPeriodPast != null) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                vm.selectDate(java.time.LocalDate.now())
+                            },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Period still open past predicted end. Tap today to confirm or extend.",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                "Confirm →",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+
+                // Reconciliation nudge — appears only when there's concrete
+                // work (past U/W/C days the user hasn't confirmed yet). Tapping
+                // it opens the batch-reconcile screen.
+                if (unreconciledCount > 0) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenReconcile),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Reconcile $unreconciledCount past " +
+                                    if (unreconciledCount == 1) "day" else "days",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                "Review →",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
             }
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
-            when (viewMode) {
-                CalendarViewMode.MONTH -> MonthGrid(
-                    cells = monthCells,
-                    selectedDate = selectedDate,
-                    onDateClick = { vm.selectDate(it.date) },
-                )
-                CalendarViewMode.WEEK -> WeekStrip(
-                    cells = weekCells,
-                    selectedDate = selectedDate,
-                    onDateClick = { vm.selectDate(it.date) },
-                )
+            // Horizontal swipe to advance the calendar: left swipe = next
+            // month/week, right swipe = previous. Only fires after a real
+            // horizontal drag, so cell taps still pass through.
+            val density = LocalDensity.current
+            val swipeThresholdPx = with(density) { 64.dp.toPx() }
+            val dragAccumulator = remember { mutableFloatStateOf(0f) }
+            Box(
+                modifier = Modifier.pointerInput(viewMode) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { dragAccumulator.floatValue = 0f },
+                        onDragEnd = {
+                            val dx = dragAccumulator.floatValue
+                            when {
+                                dx <= -swipeThresholdPx ->
+                                    if (viewMode == CalendarViewMode.MONTH) vm.navigateMonth(1)
+                                    else vm.navigateWeek(1)
+                                dx >= swipeThresholdPx ->
+                                    if (viewMode == CalendarViewMode.MONTH) vm.navigateMonth(-1)
+                                    else vm.navigateWeek(-1)
+                            }
+                            dragAccumulator.floatValue = 0f
+                        },
+                        onDragCancel = { dragAccumulator.floatValue = 0f },
+                    ) { _, dragAmount ->
+                        dragAccumulator.floatValue += dragAmount
+                    }
+                },
+            ) {
+                when (viewMode) {
+                    CalendarViewMode.MONTH -> MonthGrid(
+                        cells = monthCells,
+                        selectedDate = selectedDate,
+                        onDateClick = { vm.selectDate(it.date) },
+                    )
+                    CalendarViewMode.WEEK -> WeekStrip(
+                        cells = weekCells,
+                        selectedDate = selectedDate,
+                        onDateClick = { vm.selectDate(it.date) },
+                    )
+                }
             }
 
             // Derive which action types are active based on the plan result
@@ -190,6 +291,16 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                 activeActions = activeActions,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
+
+            // Cycle risk ledger — shows logged risk, current replanned cycle
+            // risk, and abstinence credits. Only appears when we have a plan +
+            // today falls inside a known cycle.
+            cycleLedger?.let { ledger ->
+                CycleLedgerCard(
+                    ledger = ledger,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
         }
 
         // Day detail bottom sheet
@@ -200,13 +311,27 @@ fun CalendarScreen(vm: CalendarViewModel = viewModel()) {
                     ?: setOf(RecommendedAction.U, RecommendedAction.C, RecommendedAction.A)
             }
 
+            val signalsDefaultExpanded by vm.hasEverLoggedObservations.collectAsState()
             DayDetailSheet(
                 cell = selectedDetail!!,
                 activeActions = activeActions,
+                signalsDefaultExpanded = signalsDefaultExpanded,
                 onDismiss = { vm.dismissDayDetail() },
                 onLogPeriodStart = { vm.logPeriodStart(selectedDetail!!.date) },
+                onClearPeriodStart = { vm.clearPeriodStart(selectedDetail!!.date) },
                 onLogPeriodEnd = { vm.endCurrentPeriod(selectedDetail!!.date) },
+                onClearPeriodEnd = { vm.clearPeriodEnd(selectedDetail!!.date) },
                 onLogAction = { action -> vm.logDayAction(selectedDetail!!.date, action) },
+                onLogObservations = { mucus, bbt, opk, mitt, tender ->
+                    vm.logDayObservations(
+                        date = selectedDetail!!.date,
+                        mucus = mucus,
+                        bbtCelsius = bbt,
+                        opk = opk,
+                        mittelschmerz = mitt,
+                        breastTender = tender,
+                    )
+                },
             )
         }
     }
@@ -303,14 +428,27 @@ fun DayCell(
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
         )
 
-        // Period dot
+        // Period dot. Filled when the bleed window is user-confirmed
+        // (period.endDate set and this day is inside it). Hollow ring when
+        // it's still predicted (open period whose end is extrapolated from
+        // history) so users can tell at a glance which days they've
+        // confirmed vs. which are guesses.
         if (cell.isPeriod) {
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(PeriodColor),
-            )
+            if (cell.isPeriodPredicted) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .border(1.dp, PeriodColor, CircleShape),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(PeriodColor),
+                )
+            }
         }
 
         // Action badge
@@ -384,6 +522,94 @@ fun ActionLegend(
             LegendItem(color = ActionAbstain, label = "Abstain")
         }
         LegendItem(color = PeriodColor, label = "Period")
+    }
+}
+
+/**
+ * Small at-a-glance card showing the current cycle's logged risk vs. the
+ * current replanned cycle risk, plus explicit NONE logs in this cycle.
+ *
+ * The visual is a linear progress bar colored green when the replanned
+ * horizon meets target and red when the target can no longer be met.
+ */
+@Composable
+private fun CycleLedgerCard(
+    ledger: CycleLedger,
+    modifier: Modifier = Modifier,
+) {
+    OutlinedCard(modifier = modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Cycle risk ledger",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    "Day ${ledger.currentDayInCycle} of ${ledger.cycleLengthDays}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+            val fraction = when {
+                ledger.plannedCycleRisk > 0 ->
+                    (ledger.realizedSoFar / ledger.plannedCycleRisk).toFloat().coerceIn(0f, 1f)
+                ledger.realizedSoFar > 0 -> 1f
+                else -> 0f
+            }
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp)),
+                color = if (ledger.overBudget) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    "Logged ${"%.2f".format(ledger.realizedSoFar * 100)}%; plan ${"%.2f".format(ledger.plannedCycleRisk * 100)}%",
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                if (ledger.abstinenceCredits > 0) {
+                    Text(
+                        "+${ledger.abstinenceCredits} abstinence credit" +
+                            if (ledger.abstinenceCredits == 1) "" else "s",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+            if (ledger.cycleOverPlan && ledger.targetMet) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Reserve covering cycle overage",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            if (!ledger.targetMet) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Horizon over target: ${"%.2f".format(ledger.horizonRisk * 100)}% of ${"%.2f".format(ledger.horizonTarget * 100)}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
     }
 }
 

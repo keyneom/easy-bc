@@ -126,6 +126,12 @@ class EasyBCCalendarSync(private val context: Context) {
         val periodLabel = settings.calendarLabelPeriod
         val fertileLabel = settings.calendarLabelFertile
 
+        // Per-cycle atypical flags (anovulatory heuristic). Only closed
+        // observed cycles can be flagged; predicted and active cycles are
+        // treated as NORMAL because we can't measure their bleeding duration
+        // or final length yet.
+        val cycleFlags = cycleCalc.flagObservedCycles(periods)
+
         // Collect per-day components across all sources, then emit.
         val perDay = HashMap<LocalDate, DayParts>()
         fun parts(date: LocalDate) = perDay.getOrPut(date) { DayParts() }
@@ -165,9 +171,17 @@ class EasyBCCalendarSync(private val context: Context) {
         for (cycle in coverageCycles) {
             val ovulationDay = cycle.lengthDays - 14
             if (ovulationDay < 1) continue
+            // Widen the window on *this* cycle if it's flagged atypical —
+            // anovulatory-looking cycles warrant more uncertainty, not
+            // narrower estimates.
+            val flag = cycleFlags[cycle.startDate] ?: CycleCalculator.CycleFlag.NORMAL
+            val extra = if (flag != CycleCalculator.CycleFlag.NORMAL)
+                CycleCalculator.ATYPICAL_CYCLE_FERTILE_WINDOW_EXTRA_DAYS
+            else 0
+            val halfWidth = fertileHalfWidth + extra
             val windowStart = cycle.startDate
-                .plusDays((ovulationDay - fertileHalfWidth - 1).toLong().coerceAtLeast(0))
-            val windowEnd = cycle.startDate.plusDays((ovulationDay + 1 - 1).toLong())
+                .plusDays((ovulationDay - halfWidth - 1).toLong().coerceAtLeast(0))
+            val windowEnd = cycle.startDate.plusDays((ovulationDay + 1 - 1 + extra).toLong())
             if (windowEnd.isBefore(windowStart)) continue
             var d = windowStart
             while (!d.isAfter(windowEnd)) {

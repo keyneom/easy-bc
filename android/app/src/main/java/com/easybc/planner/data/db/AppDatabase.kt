@@ -15,6 +15,21 @@ data class PeriodRecord(
     val startDate: Long,
     /** Epoch day of last bleeding day. Null if period is ongoing. */
     val endDate: Long? = null,
+    /**
+     * Free-text note about this period — set by the user from the History
+     * edit dialog. Use cases: medications, illness, travel, anything they
+     * want to remember about why this period was unusual.
+     */
+    val note: String? = null,
+    /**
+     * When true, this period is excluded from cycle-statistics calculations
+     * (cycle length posterior, mean bleed duration, atypical-flag scoring).
+     * Lets users keep an atypical period on the calendar without polluting
+     * the prediction baseline. The cycle from THIS period to the previous
+     * one and from THIS period to the next one are both excluded — bridging
+     * across an excluded record would invent a phantom 2x-length cycle.
+     */
+    val excludeFromStats: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
 )
 
@@ -22,9 +37,56 @@ data class PeriodRecord(
 data class DayLog(
     /** Epoch day — one log per calendar day. */
     @PrimaryKey val date: Long,
-    /** What the user actually did: "U", "W", "C", or "A". */
+    /**
+     * What the user actually did. Planner-recommended actions:
+     * - "U" unprotected
+     * - "W" withdrawal
+     * - "C" protected (barrier)
+     * - "A" abstain (planner-recommended; no intercourse)
+     *
+     * Reconciliation outcomes (not planner-recommended; user's post-hoc
+     * confirmation of what happened on a day that had been planned):
+     * - "NONE" no intercourse happened (whether the plan was C/U/W/A — this
+     *   is treated as voluntary abstinence for risk purposes: zero realized
+     *   risk for the day, which yields "abstinence credit" for later in the
+     *   cycle).
+     * - "CB"   planned C, but the barrier broke — treated as realized U for
+     *   risk purposes.
+     */
     val actualAction: String,
     val notes: String? = null,
+    // ── Optional body signals (all opt-in, never required) ──
+    /**
+     * Cervical-mucus observation:
+     * "dry" | "sticky" | "creamy" | "eggwhite" | "spotting" | null.
+     * Values loosely correspond to rising fertility. Used (if present) to
+     * narrow and shift the predicted fertile window.
+     */
+    val mucus: String? = null,
+    /**
+     * Basal body temperature in °C (manual entry). Used to detect the
+     * post-ovulation thermal shift retrospectively.
+     */
+    val bbtCelsius: Double? = null,
+    /**
+     * Ovulation predictor (LH) test result:
+     * "negative" | "positive" | "peak" | null.
+     */
+    val opk: String? = null,
+    /** Ovulation pain (Mittelschmerz) reported for the day. */
+    val mittelschmerz: Boolean = false,
+    /** Breast tenderness reported for the day. */
+    val breastTender: Boolean = false,
+    /**
+     * True once the user has confirmed what actually happened on this day
+     * (either matching the plan or correcting it). Lets the reconciliation
+     * chip know which past days it still needs to prompt for.
+     *
+     * Days the user logs proactively (e.g. via the Day Detail sheet) count
+     * as reconciled automatically; the chip only surfaces days the user
+     * hasn't touched.
+     */
+    val reconciled: Boolean = false,
 )
 
 @Entity(tableName = "user_settings")
@@ -70,6 +132,20 @@ data class UserSettingsEntity(
     val calendarLabelActionC: String = "C",
     val calendarLabelActionA: String = "A",
     val calendarLabelActionW: String = "W",
+    /**
+     * If true, the app schedules a local daily reminder to prompt the user
+     * to reconcile the previous day's plan. Purely opt-in; no default-on.
+     */
+    val reminderEnabled: Boolean = false,
+    /**
+     * Local hour-of-day (0..23) for the daily reminder. Defaults to 9 am
+     * because the reminder is intentionally framed as "about yesterday" —
+     * we can only ask the user to reconcile a day that's already over, so
+     * a morning-after time is the natural default.
+     */
+    val reminderHour: Int = 9,
+    /** Local minute-of-hour (0..59) for the daily reminder. */
+    val reminderMinute: Int = 0,
 )
 
 // ── DAOs ──
@@ -121,6 +197,22 @@ interface DayLogDao {
     @Query("SELECT * FROM day_logs ORDER BY date ASC")
     suspend fun getAll(): List<DayLog>
 
+    /**
+     * Flow of days that happened on or after [fromEpochDay], strictly before
+     * [beforeEpochDay], that the user hasn't explicitly reconciled. Used by
+     * the reconciliation chip to surface only past days the user hasn't
+     * already confirmed.
+     */
+    @Query(
+        "SELECT * FROM day_logs " +
+            "WHERE date >= :fromEpochDay AND date < :beforeEpochDay AND reconciled = 0 " +
+            "ORDER BY date ASC"
+    )
+    fun getUnreconciledInRangeFlow(fromEpochDay: Long, beforeEpochDay: Long): Flow<List<DayLog>>
+
+    @Query("UPDATE day_logs SET reconciled = 1 WHERE date = :epochDay")
+    suspend fun markReconciled(epochDay: Long)
+
     @Query("DELETE FROM day_logs")
     suspend fun deleteAll()
 }
@@ -141,7 +233,7 @@ interface UserSettingsDao {
 
 @Database(
     entities = [PeriodRecord::class, DayLog::class, UserSettingsEntity::class],
-    version = 4,
+    version = 7,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -192,6 +284,47 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v4 → v5: added optional body-signal columns and reconciliation flag
+         * to day_logs. All new fields are nullable / false-default so existing
+         * rows read back unchanged.
+         */
+        val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE day_logs ADD COLUMN mucus TEXT")
+                db.execSQL("ALTER TABLE day_logs ADD COLUMN bbtCelsius REAL")
+                db.execSQL("ALTER TABLE day_logs ADD COLUMN opk TEXT")
+                db.execSQL("ALTER TABLE day_logs ADD COLUMN mittelschmerz INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE day_logs ADD COLUMN breastTender INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE day_logs ADD COLUMN reconciled INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v5 → v6: added three daily-reminder fields to user_settings. All
+         * defaults match the entity's Kotlin defaults (off, 9 pm).
+         */
+        val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN reminderEnabled INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN reminderHour INTEGER NOT NULL DEFAULT 9")
+                db.execSQL("ALTER TABLE user_settings ADD COLUMN reminderMinute INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        /**
+         * v6 → v7: added `note` (nullable) and `excludeFromStats` to
+         * period_records so users can flag atypical periods (illness, blood
+         * thinners, etc.) without losing the record. Existing rows take the
+         * defaults: no note, included in stats.
+         */
+        val MIGRATION_6_7: Migration = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE period_records ADD COLUMN note TEXT")
+                db.execSQL("ALTER TABLE period_records ADD COLUMN excludeFromStats INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -199,7 +332,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "easybc.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(
+                        MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
+                    )
                     // NOTE: no fallbackToDestructiveMigration — we never want
                     // to silently wipe user data. If a future schema bump
                     // lacks a migration the build will crash loudly on open,

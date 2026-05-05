@@ -14,5 +14,11 @@ fn default_is_5pct_cumulative_over_default_horizon() {
         "default run should meet 5% cumulative over {} years",
         out.options_used.horizon_years
     );
+    assert!(
+        (out.achieved_cumulative_risk / out.options_used.target_cumulative_failure - 0.85).abs()
+            < 0.01,
+        "default run should intentionally preserve about 15% risk reserve, got {:.1}% used",
+        100.0 * out.achieved_cumulative_risk / out.options_used.target_cumulative_failure
+    );
     assert!(out.target_met);
 }

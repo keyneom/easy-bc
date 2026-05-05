@@ -53,7 +53,7 @@ class CalendarAutoSync(
                 repo.settingsFlow,
                 repo.periodsFlow,
                 repo.dayLogsFlow,
-                repo.plannerResultFlow,
+                repo.calendarPlannerResultFlow,
             ) { settings, periods, dayLogs, plan ->
                 if (settings?.calendarSyncEnabled == true && settings.onboardingComplete) {
                     Snapshot(settings, periods, dayLogs, plan)

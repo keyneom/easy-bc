@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark-mode variant: light-pink background. -->
+    <color name="ic_launcher_background">#FFE0EC</color>
+</resources>

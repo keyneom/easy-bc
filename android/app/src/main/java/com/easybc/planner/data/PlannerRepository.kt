@@ -27,7 +27,12 @@ class PlannerRepository(
      */
     val plannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
         if (s == null || !s.onboardingComplete) return@combine null
-        computePlan(s, p, d)
+        computePlan(s, p, d, useCalendarCycles = false)
+    }.flowOn(Dispatchers.Default)
+
+    val calendarPlannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
+        if (s == null || !s.onboardingComplete) return@combine null
+        computePlan(s, p, d, useCalendarCycles = true)
     }.flowOn(Dispatchers.Default)
 
     /** Run the planner synchronously (called on Dispatchers.Default). */
@@ -35,6 +40,7 @@ class PlannerRepository(
         settings: UserSettingsEntity,
         periods: List<PeriodRecord>,
         dayLogs: List<DayLog>,
+        useCalendarCycles: Boolean,
     ): PlannerResult? {
         val condomMode = try {
             CondomMode.entries.first { it.name.lowercase() == settings.condomMode }
@@ -58,19 +64,36 @@ class PlannerRepository(
         }
 
         val observedCycles = cycleCalc.deriveCycles(periods)
-        // Wall-calendar mode requires at least 2 closed observed cycles to
-        // anchor the user's personal length/variability. Below that, we let
-        // the core run in abstract-horizon mode.
-        val calendarCycles = if (observedCycles.size >= 2) {
+        // Wall-calendar mode needs one closed observed cycle so the active
+        // cycle can be anchored to real dates. The posterior still shrinks
+        // heavily toward the age prior while history is short.
+        val calendarCycles = if (useCalendarCycles && observedCycles.isNotEmpty()) {
             cycleCalc.buildCalendarCycles(periods, settings)
         } else {
             null
         }
 
-        // Realized risk needs to see the active cycle too (a logged U/W day
-        // during the current cycle would otherwise be skipped).
+        // Logged day actions need to see the active cycle too. In calendar
+        // mode, feed them into the core as fixed actions so the optimizer
+        // replans around what actually happened instead of using a separate
+        // approximate budget burn.
         val coverageCycles = cycleCalc.buildCoverageCycles(periods, settings)
-        val realizedRisk = computeRealizedRisk(dayLogs, coverageCycles, settings)
+        val loggedActionLocks = if (calendarCycles != null) {
+            buildLoggedActionLocks(
+                dayLogs = dayLogs,
+                coverageCycles = coverageCycles,
+                planRowCount = calendarCycles.size,
+                protectedDayMethod = protectedDayMethod,
+                withdrawalMode = withdrawalMode,
+            )
+        } else {
+            emptyList()
+        }
+        val realizedRisk = if (calendarCycles == null) {
+            computeRealizedRisk(dayLogs, coverageCycles, settings)
+        } else {
+            0.0
+        }
 
         val options = UserOptions(
             ageYears = settings.ageYears,
@@ -92,6 +115,7 @@ class PlannerRepository(
             ovulationSdDays = settings.ovulationSdDays,
             calendarCycles = calendarCycles?.takeIf { it.isNotEmpty() },
             realizedCumulativeRisk = realizedRisk.coerceAtMost(settings.targetCumulativeFailure),
+            initialActionLocks = loggedActionLocks,
         )
 
         val json = PlannerJson.encodeToString(UserOptions.serializer(), options)
@@ -146,6 +170,10 @@ class PlannerRepository(
                 "W" -> settings.withdrawalRelativeRisk
                 "C" -> 0.03  // approximate condom residual
                 "A" -> 0.0
+                // Reconciliation outcomes:
+                "NONE" -> 0.0  // "abstained" — no intercourse, regardless of what was planned
+                "CB" -> 1.0    // condom broke — treat as realized U
+                // "" (observations-only row) or unknown → contribute no risk
                 else -> 0.0
             }
 
@@ -154,6 +182,40 @@ class PlannerRepository(
         }
 
         return (1.0 - survivalProduct).coerceIn(0.0, 1.0)
+    }
+
+    private fun buildLoggedActionLocks(
+        dayLogs: List<DayLog>,
+        coverageCycles: List<CycleCalculator.DerivedCycle>,
+        planRowCount: Int,
+        protectedDayMethod: ProtectedDayMethod,
+        withdrawalMode: WithdrawalMode,
+    ): List<DayOverride> {
+        if (dayLogs.isEmpty() || coverageCycles.isEmpty() || planRowCount <= 0) return emptyList()
+
+        val allowProtected = protectedDayMethod != ProtectedDayMethod.None
+        val allowWithdrawal = withdrawalMode != WithdrawalMode.None
+
+        return dayLogs.mapNotNull { log ->
+            val lockedAction = when (log.actualAction) {
+                "U", "CB" -> RecommendedAction.U
+                "W" -> if (allowWithdrawal) RecommendedAction.W else RecommendedAction.U
+                "C" -> if (allowProtected) RecommendedAction.C else RecommendedAction.U
+                "A", "NONE" -> RecommendedAction.A
+                else -> null
+            } ?: return@mapNotNull null
+
+            val date = LocalDate.ofEpochDay(log.date)
+            val (cycleIdx, dayInCycle) = cycleCalc.dateToCycleDay(date, coverageCycles)
+                ?: return@mapNotNull null
+            if (cycleIdx !in 0 until planRowCount) return@mapNotNull null
+
+            DayOverride(
+                yearIndex = cycleIdx,
+                day = dayInCycle,
+                action = lockedAction,
+            )
+        }.sortedWith(compareBy<DayOverride> { it.yearIndex }.thenBy { it.day })
     }
 
     private fun ageMultiplier(age: Int): Double = when {
@@ -201,14 +263,95 @@ class PlannerRepository(
 
     // ── Day log mutations ──
 
+    /**
+     * Log what actually happened on a day. Preserves any already-logged
+     * body-signal fields (mucus/BBT/OPK/Mittelschmerz/breast tenderness)
+     * and notes unless explicitly overwritten. A logged day is considered
+     * reconciled automatically, so it won't show up in the reconciliation
+     * chip.
+     */
     suspend fun logDay(date: LocalDate, action: RecommendedAction, notes: String? = null) {
-        dayLogDao.upsert(
-            DayLog(
-                date = date.toEpochDay(),
-                actualAction = action.shortLabel,
-                notes = notes,
-            )
+        reconcileDay(date, action.shortLabel, notes)
+    }
+
+    /**
+     * Reconcile a specific day to an action string. Accepts the planner
+     * actions (U/W/C/A) plus the reconciliation-only outcomes:
+     *   - "NONE" — no intercourse happened
+     *   - "CB"   — planned C but breakage
+     *
+     * The call is idempotent and merge-safe: we preserve any already-logged
+     * body signals and notes (unless [notes] is non-null, in which case we
+     * overwrite).
+     */
+    suspend fun reconcileDay(
+        date: LocalDate,
+        actualAction: String,
+        notes: String? = null,
+    ) {
+        val existing = dayLogDao.getForDate(date.toEpochDay())
+        val merged = existing?.copy(
+            actualAction = actualAction,
+            notes = notes ?: existing.notes,
+            reconciled = true,
+        ) ?: DayLog(
+            date = date.toEpochDay(),
+            actualAction = actualAction,
+            notes = notes,
+            reconciled = true,
         )
+        dayLogDao.upsert(merged)
+    }
+
+    /**
+     * Reconcile a contiguous range of days to the same action. Used by the
+     * batch reconciliation UI for "we were traveling for a week, mark all
+     * these days as abstained" style bulk entry. Body signals on each day
+     * are preserved.
+     */
+    suspend fun reconcileRange(
+        startInclusive: LocalDate,
+        endInclusive: LocalDate,
+        actualAction: String,
+    ) {
+        var d = startInclusive
+        while (!d.isAfter(endInclusive)) {
+            reconcileDay(d, actualAction)
+            d = d.plusDays(1)
+        }
+    }
+
+    /**
+     * Save optional body signals for a day without overwriting action/notes
+     * already logged. A row created purely from observations has
+     * `actualAction = ""` and `reconciled = false` — it still shows up in
+     * the reconciliation chip so the user can confirm what happened.
+     */
+    suspend fun logObservations(
+        date: LocalDate,
+        mucus: String? = null,
+        bbtCelsius: Double? = null,
+        opk: String? = null,
+        mittelschmerz: Boolean = false,
+        breastTender: Boolean = false,
+    ) {
+        val existing = dayLogDao.getForDate(date.toEpochDay())
+        val merged = existing?.copy(
+            mucus = mucus,
+            bbtCelsius = bbtCelsius,
+            opk = opk,
+            mittelschmerz = mittelschmerz,
+            breastTender = breastTender,
+        ) ?: DayLog(
+            date = date.toEpochDay(),
+            actualAction = "",
+            mucus = mucus,
+            bbtCelsius = bbtCelsius,
+            opk = opk,
+            mittelschmerz = mittelschmerz,
+            breastTender = breastTender,
+        )
+        dayLogDao.upsert(merged)
     }
 
     suspend fun getDayLog(date: LocalDate): DayLog? {
@@ -218,4 +361,12 @@ class PlannerRepository(
     fun dayLogsForRange(start: LocalDate, end: LocalDate): Flow<List<DayLog>> {
         return dayLogDao.getForRangeFlow(start.toEpochDay(), end.toEpochDay())
     }
+
+    /**
+     * Flow of past days (on or after [fromEpochDay], before [beforeEpochDay])
+     * that haven't been reconciled. Used by the home-screen reconciliation
+     * chip to surface only actionable items.
+     */
+    fun unreconciledLogsFlow(fromEpochDay: Long, beforeEpochDay: Long) =
+        dayLogDao.getUnreconciledInRangeFlow(fromEpochDay, beforeEpochDay)
 }

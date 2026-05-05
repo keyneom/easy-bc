@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.easybc.planner.EasyBCApp
 import com.easybc.planner.data.db.UserSettingsEntity
 import com.easybc.planner.io.DataBackup
+import com.easybc.planner.notify.ReminderScheduler
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -77,7 +78,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     return@launch
                 }
                 val periods = repo.periodsFlow.first()
-                val plan = repo.plannerResultFlow.first()
+                val plan = repo.calendarPlannerResultFlow.first()
                 val result = calendarSync.syncEvents(
                     periods = periods,
                     plan = plan,
@@ -181,4 +182,49 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun defaultBackupFilename(): String = DataBackup.defaultFilename()
+
+    // ── Daily reminder ──────────────────────────────────────────────────
+
+    /**
+     * Flip the reminder toggle, persist, and reconcile the alarm state.
+     * Caller (the UI) must ensure POST_NOTIFICATIONS has been requested on
+     * Android 13+ before calling with [enabled]=true; if permission isn't
+     * granted the alarm still schedules but the receiver will drop the
+     * notification silently until the user flips it on in system settings.
+     */
+    fun setReminderEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            val current = repo.getSettings() ?: UserSettingsEntity()
+            val updated = current.copy(reminderEnabled = enabled)
+            repo.saveSettings(updated)
+            _draft.value = _draft.value.copy(reminderEnabled = enabled)
+            applyReminderSchedule(updated)
+        }
+    }
+
+    /** Persist a new reminder time-of-day and re-schedule the alarm. */
+    fun setReminderTime(hour: Int, minute: Int) {
+        viewModelScope.launch {
+            val current = repo.getSettings() ?: UserSettingsEntity()
+            val updated = current.copy(
+                reminderHour = hour.coerceIn(0, 23),
+                reminderMinute = minute.coerceIn(0, 59),
+            )
+            repo.saveSettings(updated)
+            _draft.value = _draft.value.copy(
+                reminderHour = updated.reminderHour,
+                reminderMinute = updated.reminderMinute,
+            )
+            applyReminderSchedule(updated)
+        }
+    }
+
+    private fun applyReminderSchedule(settings: UserSettingsEntity) {
+        if (settings.reminderEnabled) {
+            ReminderScheduler.ensureChannel(app)
+            ReminderScheduler.schedule(app, settings.reminderHour, settings.reminderMinute)
+        } else {
+            ReminderScheduler.cancel(app)
+        }
+    }
 }
