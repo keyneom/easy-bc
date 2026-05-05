@@ -25,14 +25,14 @@ fn golden_typical_1pct_reference() {
     .unwrap();
     assert!(out.target_met);
     assert!(
-        (out.achieved_cumulative_risk - 0.008491250729185773).abs() < 1e-12,
+        (out.achieved_cumulative_risk - 0.008499057127871912).abs() < 1e-12,
         "risk {}",
         out.achieved_cumulative_risk
     );
     assert_eq!(plan_string(&out.years[0]), "UCAAAAAAAAAAAAAAAAAAACUUUUUU");
     assert_eq!(plan_string(&out.years[1]), "UCAAAAAAAAAAAAAAAAAAACUUUUUU");
     assert!(
-        (out.validation.selected_condom_residual - 0.0313468836911448).abs() < 1e-12,
+        (out.validation.selected_condom_residual - 0.029733441148218187).abs() < 1e-12,
         "residual {}",
         out.validation.selected_condom_residual
     );
@@ -51,12 +51,12 @@ fn golden_example_readme() {
     let out = fertility_risk_planner(opts).unwrap();
     assert!(out.target_met);
     assert!(
-        (out.achieved_cumulative_risk - 0.016611451101677388).abs() < 1e-12,
+        (out.achieved_cumulative_risk - 0.016862027404931812).abs() < 1e-12,
         "risk {}",
         out.achieved_cumulative_risk
     );
-    assert_eq!(plan_string(&out.years[0]), "UCCCCACAAACAAACACACCCCUUUUUU");
-    assert_eq!(plan_string(&out.years[1]), "UCCCCCCACACAAACACACCCCUUUUUU");
+    assert_eq!(plan_string(&out.years[0]), "UCCCCACAAACAAACACAACCCUUUUUU");
+    assert_eq!(plan_string(&out.years[1]), "UCCCCACACACAAACACAACCCUUUUUU");
 }
 
 #[test]
@@ -69,10 +69,10 @@ fn golden_hold_lifecycle_constant() {
     };
     let out = fertility_risk_planner(opts).unwrap();
     assert_eq!(plan_string(&out.years[0]), "UCCAAAAAAAAAAAAAAAAACCUUUUUU");
-    assert_eq!(plan_string(&out.years[1]), "UCAAAACAAAAAAAAAAAAACCUUUUUU");
-    assert_eq!(plan_string(&out.years[2]), "UCCAAAAAAAAAAAAAAAAACCUUUUUU");
+    assert_eq!(plan_string(&out.years[1]), "UCCAAAAAAAAAAAAAAAAACCUUUUUU");
+    assert_eq!(plan_string(&out.years[2]), "UCAAAACAAAAAAAAAAAAACCUUUUUU");
     assert!(
-        (out.achieved_cumulative_risk - 0.008317761501237086).abs() < 1e-12,
+        (out.achieved_cumulative_risk - 0.008457680984374605).abs() < 1e-12,
         "risk {}",
         out.achieved_cumulative_risk
     );
@@ -85,7 +85,7 @@ fn sdm_validation_annual_risk_matches_js() {
         ..Default::default()
     })
     .unwrap();
-    let expected = 0.1136927258950372_f64;
+    let expected = 0.11949012638049372_f64;
     assert!(
         (out.validation.sdm_reference.simulated_annual_risk - expected).abs() < 1e-12,
         "sdm {}",

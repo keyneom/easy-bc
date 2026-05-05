@@ -13,8 +13,8 @@ pub use error::PlannerError;
 pub use optimizer::{effective_cumulative_target, fertility_risk_planner, replan_preview};
 pub use types::{
     BodySignalInputs, CondomMode, CycleInstance, DayOverride, PersistentMethod, PlanDayDiff,
-    PlannerResult, ProtectedDayMethod, RecommendedAction, ReplanPreview,
-    ReplanPreviewRequest, UserOptions, WithdrawalMode,
+    PlannerResult, ProtectedDayMethod, RecommendedAction, ReplanPreview, ReplanPreviewRequest,
+    UserOptions, WithdrawalMode,
 };
 
 /// JSON API for FFI/WASM hosts.

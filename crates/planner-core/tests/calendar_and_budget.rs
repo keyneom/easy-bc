@@ -1,8 +1,8 @@
 //! Calendar-mode horizons and realized risk budget.
 
 use planner_core::types::{
-    BodySignalInputs, CondomMode, CycleInstance, DayOverride, PersistentMethod,
-    ProtectedDayMethod, RecommendedAction, UserOptions, WithdrawalMode,
+    BodySignalInputs, CondomMode, CycleInstance, DayOverride, PersistentMethod, ProtectedDayMethod,
+    RecommendedAction, UserOptions, WithdrawalMode,
 };
 use planner_core::{effective_cumulative_target, fertility_risk_planner};
 
@@ -224,12 +224,8 @@ fn longer_cycles_reduce_effective_cycles_per_year_in_legacy_mode() {
     })
     .unwrap();
 
-    assert!(
-        longer.years[0].effective_cycles_per_year < shorter.years[0].effective_cycles_per_year
-    );
-    assert!(
-        (shorter.years[0].effective_cycles_per_year - (365.25 / 28.0)).abs() < 1e-12
-    );
+    assert!(longer.years[0].effective_cycles_per_year < shorter.years[0].effective_cycles_per_year);
+    assert!((shorter.years[0].effective_cycles_per_year - (365.25 / 28.0)).abs() < 1e-12);
     assert!((longer.years[0].effective_cycles_per_year - (365.25 / 40.0)).abs() < 1e-12);
 }
 
@@ -287,9 +283,18 @@ fn protected_day_method_residuals_follow_method_library_ordering() {
     })
     .unwrap();
 
-    let external_r = external.validation.method_library.protected_day_method_residual;
-    let diaphragm_r = diaphragm.validation.method_library.protected_day_method_residual;
-    let internal_r = internal.validation.method_library.protected_day_method_residual;
+    let external_r = external
+        .validation
+        .method_library
+        .protected_day_method_residual;
+    let diaphragm_r = diaphragm
+        .validation
+        .method_library
+        .protected_day_method_residual;
+    let internal_r = internal
+        .validation
+        .method_library
+        .protected_day_method_residual;
     assert!(external_r < diaphragm_r);
     assert!(diaphragm_r < internal_r);
 }
@@ -316,7 +321,10 @@ fn withdrawal_backup_is_conservative_relative_to_full_independence() {
     })
     .unwrap();
 
-    let protected = baseline.validation.method_library.protected_day_method_residual;
+    let protected = baseline
+        .validation
+        .method_library
+        .protected_day_method_residual;
     let withdrawal = baseline.validation.method_library.withdrawal_residual;
     let ideal_independent = protected * withdrawal;
     let combined = layered
@@ -328,7 +336,10 @@ fn withdrawal_backup_is_conservative_relative_to_full_independence() {
     assert!(combined < protected);
     assert!(combined > ideal_independent);
     assert_eq!(
-        layered.validation.method_library.protected_day_method_residual,
+        layered
+            .validation
+            .method_library
+            .protected_day_method_residual,
         combined
     );
 }
@@ -366,8 +377,14 @@ fn nfp_only_mode_does_not_emit_protected_or_withdrawal_actions() {
     })
     .unwrap();
 
-    assert_eq!(out.validation.method_library.protected_day_method, ProtectedDayMethod::None);
-    assert_eq!(out.validation.method_library.withdrawal_mode, WithdrawalMode::None);
+    assert_eq!(
+        out.validation.method_library.protected_day_method,
+        ProtectedDayMethod::None
+    );
+    assert_eq!(
+        out.validation.method_library.withdrawal_mode,
+        WithdrawalMode::None
+    );
     assert!(out.years[0]
         .day_weights
         .iter()

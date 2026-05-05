@@ -29,23 +29,30 @@ pub fn fertile_kernel(rel: i32) -> f64 {
 }
 
 pub fn age_multiplier(age: i32) -> f64 {
-    if (19..=26).contains(&age) {
-        1.00
-    } else if (27..=29).contains(&age) {
-        0.86
-    } else if (30..=34).contains(&age) {
-        0.77
-    } else if (35..=37).contains(&age) {
-        0.63
-    } else if (38..=40).contains(&age) {
-        0.49
-    } else if (41..=44).contains(&age) {
-        0.28
-    } else if age >= 45 {
-        0.10
-    } else {
-        1.00
+    const ANCHORS: &[(f64, f64)] = &[
+        (18.0, 1.00),
+        (26.0, 1.00),
+        (29.0, 0.86),
+        (34.0, 0.77),
+        (37.0, 0.63),
+        (40.0, 0.49),
+        (44.0, 0.28),
+        (50.0, 0.10),
+    ];
+
+    let age = f64::from(age);
+    if age <= ANCHORS[0].0 {
+        return ANCHORS[0].1;
     }
+    for pair in ANCHORS.windows(2) {
+        let (a0, m0) = pair[0];
+        let (a1, m1) = pair[1];
+        if age <= a1 {
+            let t = ((age - a0) / (a1 - a0)).clamp(0.0, 1.0);
+            return m0 + t * (m1 - m0);
+        }
+    }
+    ANCHORS.last().unwrap().1
 }
 
 pub fn ovulation_posterior(
@@ -157,4 +164,26 @@ pub fn raw_per_day_cycle_risk_for_age(
         out.push(p * age_mult * acts_per_day);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::age_multiplier;
+
+    #[test]
+    fn age_multiplier_is_smooth_and_monotone() {
+        let mut prev = age_multiplier(18);
+        for age in 19..=55 {
+            let next = age_multiplier(age);
+            assert!(
+                next <= prev + 1e-12,
+                "age multiplier should not increase at age {age}: {next} > {prev}"
+            );
+            assert!(
+                prev - next < 0.08,
+                "age multiplier should not cliff-drop at age {age}: {prev} -> {next}"
+            );
+            prev = next;
+        }
+    }
 }

@@ -95,20 +95,36 @@ class CycleCalculator {
 
     /**
      * Age-based reference cycle length used as the prior mean.
-     * Mirrors `referenceCycleLengthForAge` in `web/src/periodTracker.ts` and
-     * the Rust core — keep them in sync.
+     * Mirrors `reference_cycle_length_for_age` in the Rust core and
+     * `referenceCycleLengthForAge` in `web/src/periodTracker.ts`.
      */
-    fun referenceCycleLengthForAge(age: Int): Double = when {
-        age < 20 -> 30.0
-        age < 25 -> 29.0
-        age < 30 -> 28.5
-        age < 35 -> 28.0
-        age < 40 -> 27.5
-        age < 43 -> 27.0
-        age < 46 -> 28.0
-        age < 48 -> 32.0
-        age < 50 -> 40.0
-        else -> 55.0
+    fun referenceCycleLengthForAge(age: Int): Double = interpolateAgeAnchors(
+        age,
+        listOf(
+            18.0 to 30.0,
+            24.0 to 29.0,
+            29.0 to 28.5,
+            34.0 to 28.0,
+            40.0 to 27.8,
+            44.0 to 28.0,
+            48.0 to 34.0,
+            50.0 to 40.0,
+            55.0 to 55.0,
+        ),
+    )
+
+    private fun interpolateAgeAnchors(age: Int, anchors: List<Pair<Double, Double>>): Double {
+        val a = age.toDouble()
+        if (a <= anchors.first().first) return anchors.first().second
+        for (i in 0 until anchors.size - 1) {
+            val (a0, v0) = anchors[i]
+            val (a1, v1) = anchors[i + 1]
+            if (a <= a1) {
+                val t = ((a - a0) / (a1 - a0)).coerceIn(0.0, 1.0)
+                return v0 + t * (v1 - v0)
+            }
+        }
+        return anchors.last().second
     }
 
     /** Trimmed mean cycle length. With enough history, trims one value per side. */

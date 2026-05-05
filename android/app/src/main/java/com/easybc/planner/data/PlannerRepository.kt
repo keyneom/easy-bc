@@ -22,12 +22,13 @@ class PlannerRepository(
     val dayLogsFlow: Flow<List<DayLog>> = dayLogDao.getAllFlow()
 
     /**
-     * Reactive planner result. Recomputes whenever settings or periods change.
+     * Reactive long-range planner result. Recomputes from settings only; actual
+     * logged calendar days are handled by [calendarPlannerResultFlow].
      * Emits null if settings aren't initialized yet.
      */
-    val plannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
-        if (s == null || !s.onboardingComplete) return@combine null
-        computePlan(s, p, d, useCalendarCycles = false)
+    val plannerResultFlow: Flow<PlannerResult?> = settingsFlow.map { s ->
+        if (s == null || !s.onboardingComplete) return@map null
+        computePlan(s, periods = emptyList(), dayLogs = emptyList(), useCalendarCycles = false)
     }.flowOn(Dispatchers.Default)
 
     val calendarPlannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
@@ -63,10 +64,10 @@ class PlannerRepository(
             WithdrawalMode.None
         }
 
-        val observedCycles = cycleCalc.deriveCycles(periods)
         // Wall-calendar mode needs one closed observed cycle so the active
         // cycle can be anchored to real dates. The posterior still shrinks
         // heavily toward the age prior while history is short.
+        val observedCycles = if (useCalendarCycles) cycleCalc.deriveCycles(periods) else emptyList()
         val calendarCycles = if (useCalendarCycles && observedCycles.isNotEmpty()) {
             cycleCalc.buildCalendarCycles(periods, settings)
         } else {
@@ -77,7 +78,11 @@ class PlannerRepository(
         // mode, feed them into the core as fixed actions so the optimizer
         // replans around what actually happened instead of using a separate
         // approximate budget burn.
-        val coverageCycles = cycleCalc.buildCoverageCycles(periods, settings)
+        val coverageCycles = if (useCalendarCycles) {
+            cycleCalc.buildCoverageCycles(periods, settings)
+        } else {
+            emptyList()
+        }
         val loggedActionLocks = if (calendarCycles != null) {
             buildLoggedActionLocks(
                 dayLogs = dayLogs,
@@ -88,11 +93,6 @@ class PlannerRepository(
             )
         } else {
             emptyList()
-        }
-        val realizedRisk = if (calendarCycles == null) {
-            computeRealizedRisk(dayLogs, coverageCycles, settings)
-        } else {
-            0.0
         }
 
         val options = UserOptions(
@@ -114,7 +114,7 @@ class PlannerRepository(
             combinedMethodIndependence = settings.combinedMethodIndependence,
             ovulationSdDays = settings.ovulationSdDays,
             calendarCycles = calendarCycles?.takeIf { it.isNotEmpty() },
-            realizedCumulativeRisk = realizedRisk.coerceAtMost(settings.targetCumulativeFailure),
+            realizedCumulativeRisk = 0.0,
             initialActionLocks = loggedActionLocks,
         )
 
@@ -126,62 +126,6 @@ class PlannerRepository(
                 null
             }
         }
-    }
-
-    /**
-     * Rough estimate of realized cumulative risk from logged day actions.
-     * For each logged day that was unprotected or withdrawal, adds risk proportional
-     * to that day's estimated conception probability. This is approximate — the real
-     * implementation should use the planner's own risk model, but this works for MVP.
-     */
-    private fun computeRealizedRisk(
-        dayLogs: List<DayLog>,
-        coverageCycles: List<CycleCalculator.DerivedCycle>,
-        settings: UserSettingsEntity,
-    ): Double {
-        if (dayLogs.isEmpty() || coverageCycles.isEmpty()) return 0.0
-
-        val today = LocalDate.now()
-        var survivalProduct = 1.0
-
-        for (log in dayLogs) {
-            val date = LocalDate.ofEpochDay(log.date)
-            if (date.isAfter(today)) continue
-
-            val cycleInfo = cycleCalc.dateToCycleDay(date, coverageCycles) ?: continue
-            val (_, dayInCycle) = cycleInfo
-
-            // Simple fertile-window risk estimate
-            val cycle = coverageCycles.getOrNull(cycleInfo.first) ?: continue
-            val ovuDay = cycle.lengthDays - 14
-            val dist = kotlin.math.abs(dayInCycle - ovuDay)
-            val baseRisk = when {
-                dist == 0 -> 0.33
-                dist == 1 -> 0.31
-                dist == 2 -> 0.27
-                dist == 3 -> 0.14
-                dist == 4 -> 0.16
-                dist == 5 -> 0.10
-                else -> 0.0
-            }
-
-            val multiplier = when (log.actualAction) {
-                "U" -> 1.0
-                "W" -> settings.withdrawalRelativeRisk
-                "C" -> 0.03  // approximate condom residual
-                "A" -> 0.0
-                // Reconciliation outcomes:
-                "NONE" -> 0.0  // "abstained" — no intercourse, regardless of what was planned
-                "CB" -> 1.0    // condom broke — treat as realized U
-                // "" (observations-only row) or unknown → contribute no risk
-                else -> 0.0
-            }
-
-            val dayRisk = baseRisk * multiplier * ageMultiplier(settings.ageYears)
-            survivalProduct *= (1.0 - dayRisk)
-        }
-
-        return (1.0 - survivalProduct).coerceIn(0.0, 1.0)
     }
 
     private fun buildLoggedActionLocks(
@@ -216,17 +160,6 @@ class PlannerRepository(
                 action = lockedAction,
             )
         }.sortedWith(compareBy<DayOverride> { it.yearIndex }.thenBy { it.day })
-    }
-
-    private fun ageMultiplier(age: Int): Double = when {
-        age in 19..26 -> 1.00
-        age in 27..29 -> 0.86
-        age in 30..34 -> 0.77
-        age in 35..37 -> 0.63
-        age in 38..40 -> 0.49
-        age in 41..44 -> 0.28
-        age >= 45 -> 0.10
-        else -> 1.00
     }
 
     // ── Settings mutations ──

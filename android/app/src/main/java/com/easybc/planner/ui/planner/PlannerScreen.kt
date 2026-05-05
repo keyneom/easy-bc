@@ -24,6 +24,7 @@ import com.easybc.planner.data.ActionCounts
 import com.easybc.planner.data.PlannerResult
 import com.easybc.planner.data.YearOutput
 import com.easybc.planner.ui.theme.*
+import kotlin.math.roundToInt
 
 @Composable
 fun PlannerScreen(vm: PlannerViewModel = viewModel()) {
@@ -176,7 +177,7 @@ private fun RiskSummaryCard(result: PlannerResult) {
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "Budget used: ${(progress * 100).toInt().coerceAtMost(999)}%",
+                    text = "Budget used: ${(progress * 100).roundToInt().coerceAtMost(999)}%",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -1,9 +1,7 @@
 //! Method library calibration for persistent, day-of-sex, and withdrawal methods.
 
 use crate::condoms::solve_residual_for_annual_target;
-use crate::types::{
-    PersistentMethod, ProtectedDayMethod, UserOptions, WithdrawalMode,
-};
+use crate::types::{PersistentMethod, ProtectedDayMethod, UserOptions, WithdrawalMode};
 
 const LEGACY_WITHDRAWAL_CUSTOM_DEFAULT: f64 = 0.35;
 
@@ -79,9 +77,11 @@ pub fn effective_withdrawal_mode(opts: &UserOptions) -> WithdrawalMode {
 pub fn withdrawal_residual(opts: &UserOptions, day_risks: &[f64], cycles_per_year: f64) -> f64 {
     match effective_withdrawal_mode(opts) {
         WithdrawalMode::None => 1.0,
-        WithdrawalMode::Typical => {
-            residual_from_annual_target(opts.withdrawal_typical_annual_failure, day_risks, cycles_per_year)
-        }
+        WithdrawalMode::Typical => residual_from_annual_target(
+            opts.withdrawal_typical_annual_failure,
+            day_risks,
+            cycles_per_year,
+        ),
         WithdrawalMode::Custom => opts.withdrawal_relative_risk,
     }
 }

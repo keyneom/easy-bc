@@ -56,6 +56,34 @@ fn perfect_condoms_not_stricter_than_typical() {
 }
 
 #[test]
+fn default_legacy_plan_abstinence_does_not_increase_for_equal_length_years() {
+    let out = fertility_risk_planner(UserOptions {
+        age_years: 34,
+        horizon_years: 20,
+        target_cumulative_failure: 0.05,
+        acts_per_week: 3.5,
+        condom_mode: CondomMode::Perfect,
+        ..Default::default()
+    })
+    .unwrap();
+
+    for pair in out.years.windows(2) {
+        let current = &pair[0];
+        let next = &pair[1];
+        if current.cycle_length_days == next.cycle_length_days {
+            assert!(
+                next.counts.abstain <= current.counts.abstain,
+                "A days should not increase from age {} to {} when cycle length is unchanged: {} -> {}",
+                current.age,
+                next.age,
+                current.counts.abstain,
+                next.counts.abstain
+            );
+        }
+    }
+}
+
+#[test]
 fn target_zero_negligible_cumulative_risk() {
     let out = fertility_risk_planner(UserOptions {
         target_cumulative_failure: 0.0,
@@ -94,6 +122,36 @@ fn lifecycle_evolution_changes_future_cycle_length_vs_hold_constant() {
         last_evo, last_held,
         "evolved horizon end should differ from held baseline"
     );
+}
+
+#[test]
+fn default_lifecycle_cycle_lengths_do_not_bucket_cliff() {
+    let out = fertility_risk_planner(UserOptions {
+        age_years: 34,
+        horizon_years: 20,
+        target_cumulative_failure: 0.5,
+        ..Default::default()
+    })
+    .unwrap();
+    let lengths: Vec<i32> = out
+        .years
+        .iter()
+        .map(|year| year.cycle_length_days)
+        .collect();
+    assert!(
+        !lengths
+            .windows(3)
+            .any(|window| window[0] == 28 && window[1] == 27 && window[2] == 28),
+        "cycle lengths should not visibly dip and rebound from age buckets: {:?}",
+        lengths
+    );
+    for window in lengths.windows(2) {
+        assert!(
+            (window[1] - window[0]).abs() <= 3,
+            "integer cycle length changed too abruptly: {:?}",
+            lengths
+        );
+    }
 }
 
 #[test]

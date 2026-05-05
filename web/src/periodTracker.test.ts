@@ -4,6 +4,7 @@ import {
   buildCalendarCycles,
   cycleLengthPosterior,
   predictCycleLengthsV15,
+  referenceCycleLengthForAge,
   sampleStdDev,
   sdWidenFromVariance,
   trimmedMeanLength,
@@ -48,6 +49,14 @@ describe("periodTracker v1.5", () => {
     expect(lens).toEqual([expect.any(Number), expect.any(Number)]);
   });
 
+  it("age reference length is smoothed instead of bucketed", () => {
+    const lengths = Array.from({ length: 22 }, (_, i) => referenceCycleLengthForAge(34 + i));
+    expect(lengths.some((v) => v > 28 && v < 34)).toBe(true);
+    for (let i = 1; i < lengths.length; i++) {
+      expect(Math.abs(lengths[i] - lengths[i - 1])).toBeLessThanOrEqual(3);
+    }
+  });
+
   it("cycleLengthPosterior shrinks toward observed history", () => {
     const prior = cycleLengthPosterior([], 34);
     const posterior = cycleLengthPosterior([26, 27, 27, 28], 34);
@@ -55,6 +64,15 @@ describe("periodTracker v1.5", () => {
     expect(posterior.observedCount).toBe(4);
     expect(posterior.predictiveSd).toBeLessThan(prior.predictiveSd);
     expect(posterior.mean).toBeLessThan(prior.mean);
+  });
+
+  it("identical logged cycles do not collapse future uncertainty to zero", () => {
+    expect(sampleStdDev([28, 28, 28])).toBe(0);
+    const posterior = cycleLengthPosterior([28, 28, 28, 28], 34);
+    expect(posterior.predictiveSd).toBeGreaterThan(2);
+
+    const [row] = buildCalendarCycles(1, 34, 3.5, 3, [28, 28, 28, 28]);
+    expect(row.cycleSdDays).toBeGreaterThan(3.5);
   });
 });
 

@@ -25,9 +25,16 @@ object ReminderScheduler {
     const val CHANNEL_NAME = "Daily reconcile reminder"
     const val NOTIFICATION_ID = 1001
     const val REQUEST_CODE = 1002
+    const val REQUEST_CODE_MARK_AS_PLANNED = 1003
+    const val REQUEST_CODE_OPEN_RECONCILE = 1004
 
     /** Intent extra set by the notification tap so MainActivity routes to Reconcile. */
     const val EXTRA_OPEN_RECONCILE = "open_reconcile"
+    const val EXTRA_RECONCILE_DATE = "reconcile_date"
+    const val EXTRA_RECONCILE_ACTION = "reconcile_action"
+
+    const val ACTION_REMINDER_ALARM = "com.easybc.planner.notify.REMINDER_ALARM"
+    const val ACTION_MARK_AS_PLANNED = "com.easybc.planner.notify.MARK_AS_PLANNED"
 
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -76,7 +83,9 @@ object ReminderScheduler {
     }
 
     private fun buildPendingIntent(context: Context): PendingIntent {
-        val intent = Intent(context, ReminderReceiver::class.java)
+        val intent = Intent(context, ReminderReceiver::class.java).apply {
+            action = ACTION_REMINDER_ALARM
+        }
         return PendingIntent.getBroadcast(
             context,
             REQUEST_CODE,

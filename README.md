@@ -141,20 +141,19 @@ The planner applies **age-dependent adjustments** to cycle length, ovulation var
 
 ### Cycle length evolution
 
-Population data (Apple Women's Health Study 2023, n=165,668 cycles; TREMIN longitudinal data) shows cycle length follows a U-shaped curve with age:
+Population data (Apple Women's Health Study 2023, n=165,668 cycles; TREMIN longitudinal data) shows cycle length follows a U-shaped curve with age. Published estimates are usually reported in age bands; the model uses those bands as **anchor points** and linearly interpolates between them so the birthday-to-birthday plan does not have artificial cliffs.
 
-- 18–19: ~30 days
-- 20–24: ~29 days
-- 25–29: ~28.5 days
-- 30–34: ~28 days
-- 35–39: ~27.5 days
-- 40–42: ~27 days (minimum)
-- 43–45: ~28 days (early perimenopausal lengthening begins)
-- 46–47: ~32 days (transition accelerating)
-- 48–49: ~40 days (late transition)
-- 50+: ~55+ days (late perimenopausal)
+- 18: ~30 days
+- 24: ~29 days
+- 29: ~28.5 days
+- 34: ~28 days
+- 40: ~27.8 days (near the minimum)
+- 44: ~28 days (early perimenopausal lengthening begins)
+- 48: ~34 days (transition accelerating)
+- 50: ~40 days (late transition)
+- 55: ~55+ days (late perimenopausal)
 
-The model uses these as reference values and **scales them relative to the user's reported baseline cycle length at their current age**. A user with a 26-day cycle at age 30 will have their future cycle lengths adjusted proportionally.
+The model uses these as smoothed reference values and **scales them relative to the user's reported baseline cycle length at their current age**. A user with a 26-day cycle at age 30 will have their future cycle lengths adjusted proportionally.
 
 ### Ovulation timing variability (SD) by age
 
@@ -228,17 +227,20 @@ The kernel represents per-act conception probability by day relative to ovulatio
 - Dunson, Colombo, Baird (2002) "Changes with age in the level and duration of fertility in the menstrual cycle" Human Reproduction 17:1399
 
 ### Age adjustment
-Current age multipliers (approximations of per-cycle fecundability ratios from Dunson 2002 and Steiner 2011):
+Current age multipliers use linear interpolation through approximate per-cycle
+fecundability anchors from Dunson 2002 and Steiner 2011:
 
-- 19–26: `1.00`
-- 27–29: `0.86`
-- 30–34: `0.77`
-- 35–37: `0.63`
-- 38–40: `0.49`
-- 41–44: `0.28`
-- 45+: `0.10`
+- 18: `1.00`
+- 26: `1.00`
+- 29: `0.86`
+- 34: `0.77`
+- 37: `0.63`
+- 40: `0.49`
+- 44: `0.28`
+- 50+: `0.10`
 
-**Known limitation:** these are approximate bracket values. Published fecundability curves are continuous; the bracket approach creates small discontinuities at bracket boundaries. Users crossing a boundary (e.g., turning 30 or 35) will see a step-change in their plan. Consider smoothing to a continuous function in Phase 2.
+Published fecundability curves are continuous; the interpolation avoids
+step-changes when a user crosses an age-band boundary.
 
 ### Calibration philosophy
 
@@ -668,56 +670,86 @@ function fertilityRiskPlanner(userOptions = {}) {
   };
 
   function ageMultiplier(age) {
-    if (age >= 19 && age <= 26) return 1.00;
-    if (age >= 27 && age <= 29) return 0.86;
-    if (age >= 30 && age <= 34) return 0.77;
-    if (age >= 35 && age <= 37) return 0.63;
-    if (age >= 38 && age <= 40) return 0.49;
-    if (age >= 41 && age <= 44) return 0.28;
-    if (age >= 45) return 0.10;
-    return 1.00;
+    const anchors = [
+      [18, 1.00],
+      [26, 1.00],
+      [29, 0.86],
+      [34, 0.77],
+      [37, 0.63],
+      [40, 0.49],
+      [44, 0.28],
+      [50, 0.10],
+    ];
+    if (age <= anchors[0][0]) return anchors[0][1];
+    for (let i = 0; i < anchors.length - 1; i++) {
+      const [a0, m0] = anchors[i];
+      const [a1, m1] = anchors[i + 1];
+      if (age <= a1) {
+        const t = Math.max(0, Math.min(1, (age - a0) / (a1 - a0)));
+        return m0 + t * (m1 - m0);
+      }
+    }
+    return anchors[anchors.length - 1][1];
   }
 
-  // Reference population cycle length by age (days)
+  function interpolateAgeAnchors(age, anchors) {
+    if (age <= anchors[0][0]) return anchors[0][1];
+    for (let i = 0; i < anchors.length - 1; i++) {
+      const [a0, v0] = anchors[i];
+      const [a1, v1] = anchors[i + 1];
+      if (age <= a1) {
+        const t = Math.max(0, Math.min(1, (age - a0) / (a1 - a0)));
+        return v0 + t * (v1 - v0);
+      }
+    }
+    return anchors[anchors.length - 1][1];
+  }
+
+  // Reference population cycle length by age (days), smoothed between anchors.
   // Source: Apple Women's Health Study 2023 (n=165,668 cycles), TREMIN longitudinal data
   function referenceCycleLengthForAge(age) {
-    if (age < 20) return 30.0;
-    if (age < 25) return 29.0;
-    if (age < 30) return 28.5;
-    if (age < 35) return 28.0;
-    if (age < 40) return 27.5;
-    if (age < 43) return 27.0;
-    if (age < 46) return 28.0;
-    if (age < 48) return 32.0;
-    if (age < 50) return 40.0;
-    return 55.0;
+    return interpolateAgeAnchors(age, [
+      [18, 30.0],
+      [24, 29.0],
+      [29, 28.5],
+      [34, 28.0],
+      [40, 27.8],
+      [44, 28.0],
+      [48, 34.0],
+      [50, 40.0],
+      [55, 55.0],
+    ]);
   }
 
-  // Reference within-woman cycle SD by age (days)
+  // Reference within-woman cycle SD by age (days), smoothed between anchors.
   // Source: Apple Women's Health Study 2023
   function referenceCycleSdForAge(age) {
-    if (age < 20) return 5.0;
-    if (age < 25) return 4.0;
-    if (age < 30) return 3.5;
-    if (age < 35) return 3.2;
-    if (age < 40) return 3.0;
-    if (age < 43) return 3.5;
-    if (age < 46) return 4.5;
-    if (age < 48) return 7.0;
-    if (age < 50) return 10.0;
-    return 15.0;
+    return interpolateAgeAnchors(age, [
+      [18, 5.0],
+      [24, 4.0],
+      [29, 3.5],
+      [34, 3.2],
+      [39, 3.0],
+      [42, 3.5],
+      [45, 4.5],
+      [48, 7.0],
+      [50, 10.0],
+      [55, 15.0],
+    ]);
   }
 
-  // Reference population coital frequency by age (acts/week)
+  // Reference population coital frequency by age (acts/week), smoothed between anchors.
   // Source: NSFG and related population data (approximations)
   function referenceFrequencyForAge(age) {
-    if (age < 25) return 4.5;
-    if (age < 30) return 4.0;
-    if (age < 35) return 3.5;
-    if (age < 40) return 3.0;
-    if (age < 45) return 2.5;
-    if (age < 50) return 2.0;
-    return 1.5;
+    return interpolateAgeAnchors(age, [
+      [24, 4.5],
+      [29, 4.0],
+      [34, 3.5],
+      [39, 3.0],
+      [44, 2.5],
+      [49, 2.0],
+      [55, 1.5],
+    ]);
   }
 
   // Scale user's baseline to other ages using relative population curves.

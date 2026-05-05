@@ -96,18 +96,32 @@ export function buildCalendarCycles(
   }));
 }
 
-/** Mirrors `reference_cycle_length_for_age` in planner-core (approximate). */
+function interpolateAgeAnchors(age: number, anchors: Array<[number, number]>): number {
+  if (age <= anchors[0][0]) return anchors[0][1];
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const [a0, v0] = anchors[i];
+    const [a1, v1] = anchors[i + 1];
+    if (age <= a1) {
+      const t = Math.max(0, Math.min(1, (age - a0) / (a1 - a0)));
+      return v0 + t * (v1 - v0);
+    }
+  }
+  return anchors[anchors.length - 1][1];
+}
+
+/** Mirrors `reference_cycle_length_for_age` in planner-core. */
 export function referenceCycleLengthForAge(age: number): number {
-  if (age < 20) return 30;
-  if (age < 25) return 29;
-  if (age < 30) return 28.5;
-  if (age < 35) return 28;
-  if (age < 40) return 27.5;
-  if (age < 43) return 27;
-  if (age < 46) return 28;
-  if (age < 48) return 32;
-  if (age < 50) return 40;
-  return 55;
+  return interpolateAgeAnchors(age, [
+    [18, 30],
+    [24, 29],
+    [29, 28.5],
+    [34, 28],
+    [40, 27.8],
+    [44, 28],
+    [48, 34],
+    [50, 40],
+    [55, 55],
+  ]);
 }
 
 export function trimmedMeanLength(lengths: number[], trimEachSide = 0): number {

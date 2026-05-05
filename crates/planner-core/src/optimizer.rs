@@ -4,9 +4,9 @@
 use crate::biology::{ovulation_posterior, raw_per_day_cycle_risk_for_age};
 use crate::condoms::{reference_day_risks, solve_residual_for_annual_target, validate_against_sdm};
 use crate::methods::{
-    combined_protected_withdrawal_residual, effective_withdrawal_mode,
-    persistent_method_residual, protected_day_method_enabled, protected_day_method_residual,
-    withdrawal_mode_enabled, withdrawal_residual,
+    combined_protected_withdrawal_residual, effective_withdrawal_mode, persistent_method_residual,
+    protected_day_method_enabled, protected_day_method_residual, withdrawal_mode_enabled,
+    withdrawal_residual,
 };
 use crate::reference_curves::{
     scaled_cycle_length_for_age, scaled_cycle_sd_for_age, scaled_frequency_for_age,
@@ -97,6 +97,14 @@ fn multiplier_for_action(
     }
 }
 
+fn action_burden_points(a: Act) -> i32 {
+    match a {
+        Act::U => 0,
+        Act::W | Act::C => 1,
+        Act::A => 2,
+    }
+}
+
 fn annual_from_cycle_risk(cycle_risk: f64, cycles_per_year: f64) -> f64 {
     1.0 - (1.0 - cycle_risk).powf(cycles_per_year)
 }
@@ -162,29 +170,27 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
     let withdrawal_mode_used = effective_withdrawal_mode(opts);
     let allow_protected_day_method = protected_day_method_enabled(opts.protected_day_method);
     let allow_withdrawal = withdrawal_mode_enabled(withdrawal_mode_used);
-    let withdrawal_residual =
-        withdrawal_residual(opts, &ref_day_risks, opts.cycles_per_year);
+    let withdrawal_residual = withdrawal_residual(opts, &ref_day_risks, opts.cycles_per_year);
     let protected_day_residual = protected_day_method_residual(
         opts.protected_day_method,
         condom_residual,
         &ref_day_risks,
         opts.cycles_per_year,
     );
-    let combined_protected_withdrawal_residual =
-        if opts.use_withdrawal_backup_on_protected_days
-            && allow_protected_day_method
-            && allow_withdrawal
-        {
-            Some(combined_protected_withdrawal_residual(
-                protected_day_residual,
-                withdrawal_residual,
-                opts.combined_method_independence,
-            ))
-        } else {
-            None
-        };
-    let effective_protected_day_residual = combined_protected_withdrawal_residual
-        .unwrap_or(protected_day_residual);
+    let combined_protected_withdrawal_residual = if opts.use_withdrawal_backup_on_protected_days
+        && allow_protected_day_method
+        && allow_withdrawal
+    {
+        Some(combined_protected_withdrawal_residual(
+            protected_day_residual,
+            withdrawal_residual,
+            opts.combined_method_independence,
+        ))
+    } else {
+        None
+    };
+    let effective_protected_day_residual =
+        combined_protected_withdrawal_residual.unwrap_or(protected_day_residual);
     let best_non_abstinent_residual = if allow_protected_day_method && allow_withdrawal {
         effective_protected_day_residual.min(withdrawal_residual)
     } else if allow_protected_day_method {
@@ -198,8 +204,12 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
     if let Some(ref cc) = opts.calendar_cycles {
         if !cc.is_empty() {
             for (y, c) in cc.iter().enumerate() {
-                let posterior =
-                    ovulation_posterior(c.cycle_length_days, c.cycle_sd_days, c.body_signals.as_ref(), opts);
+                let posterior = ovulation_posterior(
+                    c.cycle_length_days,
+                    c.cycle_sd_days,
+                    c.body_signals.as_ref(),
+                    opts,
+                );
                 let raw = raw_per_day_cycle_risk_for_age(
                     c.age_years,
                     c.cycle_length_days,
@@ -232,9 +242,14 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
             let cycle_len = scaled_cycle_length_for_age(age, opts);
             let cycle_sd = scaled_cycle_sd_for_age(age, opts);
             let freq = scaled_frequency_for_age(age, opts);
-            let body_signals = if y == 0 { opts.body_signals.as_ref() } else { None };
+            let body_signals = if y == 0 {
+                opts.body_signals.as_ref()
+            } else {
+                None
+            };
             let posterior = ovulation_posterior(cycle_len, cycle_sd, body_signals, opts);
-            let raw = raw_per_day_cycle_risk_for_age(age, cycle_len, freq, cycle_sd, body_signals, opts);
+            let raw =
+                raw_per_day_cycle_risk_for_age(age, cycle_len, freq, cycle_sd, body_signals, opts);
             years.push(YearData {
                 year_index: y,
                 age,
@@ -329,15 +344,7 @@ fn static_warnings(
 fn recalc_burden(plans: &[Vec<Act>]) -> Vec<i32> {
     plans
         .iter()
-        .map(|plan| {
-            plan.iter()
-                .map(|a| match a {
-                    Act::U => 0,
-                    Act::W | Act::C => 1,
-                    Act::A => 2,
-                })
-                .sum()
-        })
+        .map(|plan| plan.iter().map(|a| action_burden_points(*a)).sum())
         .collect()
 }
 
@@ -506,26 +513,38 @@ fn optimize_with_initial_locks(
         cal.withdrawal_residual,
     );
 
-    let (mut plans, mut year_burden_points, mut cycle_risks, mut row_survival) =
-        greedy_reduce_risk(
+    let (mut plans, mut year_burden_points, mut cycle_risks, mut row_survival) = greedy_reduce_risk(
+        &cal.years,
+        opts,
+        cal.persistent_residual,
+        cal.protected_day_residual,
+        cal.withdrawal_residual,
+        cal.allow_protected_day_method,
+        cal.allow_withdrawal,
+        &cal.ux,
+        plans0,
+        year_burden_points,
+        cycle_risks,
+        row_survival,
+        planned_budget,
+        |_, _| false,
+        true,
+    );
+
+    if opts.initial_action_locks.is_empty() {
+        enforce_legacy_monotonic_abstinence(
             &cal.years,
-            opts,
             cal.persistent_residual,
             cal.protected_day_residual,
             cal.withdrawal_residual,
             cal.allow_protected_day_method,
             cal.allow_withdrawal,
-            &cal.ux,
-            plans0,
-            year_burden_points,
-            cycle_risks,
-            row_survival,
+            &mut plans,
+            &mut year_burden_points,
+            &mut cycle_risks,
+            &mut row_survival,
             planned_budget,
-            |_, _| false,
-            true,
         );
-
-    if opts.initial_action_locks.is_empty() {
         return Ok((
             plans,
             year_burden_points,
@@ -572,6 +591,167 @@ fn optimize_with_initial_locks(
         row_survival,
         skip_initial,
     ))
+}
+
+fn enforce_legacy_monotonic_abstinence(
+    years: &[YearData],
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
+    plans: &mut [Vec<Act>],
+    year_burden_points: &mut [i32],
+    cycle_risks: &mut [f64],
+    row_survival: &mut [f64],
+    risk_budget: f64,
+) {
+    if years.len() < 2 || years.iter().any(|y| y.literal_cycle) {
+        return;
+    }
+
+    let max_swaps = plans.iter().map(Vec::len).sum::<usize>();
+    for _ in 0..max_swaps {
+        let counts: Vec<usize> = plans
+            .iter()
+            .map(|p| p.iter().filter(|a| **a == Act::A).count())
+            .collect();
+
+        let mut applied = false;
+        for y in 0..counts.len() - 1 {
+            if counts[y + 1] <= counts[y] {
+                continue;
+            }
+            let Some(swap) = best_monotonic_abstinence_swap(
+                y,
+                years,
+                persistent_residual,
+                protected_day_residual,
+                withdrawal_r,
+                allow_protected_day_method,
+                allow_withdrawal,
+                plans,
+                cycle_risks,
+                row_survival,
+                risk_budget,
+            ) else {
+                continue;
+            };
+            apply_change(
+                swap.early_y,
+                swap.early_d,
+                swap.early_from,
+                Act::A,
+                plans,
+                year_burden_points,
+                years,
+                persistent_residual,
+                protected_day_residual,
+                withdrawal_r,
+                cycle_risks,
+                row_survival,
+            );
+            apply_change(
+                swap.later_y,
+                swap.later_d,
+                Act::A,
+                swap.later_to,
+                plans,
+                year_burden_points,
+                years,
+                persistent_residual,
+                protected_day_residual,
+                withdrawal_r,
+                cycle_risks,
+                row_survival,
+            );
+            applied = true;
+            break;
+        }
+
+        if !applied {
+            break;
+        }
+    }
+}
+
+fn best_monotonic_abstinence_swap(
+    y: usize,
+    years: &[YearData],
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    allow_protected_day_method: bool,
+    allow_withdrawal: bool,
+    plans: &[Vec<Act>],
+    cycle_risks: &[f64],
+    row_survival: &[f64],
+    risk_budget: f64,
+) -> Option<MonotonicSwap> {
+    let later_y = y + 1;
+    let mut best: Option<MonotonicSwap> = None;
+    for early_d in 0..plans[y].len() {
+        let early_from = plans[y][early_d];
+        if early_from == Act::A || years[y].base_risk_by_day[early_d] <= 0.0 {
+            continue;
+        }
+        for later_d in 0..plans[later_y].len() {
+            if plans[later_y][later_d] != Act::A {
+                continue;
+            }
+            for later_to in action_predecessors(
+                Act::A,
+                allow_protected_day_method,
+                protected_day_residual,
+                allow_withdrawal,
+                withdrawal_r,
+            ) {
+                let new_risk = cumulative_risk_if_two_changes(
+                    y,
+                    early_d,
+                    early_from,
+                    Act::A,
+                    later_y,
+                    later_d,
+                    Act::A,
+                    later_to,
+                    years,
+                    persistent_residual,
+                    protected_day_residual,
+                    withdrawal_r,
+                    cycle_risks,
+                    row_survival,
+                );
+                if new_risk > risk_budget + 1e-12 {
+                    continue;
+                }
+                let burden_delta = action_burden_points(Act::A) - action_burden_points(early_from)
+                    + action_burden_points(later_to)
+                    - action_burden_points(Act::A);
+                let replace = match &best {
+                    None => true,
+                    Some(b) => {
+                        new_risk > b.new_risk + 1e-12
+                            || ((new_risk - b.new_risk).abs() <= 1e-12
+                                && burden_delta < b.burden_delta)
+                    }
+                };
+                if replace {
+                    best = Some(MonotonicSwap {
+                        early_y: y,
+                        early_d,
+                        early_from,
+                        later_y,
+                        later_d,
+                        later_to,
+                        new_risk,
+                        burden_delta,
+                    });
+                }
+            }
+        }
+    }
+    best
 }
 
 fn append_heavy_abstinence(
@@ -1004,6 +1184,17 @@ struct RelaxCandidate {
     relief: f64,
 }
 
+struct MonotonicSwap {
+    early_y: usize,
+    early_d: usize,
+    early_from: Act,
+    later_y: usize,
+    later_d: usize,
+    later_to: Act,
+    new_risk: f64,
+    burden_delta: i32,
+}
+
 /// Relative UX cost of withdrawal steps vs condom (README lattice).
 const U_TO_WITHDRAWAL_COST_FRAC: f64 = 0.62;
 const WITHDRAWAL_TO_CONDOM_COST_FRAC: f64 = 0.42;
@@ -1260,9 +1451,17 @@ fn best_marginal_downgrade(
                 if risk_increase <= 1e-18 || new_risk > risk_budget + 1e-12 {
                     continue;
                 }
-                let Some(relief) =
-                    marginal_upgrade_cost(y, d, to, cur, years, plans, year_burden_points, opts, ux)
-                else {
+                let Some(relief) = marginal_upgrade_cost(
+                    y,
+                    d,
+                    to,
+                    cur,
+                    years,
+                    plans,
+                    year_burden_points,
+                    opts,
+                    ux,
+                ) else {
                     continue;
                 };
                 if relief <= 0.0 {
@@ -1273,8 +1472,7 @@ fn best_marginal_downgrade(
                     None => true,
                     Some(b) => {
                         score > b.score + 1e-18
-                            || ((score - b.score).abs() <= 1e-18
-                                && relief > b.relief + 1e-18)
+                            || ((score - b.score).abs() <= 1e-18 && relief > b.relief + 1e-18)
                     }
                 };
                 if replace {
@@ -1333,6 +1531,51 @@ fn cumulative_risk_if_change(
         survival *= if idx == y { new_row_survival } else { *row };
     }
     1.0 - survival
+}
+
+fn cumulative_risk_if_two_changes(
+    y1: usize,
+    d1: usize,
+    old_action1: Act,
+    new_action1: Act,
+    y2: usize,
+    d2: usize,
+    old_action2: Act,
+    new_action2: Act,
+    years: &[YearData],
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    cycle_risks: &[f64],
+    row_survival: &[f64],
+) -> f64 {
+    let mut cycle_risks = cycle_risks.to_vec();
+    let mut row_survival = row_survival.to_vec();
+    apply_risk_change_only(
+        y1,
+        d1,
+        old_action1,
+        new_action1,
+        years,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+        &mut cycle_risks,
+        &mut row_survival,
+    );
+    apply_risk_change_only(
+        y2,
+        d2,
+        old_action2,
+        new_action2,
+        years,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+        &mut cycle_risks,
+        &mut row_survival,
+    );
+    total_cumulative_risk(&row_survival)
 }
 
 fn time_weight(year_index: usize, opts: &UserOptions) -> f64 {
@@ -1430,15 +1673,33 @@ fn apply_change(
     row_survival: &mut [f64],
 ) {
     plans[y][d] = new_action;
-    let burden = |a: Act| -> i32 {
-        match a {
-            Act::U => 0,
-            Act::W | Act::C => 1,
-            Act::A => 2,
-        }
-    };
-    year_burden_points[y] += burden(new_action) - burden(old_action);
+    year_burden_points[y] += action_burden_points(new_action) - action_burden_points(old_action);
+    apply_risk_change_only(
+        y,
+        d,
+        old_action,
+        new_action,
+        years,
+        persistent_residual,
+        protected_day_residual,
+        withdrawal_r,
+        cycle_risks,
+        row_survival,
+    );
+}
 
+fn apply_risk_change_only(
+    y: usize,
+    d: usize,
+    old_action: Act,
+    new_action: Act,
+    years: &[YearData],
+    persistent_residual: f64,
+    protected_day_residual: f64,
+    withdrawal_r: f64,
+    cycle_risks: &mut [f64],
+    row_survival: &mut [f64],
+) {
     let old_mult = multiplier_for_action(
         old_action,
         persistent_residual,
@@ -1492,10 +1753,7 @@ fn estimate_override_cost_for_day(
                     Some("Withdrawal"),
                 )
             } else {
-                (
-                    base[day_index] * persistent_residual,
-                    Some("Unprotected"),
-                )
+                (base[day_index] * persistent_residual, Some("Unprotected"))
             }
         }
         Act::C => (

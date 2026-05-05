@@ -180,15 +180,28 @@ class MockPlannerBridge : PlannerBridge {
         }
     }
 
-    private fun ageMultiplier(age: Int): Double = when {
-        age in 19..26 -> 1.00
-        age in 27..29 -> 0.86
-        age in 30..34 -> 0.77
-        age in 35..37 -> 0.63
-        age in 38..40 -> 0.49
-        age in 41..44 -> 0.28
-        age >= 45 -> 0.10
-        else -> 1.00
+    private fun ageMultiplier(age: Int): Double {
+        val anchors = listOf(
+            18.0 to 1.00,
+            26.0 to 1.00,
+            29.0 to 0.86,
+            34.0 to 0.77,
+            37.0 to 0.63,
+            40.0 to 0.49,
+            44.0 to 0.28,
+            50.0 to 0.10,
+        )
+        val a = age.toDouble()
+        if (a <= anchors.first().first) return anchors.first().second
+        for (i in 0 until anchors.lastIndex) {
+            val (a0, m0) = anchors[i]
+            val (a1, m1) = anchors[i + 1]
+            if (a <= a1) {
+                val t = ((a - a0) / (a1 - a0)).coerceIn(0.0, 1.0)
+                return m0 + t * (m1 - m0)
+            }
+        }
+        return anchors.last().second
     }
 }
 
