@@ -36,6 +36,15 @@ class PlannerRepository(
         computePlan(s, p, d, useCalendarCycles = true)
     }.flowOn(Dispatchers.Default)
 
+    /**
+     * Calendar-shaped plan without actual-day locks. Used for comparing what
+     * has happened so far against the original recommendation in risk units.
+     */
+    val calendarBaselinePlannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow) { s, p ->
+        if (s == null || !s.onboardingComplete) return@combine null
+        computePlan(s, p, dayLogs = emptyList(), useCalendarCycles = true)
+    }.flowOn(Dispatchers.Default)
+
     /** Run the planner synchronously (called on Dispatchers.Default). */
     private fun computePlan(
         settings: UserSettingsEntity,

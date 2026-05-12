@@ -170,7 +170,7 @@ fun DayDetailSheet(
                 OutlinedCard(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
-                            text = "If you override this day",
+                            text = "If you use less protection",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -190,7 +190,7 @@ fun DayDetailSheet(
                                             color = ActionCondom,
                                             fontWeight = FontWeight.Bold,
                                         )
-                                        Text("protected days", style = MaterialTheme.typography.labelSmall)
+                                        Text("recovery protected days", style = MaterialTheme.typography.labelSmall)
                                     }
                                 }
                                 if (cell.overrideCost.abstinenceDays > 0) {
@@ -201,7 +201,7 @@ fun DayDetailSheet(
                                             color = ActionAbstain,
                                             fontWeight = FontWeight.Bold,
                                         )
-                                        Text("abstinence days", style = MaterialTheme.typography.labelSmall)
+                                        Text("recovery abstinence days", style = MaterialTheme.typography.labelSmall)
                                     }
                                 }
                             }

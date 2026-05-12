@@ -394,3 +394,33 @@ fn nfp_only_mode_does_not_emit_protected_or_withdrawal_actions() {
         .iter()
         .all(|day| day.recommended_action != RecommendedAction::W));
 }
+
+#[test]
+fn unrecoverable_override_cost_does_not_show_partial_day_counts() {
+    let locks: Vec<DayOverride> = (1..=28)
+        .map(|day| DayOverride {
+            year_index: 0,
+            day,
+            action: RecommendedAction::C,
+        })
+        .collect();
+    let out = fertility_risk_planner(UserOptions {
+        target_cumulative_failure: 0.5,
+        condom_mode: CondomMode::Perfect,
+        calendar_cycles: Some(vec![CycleInstance {
+            cycle_length_days: 28,
+            cycle_sd_days: 3.0,
+            acts_per_week: 3.5,
+            age_years: 34,
+            body_signals: None,
+        }]),
+        initial_action_locks: locks,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let cost = &out.years[0].day_weights[13].override_cost;
+    assert!(cost.note.contains("not fully available"));
+    assert_eq!(cost.condoms, 0);
+    assert_eq!(cost.abstinence_days, 0);
+}

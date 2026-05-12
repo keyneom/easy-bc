@@ -50,10 +50,15 @@ class ReminderReceiver : BroadcastReceiver() {
                 val reminder = reminderForYesterday(app) ?: return@launch
                 ReminderScheduler.ensureChannel(context)
 
+                // Copy is intentionally vague — the app name (shown by the
+                // system above every notification) already gives the user
+                // enough context. Anyone glancing at the lock screen sees
+                // only a generic "yesterday's check-in" prompt; no logged
+                // action, no method label, nothing about intercourse.
                 val notification = NotificationCompat.Builder(context, ReminderScheduler.CHANNEL_ID)
                     .setSmallIcon(R.drawable.ic_notification)
-                    .setContentTitle("Reconcile yesterday?")
-                    .setContentText("${reminder.label} was planned. Did it go as planned?")
+                    .setContentTitle("Yesterday's check-in")
+                    .setContentText("Tap to confirm or update.")
                     .setContentIntent(openReconcilePendingIntent(context))
                     .addAction(
                         R.drawable.ic_notification,
@@ -62,7 +67,7 @@ class ReminderReceiver : BroadcastReceiver() {
                     )
                     .addAction(
                         R.drawable.ic_notification,
-                        "Not as planned",
+                        "Update",
                         openReconcilePendingIntent(context),
                     )
                     .setAutoCancel(true)
@@ -118,7 +123,6 @@ class ReminderReceiver : BroadcastReceiver() {
         return ReminderInfo(
             dateEpochDay = date.toEpochDay(),
             plannedAction = action.shortLabel,
-            label = labelFor(action),
         )
     }
 
@@ -152,16 +156,8 @@ class ReminderReceiver : BroadcastReceiver() {
         )
     }
 
-    private fun labelFor(action: RecommendedAction): String = when (action) {
-        RecommendedAction.U -> "Unprotected sex"
-        RecommendedAction.C -> "Protected sex"
-        RecommendedAction.W -> "Withdrawal"
-        RecommendedAction.A -> "Abstinence"
-    }
-
     private data class ReminderInfo(
         val dateEpochDay: Long,
         val plannedAction: String,
-        val label: String,
     )
 }

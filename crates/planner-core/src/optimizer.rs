@@ -1837,19 +1837,27 @@ fn estimate_override_cost_for_day(
     }
 
     let recovered = remaining <= 0.0;
-    let note = if recovered {
-        format!(
-            "Approx. reserve recovery if overridden with {}: +{} condom day(s) and +{} abstinence day(s) elsewhere in the same cycle to restore the plan's risk cushion.",
-            label, condom_days, abstain_days
+    let (display_condom_days, display_abstinence_days, note) = if recovered {
+        (
+            condom_days,
+            abstain_days,
+            format!(
+                "Approx. reserve recovery if overridden with {}: +{} condom day(s) and +{} abstinence day(s) elsewhere in the same cycle to restore the plan's risk cushion.",
+                label, condom_days, abstain_days
+            ),
         )
     } else {
-        "Approx. same-cycle reserve recovery is not fully available; this override would spend risk reserve and may require broader replanning of the current cycle and/or future cycles to restore the cushion.".to_string()
+        (
+            0,
+            0,
+            "Approx. same-cycle reserve recovery is not fully available; this override would spend risk reserve and may require broader replanning of the current cycle and/or future cycles to restore the cushion.".to_string(),
+        )
     };
 
     OverrideCost {
         override_action: Some(label.to_string()),
-        condoms: condom_days,
-        abstinence_days: abstain_days,
+        condoms: display_condom_days,
+        abstinence_days: display_abstinence_days,
         note,
     }
 }

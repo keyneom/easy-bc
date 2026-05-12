@@ -58,9 +58,9 @@ data class DayCellData(
 enum class CalendarViewMode { MONTH, WEEK }
 
 /**
- * Compact per-cycle risk view. Surfaces the current replanned cycle risk and
- * how much risk the logged days have consumed so far. "Credits" count
- * explicit NONE logs in the current cycle.
+ * Compact per-cycle risk view. Surfaces the current replanned cycle risk,
+ * realized risk so far, and risk saved/spent against the unlocked baseline
+ * plan for the logged days in this cycle.
  */
 data class CycleLedger(
     /** 1-based position of today within the current cycle. */
@@ -71,8 +71,10 @@ data class CycleLedger(
     val plannedCycleRisk: Double,
     /** Realized risk contribution from the days already logged this cycle. */
     val realizedSoFar: Double,
-    /** Days reconciled as NONE in the current cycle. */
-    val abstinenceCredits: Int,
+    /** Positive when logged days saved risk vs the unlocked baseline plan. */
+    val savedRiskVsBaseline: Double,
+    /** Positive when logged days spent extra risk vs the unlocked baseline plan. */
+    val extraRiskVsBaseline: Double,
     /** Full-horizon risk after applying logged day locks. */
     val horizonRisk: Double,
     /** User's full-horizon target. */
@@ -106,6 +108,9 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     val plannerResult: StateFlow<PlannerResult?> = repo.calendarPlannerResultFlow
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    private val baselinePlannerResult: StateFlow<PlannerResult?> = repo.calendarBaselinePlannerResultFlow
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     val periods: StateFlow<List<PeriodRecord>> = repo.periodsFlow
@@ -175,14 +180,15 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
      * `coverageCycles[i]`, same as the calendar cell renderer.
      */
     val currentCycleLedger: StateFlow<CycleLedger?> = combine(
-        settings, plannerResult, periods, repo.dayLogsFlow,
-    ) { s, plan, periodList, dayLogs ->
-        if (s == null || plan == null || plan.years.isEmpty()) return@combine null
+        settings, plannerResult, baselinePlannerResult, periods, repo.dayLogsFlow,
+    ) { s, plan, baselinePlan, periodList, dayLogs ->
+        if (s == null || plan == null || baselinePlan == null || plan.years.isEmpty()) return@combine null
         val today = LocalDate.now()
         val cycles = cycleCalc.buildCoverageCycles(periodList, s)
         val info = cycleCalc.dateToCycleDay(today, cycles) ?: return@combine null
         val (cycleIdx, dayInCycle) = info
         val year = plan.years.getOrNull(cycleIdx) ?: return@combine null
+        val baselineYear = baselinePlan.years.getOrNull(cycleIdx) ?: return@combine null
         val cycle = cycles.getOrNull(cycleIdx) ?: return@combine null
 
         val cycleStartEpoch = cycle.startDate.toEpochDay()
@@ -194,32 +200,34 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
 
         // Realized-so-far: chain (1 - r_i) survivals for logged days through today.
         var survival = 1.0
-        var credits = 0
+        var baselineSurvival = 1.0
         for (log in logsThisCycle) {
             val dayIdx = (log.date - cycleStartEpoch).toInt() + 1
             if (dayIdx < 1 || dayIdx > cycle.lengthDays) continue
             val dw = year.dayWeights.getOrNull(dayIdx - 1) ?: continue
+            val baselineDw = baselineYear.dayWeights.getOrNull(dayIdx - 1) ?: continue
             val r = when (log.actualAction) {
                 "U", "CB" -> dw.rawRiskProbability
                 "W" -> dw.withdrawalRiskProbability
                 "C" -> dw.protectedRiskProbability
                 "A" -> 0.0
-                "NONE" -> {
-                    credits++
-                    0.0
-                }
+                "NONE" -> 0.0
                 else -> 0.0
             }
             survival *= (1.0 - r).coerceIn(0.0, 1.0)
+            baselineSurvival *= (1.0 - baselineDw.recommendedRiskProbability).coerceIn(0.0, 1.0)
         }
         val realized = (1.0 - survival).coerceIn(0.0, 1.0)
+        val baselinePlannedForLoggedDays = (1.0 - baselineSurvival).coerceIn(0.0, 1.0)
+        val deltaVsBaseline = realized - baselinePlannedForLoggedDays
 
         CycleLedger(
             currentDayInCycle = dayInCycle,
             cycleLengthDays = cycle.lengthDays,
             plannedCycleRisk = year.cycleRisk,
             realizedSoFar = realized,
-            abstinenceCredits = credits,
+            savedRiskVsBaseline = (-deltaVsBaseline).coerceAtLeast(0.0),
+            extraRiskVsBaseline = deltaVsBaseline.coerceAtLeast(0.0),
             horizonRisk = plan.achievedCumulativeRisk,
             horizonTarget = s.targetCumulativeFailure,
             targetMet = plan.targetMet,

@@ -527,7 +527,8 @@ fun ActionLegend(
 
 /**
  * Small at-a-glance card showing the current cycle's logged risk vs. the
- * current replanned cycle risk, plus explicit NONE logs in this cycle.
+ * current replanned cycle risk, plus risk saved/spent against the unlocked
+ * baseline plan for logged days in this cycle.
  *
  * The visual is a linear progress bar colored green when the replanned
  * horizon meets target and red when the target can no longer be met.
@@ -581,12 +582,18 @@ private fun CycleLedgerCard(
                     "Logged ${"%.2f".format(ledger.realizedSoFar * 100)}%; plan ${"%.2f".format(ledger.plannedCycleRisk * 100)}%",
                     style = MaterialTheme.typography.labelSmall,
                 )
-                if (ledger.abstinenceCredits > 0) {
+                if (ledger.savedRiskVsBaseline > 1e-12) {
                     Text(
-                        "+${ledger.abstinenceCredits} abstinence credit" +
-                            if (ledger.abstinenceCredits == 1) "" else "s",
+                        "Saved ${formatLedgerPercent(ledger.savedRiskVsBaseline)} vs plan",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium,
+                    )
+                } else if (ledger.extraRiskVsBaseline > 1e-12) {
+                    Text(
+                        "Spent ${formatLedgerPercent(ledger.extraRiskVsBaseline)} vs plan",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
                         fontWeight = FontWeight.Medium,
                     )
                 }
@@ -611,6 +618,11 @@ private fun CycleLedgerCard(
             }
         }
     }
+}
+
+private fun formatLedgerPercent(value: Double): String {
+    val pct = value * 100.0
+    return if (pct < 0.01) "<0.01%" else "%.2f%%".format(pct)
 }
 
 @Composable
