@@ -3,6 +3,7 @@ package com.easybc.planner.data
 import com.easybc.planner.bridge.PlannerBridge
 import com.easybc.planner.data.db.*
 import com.easybc.planner.util.CycleCalculator
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
@@ -12,6 +13,13 @@ class PlannerRepository(
     private val db: AppDatabase,
     private val bridge: PlannerBridge,
     private val cycleCalc: CycleCalculator,
+    /**
+     * App-lifetime scope used to host the *shared* planner flows below. The
+     * planner is expensive (a full multi-year Rust optimization), so we
+     * compute each variant ONCE and broadcast it to every consumer instead
+     * of letting each ViewModel's collector re-run it from scratch.
+     */
+    private val appScope: CoroutineScope,
 ) {
     private val settingsDao = db.userSettingsDao()
     private val periodDao = db.periodRecordDao()
@@ -20,6 +28,21 @@ class PlannerRepository(
     val settingsFlow: Flow<UserSettingsEntity?> = settingsDao.getSettingsFlow()
     val periodsFlow: Flow<List<PeriodRecord>> = periodDao.getAllAscFlow()
     val dayLogsFlow: Flow<List<DayLog>> = dayLogDao.getAllFlow()
+
+    // The planner is an expensive multi-year Rust optimization. Each of the
+    // three flows below is `shareIn`'d so every consumer (Calendar,
+    // Reconcile, Settings, auto-sync) shares ONE computation instead of
+    // re-running the optimizer per collector.
+    //
+    // `WhileSubscribed(SHARE_KEEPALIVE_MS)`: the upstream stays alive for a
+    // few seconds after the last collector leaves, which comfortably covers
+    // screen-to-screen navigation (Calendar → Reconcile reuses the warm
+    // result) while still releasing the Room observers + recompute loop when
+    // the app sits idle or backgrounded.
+    //
+    // `replay = 1`: re-subscribers get the last value immediately, and
+    // `.first()` keeps its "wait for the first real emission" semantics
+    // rather than returning a premature initial value.
 
     /**
      * Reactive long-range planner result. Recomputes from settings only; actual
@@ -30,20 +53,33 @@ class PlannerRepository(
         if (s == null || !s.onboardingComplete) return@map null
         computePlan(s, periods = emptyList(), dayLogs = emptyList(), useCalendarCycles = false)
     }.flowOn(Dispatchers.Default)
+        .shareIn(appScope, SharingStarted.WhileSubscribed(SHARE_KEEPALIVE_MS), replay = 1)
 
-    val calendarPlannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
-        if (s == null || !s.onboardingComplete) return@combine null
-        computePlan(s, p, d, useCalendarCycles = true)
-    }.flowOn(Dispatchers.Default)
+    /**
+     * Calendar-shaped plan with the user's logged actions fed in as locks.
+     * Shared so navigating between the Calendar, Reconcile, and Settings
+     * screens reuses one computation instead of re-running the optimizer
+     * per screen.
+     */
+    val calendarPlannerResultFlow: Flow<PlannerResult?> =
+        combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
+            if (s == null || !s.onboardingComplete) return@combine null
+            computePlan(s, p, d, useCalendarCycles = true)
+        }.flowOn(Dispatchers.Default)
+            .shareIn(appScope, SharingStarted.WhileSubscribed(SHARE_KEEPALIVE_MS), replay = 1)
 
     /**
      * Calendar-shaped plan without actual-day locks. Used for comparing what
      * has happened so far against the original recommendation in risk units.
+     * Shared, and intentionally does NOT depend on `dayLogsFlow`, so logging
+     * a day never re-runs this baseline.
      */
-    val calendarBaselinePlannerResultFlow: Flow<PlannerResult?> = combine(settingsFlow, periodsFlow) { s, p ->
-        if (s == null || !s.onboardingComplete) return@combine null
-        computePlan(s, p, dayLogs = emptyList(), useCalendarCycles = true)
-    }.flowOn(Dispatchers.Default)
+    val calendarBaselinePlannerResultFlow: Flow<PlannerResult?> =
+        combine(settingsFlow, periodsFlow) { s, p ->
+            if (s == null || !s.onboardingComplete) return@combine null
+            computePlan(s, p, dayLogs = emptyList(), useCalendarCycles = true)
+        }.flowOn(Dispatchers.Default)
+            .shareIn(appScope, SharingStarted.WhileSubscribed(SHARE_KEEPALIVE_MS), replay = 1)
 
     /** Run the planner synchronously (called on Dispatchers.Default). */
     private fun computePlan(
@@ -311,4 +347,14 @@ class PlannerRepository(
      */
     fun unreconciledLogsFlow(fromEpochDay: Long, beforeEpochDay: Long) =
         dayLogDao.getUnreconciledInRangeFlow(fromEpochDay, beforeEpochDay)
+
+    private companion object {
+        /**
+         * How long a shared planner flow stays warm after its last collector
+         * unsubscribes. Long enough to bridge screen-to-screen navigation
+         * (so e.g. Calendar → Reconcile reuses the computed plan), short
+         * enough that an idle/backgrounded app stops recomputing.
+         */
+        const val SHARE_KEEPALIVE_MS = 5_000L
+    }
 }

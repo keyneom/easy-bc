@@ -27,7 +27,7 @@ class EasyBCApp : Application() {
     val cycleCalculator: CycleCalculator by lazy { CycleCalculator() }
 
     val repository: PlannerRepository by lazy {
-        PlannerRepository(database, bridge, cycleCalculator)
+        PlannerRepository(database, bridge, cycleCalculator, appScope)
     }
 
     val calendarSync: EasyBCCalendarSync by lazy { EasyBCCalendarSync(this) }
