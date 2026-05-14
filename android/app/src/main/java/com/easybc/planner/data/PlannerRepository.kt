@@ -347,6 +347,25 @@ class PlannerRepository(
         dayLogDao.upsert(merged)
     }
 
+    /**
+     * Clear the logged action for [date], leaving any body signals and notes
+     * intact. The day reverts to un-reconciled (it's no longer a user-
+     * confirmed day). If the row has nothing else on it — no signals, no
+     * notes — the whole row is deleted so the table doesn't accumulate
+     * empty rows.
+     */
+    suspend fun clearDayAction(date: LocalDate) {
+        val existing = dayLogDao.getForDate(date.toEpochDay()) ?: return
+        val hasSignals = existing.mucus != null || existing.bbtCelsius != null ||
+            existing.opk != null || existing.mittelschmerz || existing.breastTender
+        val hasNotes = !existing.notes.isNullOrBlank()
+        if (hasSignals || hasNotes) {
+            dayLogDao.upsert(existing.copy(actualAction = "", reconciled = false))
+        } else {
+            dayLogDao.delete(existing)
+        }
+    }
+
     suspend fun getDayLog(date: LocalDate): DayLog? {
         return dayLogDao.getForDate(date.toEpochDay())
     }

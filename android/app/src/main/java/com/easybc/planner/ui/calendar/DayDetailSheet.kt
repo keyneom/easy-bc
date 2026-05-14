@@ -35,6 +35,7 @@ fun DayDetailSheet(
     onLogPeriodEnd: () -> Unit,
     onClearPeriodEnd: () -> Unit,
     onLogAction: (RecommendedAction) -> Unit,
+    onClearAction: () -> Unit,
     onLogObservations: (
         mucus: String?,
         bbtCelsius: Double?,
@@ -227,19 +228,56 @@ fun DayDetailSheet(
                 add(RecommendedAction.A)
             }
 
+            var showClearActionConfirm by remember(cell.date) { mutableStateOf(false) }
+            val loggedActionInRow = logActions.any { it.shortLabel == cell.dayLog?.actualAction }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 logActions.forEach { action ->
+                    val isActive = cell.dayLog?.actualAction == action.shortLabel
                     ActionLogButton(
                         action = action,
-                        isActive = cell.dayLog?.actualAction == action.shortLabel,
+                        isActive = isActive,
                         modifier = Modifier.weight(1f),
                     ) {
-                        onLogAction(action)
+                        // Tapping the already-logged action asks to clear it;
+                        // tapping any other action just switches the log.
+                        if (isActive) showClearActionConfirm = true
+                        else onLogAction(action)
                     }
                 }
+            }
+
+            if (loggedActionInRow) {
+                Text(
+                    text = "Tap the highlighted action to change or clear it.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (showClearActionConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showClearActionConfirm = false },
+                    title = { Text("Clear logged action?") },
+                    text = {
+                        Text(
+                            "This removes what you logged for this day. Any body " +
+                                "signals you've recorded stay. Your plan updates automatically.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            onClearAction()
+                            showClearActionConfirm = false
+                        }) { Text("Clear") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showClearActionConfirm = false }) { Text("Cancel") }
+                    },
+                )
             }
 
             HorizontalDivider()

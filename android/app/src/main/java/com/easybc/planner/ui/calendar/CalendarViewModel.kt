@@ -370,6 +370,16 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
+     * Clear the logged action for [date]. Body signals on the day are kept;
+     * the row is removed entirely if nothing else remains on it.
+     */
+    fun clearDayAction(date: LocalDate) {
+        viewModelScope.launch {
+            repo.clearDayAction(date)
+        }
+    }
+
+    /**
      * Merge-save optional body signals for [date]. Preserves any existing
      * actualAction/notes; does *not* mark the row as reconciled (signals on
      * their own aren't a reconciliation).

@@ -322,6 +322,7 @@ fun CalendarScreen(
                 onLogPeriodEnd = { vm.endCurrentPeriod(selectedDetail!!.date) },
                 onClearPeriodEnd = { vm.clearPeriodEnd(selectedDetail!!.date) },
                 onLogAction = { action -> vm.logDayAction(selectedDetail!!.date, action) },
+                onClearAction = { vm.clearDayAction(selectedDetail!!.date) },
                 onLogObservations = { mucus, bbt, opk, mitt, tender ->
                     vm.logDayObservations(
                         date = selectedDetail!!.date,
