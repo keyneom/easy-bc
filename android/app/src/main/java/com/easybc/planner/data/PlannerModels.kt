@@ -160,8 +160,35 @@ data class OverrideCost(
     val overrideAction: String? = null,
     val condoms: Int = 0,
     val abstinenceDays: Int = 0,
+    /** Whether the override's added risk fully recovers within the cycle. */
+    val recovered: Boolean = true,
+    /**
+     * The core no longer ships a per-day note string (it was ~150 chars on
+     * every one of thousands of day-weights — pure decode bloat). Left here
+     * for backward-compat with older payloads; new payloads omit it and the
+     * UI reconstructs the sentence via [recoveryNote].
+     */
     val note: String = "",
-)
+) {
+    /**
+     * Human-readable recovery note, reconstructed from the structured
+     * fields. Mirrors the sentence the Rust core used to emit. Falls back to
+     * the wire `note` if a payload still carries one.
+     */
+    fun recoveryNote(): String {
+        if (note.isNotBlank()) return note
+        val action = overrideAction ?: return ""
+        return if (recovered) {
+            "Approx. reserve recovery if overridden with $action: " +
+                "+$condoms condom day(s) and +$abstinenceDays abstinence day(s) " +
+                "elsewhere in the same cycle to restore the plan's risk cushion."
+        } else {
+            "Approx. same-cycle reserve recovery is not fully available; " +
+                "this override would spend risk reserve and may require broader " +
+                "replanning of the current cycle and/or future cycles to restore the cushion."
+        }
+    }
+}
 
 @Serializable
 data class DayWeight(
@@ -211,7 +238,12 @@ data class YearOutput(
     val annualRisk: Double,
     val signalSummary: SignalSummary? = null,
     val counts: ActionCounts,
-    val groupedDays: GroupedCycleDays,
+    /**
+     * Per-action day-index lists. The core no longer serializes this (no
+     * client reads it — grouping is derived from [dayWeights] directly).
+     * Defaulted for backward-compat with older payloads.
+     */
+    val groupedDays: GroupedCycleDays = GroupedCycleDays(),
     val dayWeights: List<DayWeight>,
 )
 

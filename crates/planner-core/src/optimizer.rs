@@ -1841,6 +1841,7 @@ fn estimate_override_cost_for_day(
                 override_action: None,
                 condoms: 0,
                 abstinence_days: 0,
+                recovered: true,
                 note: "No recovery cost shown for recommended unprotected days.".to_string(),
             };
         }
@@ -1930,6 +1931,7 @@ fn estimate_override_cost_for_day(
         override_action: Some(label.to_string()),
         condoms: display_condom_days,
         abstinence_days: display_abstinence_days,
+        recovered,
         note,
     }
 }

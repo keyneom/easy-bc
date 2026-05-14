@@ -176,7 +176,7 @@ fun DayDetailSheet(
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            text = cell.overrideCost.note,
+                            text = cell.overrideCost.recoveryNote(),
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         if (cell.overrideCost.condoms > 0 || cell.overrideCost.abstinenceDays > 0) {

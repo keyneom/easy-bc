@@ -415,7 +415,7 @@ pub struct ActionCounts {
     pub abstain: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupedCycleDays {
     pub unprotected: Vec<i32>,
@@ -431,6 +431,19 @@ pub struct OverrideCost {
     pub override_action: Option<String>,
     pub condoms: i32,
     pub abstinence_days: i32,
+    /// Whether the override's added risk can be fully recovered within the
+    /// same cycle. Disambiguates `(condoms == 0, abstinence_days == 0)`,
+    /// which otherwise means either "recovered, no extra days needed" or
+    /// "not recoverable" — clients need to know which to render the note.
+    pub recovered: bool,
+    /// Human-readable recovery note. Computed by the core but deliberately
+    /// NOT serialized: it's a ~150-char sentence on every one of ~7300
+    /// day-weights in a 20-year plan — pure JSON bloat that dominated
+    /// client-side decode time. Fully derivable from `override_action` +
+    /// `condoms` + `abstinence_days` + `recovered`, so clients reconstruct
+    /// it on demand for the single day the user inspects. Kept on the
+    /// struct (and populated) so Rust-side tests can assert on it directly.
+    #[serde(skip_serializing, default)]
     pub note: String,
 }
 
@@ -470,6 +483,13 @@ pub struct YearOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal_summary: Option<SignalSummary>,
     pub counts: ActionCounts,
+    /// Per-action day-index lists. Computed by the core but NOT serialized:
+    /// no client reads it (both Android and web derive grouping from
+    /// `day_weights` directly), and as `Vec<i32>` it costs ~33 boxed
+    /// allocations per cycle on the client decode — ~36% of a YearOutput's
+    /// object count for a field nobody consumes. Kept on the struct so
+    /// Rust-side code/tests can still use it.
+    #[serde(skip_serializing, default)]
     pub grouped_days: GroupedCycleDays,
     pub day_weights: Vec<DayWeight>,
 }
