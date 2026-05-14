@@ -415,15 +415,6 @@ pub struct ActionCounts {
     pub abstain: i32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupedCycleDays {
-    pub unprotected: Vec<i32>,
-    pub condom: Vec<i32>,
-    pub withdrawal: Vec<i32>,
-    pub abstain: Vec<i32>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverrideCost {
@@ -483,14 +474,6 @@ pub struct YearOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal_summary: Option<SignalSummary>,
     pub counts: ActionCounts,
-    /// Per-action day-index lists. Computed by the core but NOT serialized:
-    /// no client reads it (both Android and web derive grouping from
-    /// `day_weights` directly), and as `Vec<i32>` it costs ~33 boxed
-    /// allocations per cycle on the client decode — ~36% of a YearOutput's
-    /// object count for a field nobody consumes. Kept on the struct so
-    /// Rust-side code/tests can still use it.
-    #[serde(skip_serializing, default)]
-    pub grouped_days: GroupedCycleDays,
     pub day_weights: Vec<DayWeight>,
 }
 

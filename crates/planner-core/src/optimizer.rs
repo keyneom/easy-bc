@@ -13,9 +13,9 @@ use crate::reference_curves::{
 };
 use crate::types::{
     ActionCounts, CondomMode, CondomResidualsUsed, DayOverride, DayWeight, DerivedUxWeights,
-    GroupedCycleDays, HighVariabilityYear, MethodLibraryUsed, OverrideCost, PlanDayDiff,
-    PlannerResult, PlannerValidation, PlannerWarning, RecommendedAction, ReplanPreview,
-    SdmValidation, SignalSummary, UserOptions, YearOutput,
+    HighVariabilityYear, MethodLibraryUsed, OverrideCost, PlanDayDiff, PlannerResult,
+    PlannerValidation, PlannerWarning, RecommendedAction, ReplanPreview, SdmValidation,
+    SignalSummary, UserOptions, YearOutput,
 };
 use std::collections::HashSet;
 
@@ -873,12 +873,6 @@ fn build_planner_result(
                 })
                 .collect();
             let counts = count_actions(plan);
-            let grouped = GroupedCycleDays {
-                unprotected: list_days_for_action(plan, Act::U),
-                condom: list_days_for_action(plan, Act::C),
-                withdrawal: list_days_for_action(plan, Act::W),
-                abstain: list_days_for_action(plan, Act::A),
-            };
             YearOutput {
                 year_index: yr.year_index,
                 age: yr.age,
@@ -891,7 +885,6 @@ fn build_planner_result(
                 annual_risk: annual_from_cycle_risk(cycle_risks[y], yr.effective_cycles_per_year),
                 signal_summary: yr.signal_summary.clone(),
                 counts,
-                grouped_days: grouped,
                 day_weights,
             }
         })
@@ -1941,14 +1934,6 @@ fn normalize_risk_scores(base_risk_by_day: &[f64]) -> Vec<i32> {
     base_risk_by_day
         .iter()
         .map(|r| ((r / max) * 100.0).round() as i32)
-        .collect()
-}
-
-fn list_days_for_action(plan: &[Act], want: Act) -> Vec<i32> {
-    plan.iter()
-        .enumerate()
-        .filter(|(_, a)| **a == want)
-        .map(|(i, _)| i as i32 + 1)
         .collect()
 }
 

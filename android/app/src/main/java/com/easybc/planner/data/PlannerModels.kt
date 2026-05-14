@@ -211,14 +211,6 @@ data class ActionCounts(
 )
 
 @Serializable
-data class GroupedCycleDays(
-    val unprotected: List<Int> = emptyList(),
-    val condom: List<Int> = emptyList(),
-    val withdrawal: List<Int> = emptyList(),
-    val abstain: List<Int> = emptyList(),
-)
-
-@Serializable
 data class SignalSummary(
     val posteriorOvulationMeanDay: Double,
     val posteriorOvulationSdDays: Double,
@@ -238,12 +230,6 @@ data class YearOutput(
     val annualRisk: Double,
     val signalSummary: SignalSummary? = null,
     val counts: ActionCounts,
-    /**
-     * Per-action day-index lists. The core no longer serializes this (no
-     * client reads it — grouping is derived from [dayWeights] directly).
-     * Defaulted for backward-compat with older payloads.
-     */
-    val groupedDays: GroupedCycleDays = GroupedCycleDays(),
     val dayWeights: List<DayWeight>,
 )
 

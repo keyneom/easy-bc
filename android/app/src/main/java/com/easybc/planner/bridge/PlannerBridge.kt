@@ -124,12 +124,6 @@ class MockPlannerBridge : PlannerBridge {
                     withdrawal = dayWeights.count { it.recommendedAction == RecommendedAction.W },
                     abstain = dayWeights.count { it.recommendedAction == RecommendedAction.A },
                 ),
-                groupedDays = GroupedCycleDays(
-                    unprotected = dayWeights.filter { it.recommendedAction == RecommendedAction.U }.map { it.day },
-                    condom = dayWeights.filter { it.recommendedAction == RecommendedAction.C }.map { it.day },
-                    withdrawal = dayWeights.filter { it.recommendedAction == RecommendedAction.W }.map { it.day },
-                    abstain = dayWeights.filter { it.recommendedAction == RecommendedAction.A }.map { it.day },
-                ),
                 dayWeights = dayWeights,
             )
         }
