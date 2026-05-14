@@ -9,6 +9,7 @@ import com.easybc.planner.data.db.DayLog
 import com.easybc.planner.data.db.PeriodRecord
 import com.easybc.planner.data.db.UserSettingsEntity
 import com.easybc.planner.util.CycleCalculator
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.time.DayOfWeek
@@ -154,7 +155,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         if (today.toEpochDay() > originalEstimate && predictedEnd >= today.toEpochDay()) {
             open
         } else null
-    }.stateIn(viewModelScope, SharingStarted.Lazily, null)
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     val unreconciledCount: StateFlow<Int> = combine(
         settings, plannerResult, periods, repo.dayLogsFlow,
@@ -177,7 +179,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             d = d.plusDays(1)
         }
         count
-    }.stateIn(viewModelScope, SharingStarted.Lazily, 0)
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Lazily, 0)
 
     /**
      * Per-cycle risk ledger for the cycle containing *today*. Null when we
@@ -242,28 +245,33 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             horizonTarget = s.targetCumulativeFailure,
             targetMet = plan.targetMet,
         )
-    }.stateIn(viewModelScope, SharingStarted.Lazily, null)
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     /** Generate cell data for the current month view. */
     val monthCells: StateFlow<List<DayCellData>> = combine(
         _currentMonth, plannerResult, periods, repo.dayLogsFlow,
     ) { month, plan, periodList, dayLogs ->
         buildMonthCells(month, plan, periodList, dayLogs)
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     /** Generate cell data for the current week view. */
     val weekCells: StateFlow<List<DayCellData>> = combine(
         _selectedDate, plannerResult, periods, repo.dayLogsFlow,
     ) { selected, plan, periodList, dayLogs ->
         buildWeekCells(selected, plan, periodList, dayLogs)
-    }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     /** Detail data for the selected day. */
     val selectedDayDetail: StateFlow<DayCellData?> = combine(
         _selectedDate, plannerResult, periods, repo.dayLogsFlow,
     ) { date, plan, periodList, dayLogs ->
-        buildCellForDate(date, YearMonth.from(date), plan, periodList, dayLogs, isCurrentMonth = true)
-    }.stateIn(viewModelScope, SharingStarted.Lazily, null)
+        val ctx = buildCalendarContext(periodList, dayLogs)
+        buildCellForDate(date, plan, periodList, ctx, isCurrentMonth = true)
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     fun selectDate(date: LocalDate) {
         _selectedDate.value = date
@@ -394,6 +402,41 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
 
     // ── Private helpers ──
 
+    /**
+     * Per-render snapshot of the things that are identical for every cell in
+     * a month/week grid. Building these once and threading them through
+     * [buildCellForDate] turns 42 redundant ~260-cycle rebuilds (and two
+     * full cycle scans) per month render into one — the difference between
+     * a janky calendar and a smooth one.
+     */
+    private data class CalendarContext(
+        val today: LocalDate,
+        val allCycles: List<CycleCalculator.DerivedCycle>,
+        val predictedBleedDays: Set<Long>,
+        val cycleFlags: Map<LocalDate, CycleCalculator.CycleFlag>,
+        val dayLogsByEpoch: Map<Long, DayLog>,
+    )
+
+    private fun buildCalendarContext(
+        periodList: List<PeriodRecord>,
+        dayLogs: List<DayLog>,
+    ): CalendarContext {
+        val today = LocalDate.now()
+        val settingsNow = settings.value
+        val allCycles = if (settingsNow != null) {
+            cycleCalc.buildCoverageCycles(periodList, settingsNow)
+        } else {
+            cycleCalc.deriveCycles(periodList)
+        }
+        return CalendarContext(
+            today = today,
+            allCycles = allCycles,
+            predictedBleedDays = cycleCalc.predictedFutureBleedDays(allCycles, periodList, today),
+            cycleFlags = cycleCalc.flagObservedCycles(periodList),
+            dayLogsByEpoch = dayLogs.associateBy { it.date },
+        )
+    }
+
     private fun buildMonthCells(
         month: YearMonth,
         plan: PlannerResult?,
@@ -405,11 +448,12 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         val gridStart = firstOfMonth.with(DayOfWeek.MONDAY).let {
             if (it.isAfter(firstOfMonth)) it.minusWeeks(1) else it
         }
+        val ctx = buildCalendarContext(periodList, dayLogs)
         // 6 weeks of grid
         val cells = mutableListOf<DayCellData>()
         for (i in 0 until 42) {
             val date = gridStart.plusDays(i.toLong())
-            cells.add(buildCellForDate(date, month, plan, periodList, dayLogs, date.month == month.month))
+            cells.add(buildCellForDate(date, plan, periodList, ctx, date.month == month.month))
         }
         return cells
     }
@@ -421,23 +465,23 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         dayLogs: List<DayLog>,
     ): List<DayCellData> {
         val weekStart = selectedDate.with(DayOfWeek.MONDAY)
+        val ctx = buildCalendarContext(periodList, dayLogs)
         return (0 until 7).map { i ->
             val date = weekStart.plusDays(i.toLong())
-            buildCellForDate(date, YearMonth.from(date), plan, periodList, dayLogs, isCurrentMonth = true)
+            buildCellForDate(date, plan, periodList, ctx, isCurrentMonth = true)
         }
     }
 
     private fun buildCellForDate(
         date: LocalDate,
-        month: YearMonth,
         plan: PlannerResult?,
         periodList: List<PeriodRecord>,
-        dayLogs: List<DayLog>,
+        ctx: CalendarContext,
         isCurrentMonth: Boolean,
     ): DayCellData {
-        val today = LocalDate.now()
+        val today = ctx.today
         val recordedIsPeriod = cycleCalc.isDateInPeriod(date, periodList, today)
-        val dayLog = dayLogs.find { LocalDate.ofEpochDay(it.date) == date }
+        val dayLog = ctx.dayLogsByEpoch[date.toEpochDay()]
 
         // Find the period record whose bleed window contains this date, if
         // any. Used to surface "this is predicted" vs "you confirmed this"
@@ -454,19 +498,15 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
 
         // Single combined cycle list: observed + active + predicted. Must stay
         // aligned with the cycle list the planner saw (see buildCalendarCycles),
-        // because plan.years[i] corresponds to allCycles[i].
-        val settingsNow = settings.value
-        val allCycles = if (settingsNow != null) {
-            cycleCalc.buildCoverageCycles(periodList, settingsNow)
-        } else {
-            cycleCalc.deriveCycles(periodList)
-        }
+        // because plan.years[i] corresponds to allCycles[i]. Built once per
+        // render and threaded in via [ctx].
+        val allCycles = ctx.allCycles
 
         // Predicted future bleed window: if this is a *future* cycle's
         // first N days and there's no recorded period for it yet, surface
         // it as a predicted period day so users can plan around it.
         val isPredictedFutureBleed = !recordedIsPeriod &&
-            date.toEpochDay() in cycleCalc.predictedFutureBleedDays(allCycles, periodList, today)
+            date.toEpochDay() in ctx.predictedBleedDays
 
         val isPeriod = recordedIsPeriod || isPredictedFutureBleed
         val isPeriodPredicted =
@@ -486,9 +526,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
 
         // Atypical-cycle flag for the cycle containing this date (closed
         // observed cycles only — predicted/active cycles can't be flagged).
-        val cycleFlags = cycleCalc.flagObservedCycles(periodList)
         val cycleStart = if (cycleIdx != null) allCycles.getOrNull(cycleIdx)?.startDate else null
-        val cycleFlag = cycleStart?.let { cycleFlags[it] }
+        val cycleFlag = cycleStart?.let { ctx.cycleFlags[it] }
 
         // Map to planner output
         var plannerAction: RecommendedAction? = null

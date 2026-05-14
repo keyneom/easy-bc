@@ -10,6 +10,7 @@ import com.easybc.planner.data.db.DayLog
 import com.easybc.planner.data.db.PeriodRecord
 import com.easybc.planner.data.db.UserSettingsEntity
 import com.easybc.planner.util.CycleCalculator
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -54,11 +55,27 @@ class ReconcileViewModel(application: Application) : AndroidViewModel(applicatio
     private val _selectedDates = MutableStateFlow<Set<Long>>(emptySet())
     val selectedDates: StateFlow<Set<Long>> = _selectedDates
 
-    /** Derived list of unreconciled days; reactive to data changes. */
-    val unreconciled: StateFlow<List<Row>> =
+    /**
+     * Derived list of unreconciled days; reactive to data changes.
+     *
+     * `null` means "still loading" — the planner result hasn't been computed
+     * yet. This is deliberately distinct from `emptyList()`, which means
+     * "computed, and there is genuinely nothing to reconcile." The screen
+     * MUST show a spinner for `null`, not the "all caught up" empty state —
+     * otherwise the user sees a false empty state during the planner's
+     * first-run delay and walks away thinking there's no work to do.
+     */
+    val unreconciled: StateFlow<List<Row>?> =
         combine(settingsFlow, periodsFlow, dayLogsFlow, plannerFlow) { s, p, logs, plan ->
-            computeUnreconciled(s, p, logs, plan)
-        }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+            // Settings or plan still loading → emit null (loading), never an
+            // empty list, so the UI can tell "loading" from "nothing to do".
+            if (s == null || plan == null) null
+            else computeUnreconciled(s, p, logs, plan)
+        }.flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.Lazily, null)
+
+    /** Current rows, or empty if still loading — for the selection helpers. */
+    private val currentRows: List<Row> get() = unreconciled.value.orEmpty()
 
     // ── Selection mutations ──
 
@@ -68,7 +85,7 @@ class ReconcileViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun selectAll() {
-        _selectedDates.value = unreconciled.value.map { it.date.toEpochDay() }.toSet()
+        _selectedDates.value = currentRows.map { it.date.toEpochDay() }.toSet()
     }
 
     fun clearSelection() {
@@ -93,7 +110,7 @@ class ReconcileViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Accept the planner's recommended action for a single date. */
     fun acceptAsPlanned(date: LocalDate) {
-        val row = unreconciled.value.firstOrNull { it.date == date } ?: return
+        val row = currentRows.firstOrNull { it.date == date } ?: return
         reconcileOne(date, row.plannerAction.shortLabel)
     }
 
@@ -116,7 +133,7 @@ class ReconcileViewModel(application: Application) : AndroidViewModel(applicatio
     fun acceptSelectedAsPlanned() {
         val selected = _selectedDates.value
         if (selected.isEmpty()) return
-        val byDate = unreconciled.value.associateBy { it.date.toEpochDay() }
+        val byDate = currentRows.associateBy { it.date.toEpochDay() }
         viewModelScope.launch {
             for (epoch in selected) {
                 val row = byDate[epoch] ?: continue

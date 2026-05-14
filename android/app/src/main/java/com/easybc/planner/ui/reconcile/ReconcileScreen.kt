@@ -32,6 +32,8 @@ fun ReconcileScreen(
     onBack: () -> Unit,
     vm: ReconcileViewModel = viewModel(),
 ) {
+    // null = planner still computing (show a spinner); emptyList = computed
+    // and genuinely nothing to do (show "all caught up"); non-empty = rows.
     val rows by vm.unreconciled.collectAsState()
     val selected by vm.selectedDates.collectAsState()
     val dateFmt = remember { DateTimeFormatter.ofPattern("EEE, MMM d") }
@@ -46,12 +48,13 @@ fun ReconcileScreen(
                     }
                 },
                 actions = {
-                    if (rows.isNotEmpty()) {
+                    val loadedRows = rows
+                    if (!loadedRows.isNullOrEmpty()) {
                         TextButton(onClick = {
-                            if (selected.size == rows.size) vm.clearSelection()
+                            if (selected.size == loadedRows.size) vm.clearSelection()
                             else vm.selectAll()
                         }) {
-                            Text(if (selected.size == rows.size) "Clear" else "All")
+                            Text(if (selected.size == loadedRows.size) "Clear" else "All")
                         }
                     }
                 },
@@ -67,10 +70,11 @@ fun ReconcileScreen(
             }
         },
     ) { padding ->
-        if (rows.isEmpty()) {
-            EmptyState(padding)
-        } else {
-            LazyColumn(
+        val loadedRows = rows
+        when {
+            loadedRows == null -> LoadingState(padding)
+            loadedRows.isEmpty() -> EmptyState(padding)
+            else -> LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
@@ -84,7 +88,7 @@ fun ReconcileScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                items(rows, key = { it.date.toEpochDay() }) { row ->
+                items(loadedRows, key = { it.date.toEpochDay() }) { row ->
                     ReconcileRow(
                         row = row,
                         selected = row.date.toEpochDay() in selected,
@@ -96,6 +100,26 @@ fun ReconcileScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LoadingState(padding: PaddingValues) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        CircularProgressIndicator()
+        Spacer(Modifier.height(16.dp))
+        Text(
+            "Checking your plan…",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
