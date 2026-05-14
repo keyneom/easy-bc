@@ -58,16 +58,22 @@ data class DayCellData(
 enum class CalendarViewMode { MONTH, WEEK }
 
 /**
- * Compact per-cycle risk view. Surfaces the current replanned cycle risk,
- * realized risk so far, and risk saved/spent against the unlocked baseline
- * plan for the logged days in this cycle.
+ * Compact per-cycle risk view. Anchored to the ORIGINAL plan: surfaces the
+ * unlocked baseline cycle risk (stable as days are logged), realized risk so
+ * far, and risk saved/spent against that baseline for the logged days.
  */
 data class CycleLedger(
     /** 1-based position of today within the current cycle. */
     val currentDayInCycle: Int,
     /** Total days in the current cycle (by its derived length). */
     val cycleLengthDays: Int,
-    /** Planner's current replanned cycle-level risk (fraction, 0..1). */
+    /**
+     * The ORIGINAL planned cycle-level risk (fraction, 0..1), taken from the
+     * unlocked baseline plan. This is deliberately *not* the replanned risk:
+     * it stays put as the user logs days, so "plan" always means "what we
+     * originally recommended for this cycle." The effect of logged days is
+     * tracked separately via [realizedSoFar] and the saved/spent diff.
+     */
     val plannedCycleRisk: Double,
     /** Realized risk contribution from the days already logged this cycle. */
     val realizedSoFar: Double,
@@ -224,7 +230,11 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         CycleLedger(
             currentDayInCycle = dayInCycle,
             cycleLengthDays = cycle.lengthDays,
-            plannedCycleRisk = year.cycleRisk,
+            // Original plan — from the unlocked baseline, so logging a day
+            // never moves this number. The replanned `year.cycleRisk` is
+            // intentionally not used here; it's reflected in the horizon
+            // fields and the saved/spent-vs-baseline diff instead.
+            plannedCycleRisk = baselineYear.cycleRisk,
             realizedSoFar = realized,
             savedRiskVsBaseline = (-deltaVsBaseline).coerceAtLeast(0.0),
             extraRiskVsBaseline = deltaVsBaseline.coerceAtLeast(0.0),
