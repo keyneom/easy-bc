@@ -5,6 +5,7 @@ use planner_core::types::{
     RecommendedAction, UserOptions, WithdrawalMode,
 };
 use planner_core::{effective_cumulative_target, fertility_risk_planner};
+use std::time::Instant;
 
 #[test]
 fn calendar_cycles_two_rows_differ_from_legacy_age_grid() {
@@ -61,6 +62,44 @@ fn calendar_cycles_support_full_long_horizon() {
 
     assert_eq!(cal.years.len(), 263);
     assert!(cal.target_met);
+}
+
+/// Performance guardrail. The greedy optimizer maintains a per-cycle
+/// candidate cache so each upgrade iteration touches one cycle's days
+/// rather than rescanning every cycle*day cell. A full 20-year calendar
+/// plan must build well under a second; a regression here (e.g. someone
+/// reintroducing an all-cells rescan in the hot loop) blows straight
+/// past this ceiling.
+#[test]
+fn full_long_horizon_plan_builds_quickly() {
+    let cc = (0..263)
+        .map(|_| CycleInstance {
+            cycle_length_days: 28,
+            cycle_sd_days: 3.9,
+            acts_per_week: 3.5,
+            age_years: 34,
+            body_signals: None,
+        })
+        .collect();
+
+    let started = Instant::now();
+    let cal = fertility_risk_planner(UserOptions {
+        calendar_cycles: Some(cc),
+        target_cumulative_failure: 0.05,
+        horizon_years: 20,
+        condom_mode: CondomMode::Perfect,
+        ..Default::default()
+    })
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(cal.years.len(), 263);
+    // Generous ceiling — a release build lands far under this; the point
+    // is to catch an order-of-magnitude regression, not to micro-bench.
+    assert!(
+        elapsed.as_millis() < 1500,
+        "263-cycle plan took {elapsed:?}, expected < 1.5s",
+    );
 }
 
 #[test]

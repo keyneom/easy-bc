@@ -431,9 +431,71 @@ fn greedy_reduce_risk(
     skip: impl Fn(usize, usize) -> bool,
     relax_to_budget: bool,
 ) -> (Vec<Vec<Act>>, Vec<i32>, Vec<f64>, Vec<f64>) {
+    // Per-cycle best-upgrade cache. Because every benefit/cost term is
+    // cycle-local, applying a change in cycle `y` invalidates ONLY that
+    // cycle's cached candidate — so each iteration refreshes one cycle's
+    // entry (O(days)) instead of rescanning all cycles*days cells. For a
+    // 20-year horizon that's the difference between ~14 s and a blink.
+    let mut cycle_best: Vec<Option<MarginalCandidate>> = (0..years.len())
+        .map(|y| {
+            best_marginal_upgrade_for_cycle(
+                y,
+                years,
+                &plans,
+                &year_burden_points,
+                persistent_residual,
+                protected_day_residual,
+                withdrawal_r,
+                allow_protected_day_method,
+                allow_withdrawal,
+                opts,
+                ux,
+                &skip,
+            )
+        })
+        .collect();
+
     let mut current_risk = total_cumulative_risk(&row_survival);
     while risk_still_above_budget(current_risk, risk_budget) {
-        let Some(c) = best_marginal_upgrade(
+        // Global best = max over the per-cycle cache (linear in cycles).
+        let mut best_y: Option<usize> = None;
+        for y in 0..cycle_best.len() {
+            let Some(cand) = &cycle_best[y] else { continue };
+            let better = match best_y {
+                None => true,
+                Some(by) => {
+                    marginal_candidate_beats(cand, cycle_best[by].as_ref().unwrap())
+                }
+            };
+            if better {
+                best_y = Some(y);
+            }
+        }
+        let Some(by) = best_y else {
+            break;
+        };
+        let (cy, cd, cfrom, cto) = {
+            let c = cycle_best[by].as_ref().unwrap();
+            (c.y, c.d, c.from_action, c.to_action)
+        };
+        apply_change(
+            cy,
+            cd,
+            cfrom,
+            cto,
+            &mut plans,
+            &mut year_burden_points,
+            years,
+            persistent_residual,
+            protected_day_residual,
+            withdrawal_r,
+            &mut cycle_risks,
+            &mut row_survival,
+        );
+        current_risk = total_cumulative_risk(&row_survival);
+        // Only cycle `cy` changed → refresh just its cached candidate.
+        cycle_best[cy] = best_marginal_upgrade_for_cycle(
+            cy,
             years,
             &plans,
             &year_burden_points,
@@ -445,24 +507,7 @@ fn greedy_reduce_risk(
             opts,
             ux,
             &skip,
-        ) else {
-            break;
-        };
-        apply_change(
-            c.y,
-            c.d,
-            c.from_action,
-            c.to_action,
-            &mut plans,
-            &mut year_burden_points,
-            years,
-            persistent_residual,
-            protected_day_residual,
-            withdrawal_r,
-            &mut cycle_risks,
-            &mut row_survival,
         );
-        current_risk = total_cumulative_risk(&row_survival);
     }
     if relax_to_budget {
         relax_toward_budget(
@@ -1234,7 +1279,22 @@ fn marginal_upgrade_cost(
     Some(cost)
 }
 
-fn best_marginal_upgrade(
+/// True when candidate `c` should replace the current best `b`: strictly
+/// higher score, or an effective score tie broken by higher absolute
+/// benefit. Centralised so the per-cycle scan and the global merge use
+/// identical tie-break semantics.
+fn marginal_candidate_beats(c: &MarginalCandidate, b: &MarginalCandidate) -> bool {
+    c.score > b.score + 1e-18
+        || ((c.score - b.score).abs() <= 1e-18 && c.benefit > b.benefit + 1e-18)
+}
+
+/// Best single upgrade within ONE cycle. Every term in both the benefit
+/// (`current_risk_reduction_if_change`) and the cost (`marginal_upgrade_cost`
+/// → `time_weight` / `crowding_weight` / `local_abstain_streak_delta`) reads
+/// only cycle `y`'s state, so a change applied in cycle `y` invalidates only
+/// this cycle's result — see `greedy_reduce_risk`'s per-cycle cache.
+fn best_marginal_upgrade_for_cycle<F: Fn(usize, usize) -> bool>(
+    y: usize,
     years: &[YearData],
     plans: &[Vec<Act>],
     year_burden_points: &[i32],
@@ -1245,71 +1305,65 @@ fn best_marginal_upgrade(
     allow_withdrawal: bool,
     opts: &UserOptions,
     ux: &UxWeights,
-    skip: impl Fn(usize, usize) -> bool,
+    skip: &F,
 ) -> Option<MarginalCandidate> {
     let mut best: Option<MarginalCandidate> = None;
-    for y in 0..years.len() {
-        for d in 0..years[y].cycle_length_days as usize {
-            if skip(y, d) {
-                continue;
-            }
-            let cur = plans[y][d];
-            if years[y].base_risk_by_day[d] <= 0.0 {
-                continue;
-            }
-            for &to in action_successors(
+    for d in 0..years[y].cycle_length_days as usize {
+        if skip(y, d) {
+            continue;
+        }
+        let cur = plans[y][d];
+        if years[y].base_risk_by_day[d] <= 0.0 {
+            continue;
+        }
+        for &to in action_successors(
+            cur,
+            allow_protected_day_method,
+            protected_day_residual,
+            allow_withdrawal,
+            withdrawal_r,
+        )
+        .iter()
+        {
+            let benefit = current_risk_reduction_if_change(
+                y,
+                d,
                 cur,
-                allow_protected_day_method,
+                to,
+                years,
+                persistent_residual,
                 protected_day_residual,
-                allow_withdrawal,
                 withdrawal_r,
-            )
-            .iter()
+            );
+            if benefit <= 0.0 {
+                continue;
+            }
+            let Some(cost) = marginal_upgrade_cost(
+                y,
+                d,
+                cur,
+                to,
+                years,
+                plans,
+                year_burden_points,
+                opts,
+                ux,
+            ) else {
+                continue;
+            };
+            let candidate = MarginalCandidate {
+                y,
+                d,
+                from_action: cur,
+                to_action: to,
+                score: benefit / cost,
+                benefit,
+            };
+            if best
+                .as_ref()
+                .map_or(true, |b| marginal_candidate_beats(&candidate, b))
             {
-                let benefit = current_risk_reduction_if_change(
-                    y,
-                    d,
-                    cur,
-                    to,
-                    years,
-                    persistent_residual,
-                    protected_day_residual,
-                    withdrawal_r,
-                );
-                if benefit <= 0.0 {
-                    continue;
-                }
-                let Some(cost) = marginal_upgrade_cost(
-                    y,
-                    d,
-                    cur,
-                    to,
-                    years,
-                    plans,
-                    year_burden_points,
-                    opts,
-                    ux,
-                ) else {
-                    continue;
-                };
-                let score = benefit / cost;
-                let replace = match &best {
-                    None => true,
-                    Some(b) => {
-                        score > b.score + 1e-18
-                            || ((score - b.score).abs() <= 1e-18 && benefit > b.benefit + 1e-18)
-                    }
-                };
-                if replace {
-                    best = Some(MarginalCandidate {
-                        y,
-                        d,
-                        from_action: cur,
-                        to_action: to,
-                        score,
-                        benefit,
-                    });
-                }
+                best = Some(candidate);
             }
         }
     }
@@ -1418,7 +1472,10 @@ fn best_marginal_downgrade(
     risk_budget: f64,
     skip: impl Fn(usize, usize) -> bool,
 ) -> Option<RelaxCandidate> {
-    let current_risk = total_cumulative_risk(row_survival);
+    // Precompute the running product once; `cumulative_risk_if_change` then
+    // evaluates each candidate in O(1) instead of re-multiplying every row.
+    let total_survival: f64 = row_survival.iter().product();
+    let current_risk = 1.0 - total_survival;
     let mut best: Option<RelaxCandidate> = None;
     for y in 0..years.len() {
         for d in 0..years[y].cycle_length_days as usize {
@@ -1446,6 +1503,7 @@ fn best_marginal_downgrade(
                     withdrawal_r,
                     cycle_risks,
                     row_survival,
+                    total_survival,
                 );
                 let risk_increase = new_risk - current_risk;
                 if risk_increase <= 1e-18 || new_risk > risk_budget + 1e-12 {
@@ -1491,6 +1549,13 @@ fn best_marginal_downgrade(
     best
 }
 
+/// Cumulative risk if a single (y, d) cell changed action.
+///
+/// `total_survival` is the caller's precomputed `∏ row_survival`. We swap
+/// row `y`'s factor out of the running product in O(1) — `total / old_row *
+/// new_row` — instead of re-multiplying all ~cycles rows on every candidate
+/// evaluation. Falls back to a full product only when row `y`'s survival is
+/// degenerate (≈0), where the division would be unstable.
 fn cumulative_risk_if_change(
     y: usize,
     d: usize,
@@ -1502,6 +1567,7 @@ fn cumulative_risk_if_change(
     withdrawal_r: f64,
     cycle_risks: &[f64],
     row_survival: &[f64],
+    total_survival: f64,
 ) -> f64 {
     let old_mult = multiplier_for_action(
         old_action,
@@ -1526,10 +1592,16 @@ fn cumulative_risk_if_change(
     };
     let new_cycle_risk = (1.0 - new_cycle_surv).clamp(0.0, 1.0);
     let new_row_survival = (1.0 - new_cycle_risk).powf(years[y].effective_cycles_per_year);
-    let mut survival = 1.0_f64;
-    for (idx, row) in row_survival.iter().enumerate() {
-        survival *= if idx == y { new_row_survival } else { *row };
-    }
+    let old_row = row_survival[y];
+    let survival = if old_row > 1e-12 {
+        total_survival / old_row * new_row_survival
+    } else {
+        let mut s = 1.0_f64;
+        for (idx, row) in row_survival.iter().enumerate() {
+            s *= if idx == y { new_row_survival } else { *row };
+        }
+        s
+    };
     1.0 - survival
 }
 

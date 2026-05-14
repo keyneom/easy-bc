@@ -164,13 +164,28 @@ class PlannerRepository(
         )
 
         val json = PlannerJson.encodeToString(UserOptions.serializer(), options)
-        return bridge.planFromJson(json).getOrNull()?.let { resultJson ->
+        val bridgeStart = System.nanoTime()
+        val resultJson = bridge.planFromJson(json).getOrNull()
+        val bridgeMs = (System.nanoTime() - bridgeStart) / 1_000_000
+        val decodeStart = System.nanoTime()
+        val result = resultJson?.let {
             try {
-                PlannerJson.decodeFromString<PlannerResult>(resultJson)
+                PlannerJson.decodeFromString<PlannerResult>(it)
             } catch (_: Exception) {
                 null
             }
         }
+        val decodeMs = (System.nanoTime() - decodeStart) / 1_000_000
+        // Lightweight perf trace — surfaces whether a slow plan is the Rust
+        // optimizer (bridge) or the JSON round-trip (decode), and how many
+        // cycles were in play. `adb logcat -s PlannerPerf` to watch.
+        android.util.Log.d(
+            "PlannerPerf",
+            "computePlan calendar=$useCalendarCycles " +
+                "cycles=${calendarCycles?.size ?: settings.horizonYears} " +
+                "locks=${loggedActionLocks.size} bridge=${bridgeMs}ms decode=${decodeMs}ms",
+        )
+        return result
     }
 
     private fun buildLoggedActionLocks(
