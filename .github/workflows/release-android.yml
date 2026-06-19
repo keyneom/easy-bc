@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     env:
-      ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/easy-bc-release.jks
       ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
       ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
       ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -46,12 +45,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          keystore_file="$RUNNER_TEMP/easy-bc-release.jks"
           test -n "$ANDROID_KEYSTORE_BASE64"
           test -n "$ANDROID_KEYSTORE_PASSWORD"
           test -n "$ANDROID_KEY_ALIAS"
           test -n "$ANDROID_KEY_PASSWORD"
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$ANDROID_KEYSTORE_FILE"
-          chmod 600 "$ANDROID_KEYSTORE_FILE"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_file"
+          chmod 600 "$keystore_file"
+          printf 'ANDROID_KEYSTORE_FILE=%s\n' "$keystore_file" >> "$GITHUB_ENV"
 
       - name: Build signed release APK
         working-directory: android
