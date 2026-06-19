@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Calendar sync: we write the user's cycle/plan into a local EasyBC
+        calendar on their device. No data leaves the phone — the user can
+        optionally sync that calendar out via their device account (Google
+        Calendar, Apple Calendar, etc.) but that is their choice.
+    -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+
+    <!--
+        Opt-in daily reminder. POST_NOTIFICATIONS is requested at runtime on
+        Android 13+; RECEIVE_BOOT_COMPLETED lets us re-arm the alarm after a
+        reboot. No exact-alarm permission is needed because we use
+        setInexactRepeating.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:name=".EasyBCApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.EasyBCPlanner">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.EasyBCPlanner">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Fires when the scheduled daily alarm trips. -->
+        <receiver
+            android:name=".notify.ReminderReceiver"
+            android:exported="false" />
+
+        <!-- Re-arms the alarm after a reboot. -->
+        <receiver
+            android:name=".notify.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

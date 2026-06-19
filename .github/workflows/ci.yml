@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy -p planner-core --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test -p planner-core
+
+      - name: wasm target + build
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build -p planner-core --target wasm32-unknown-unknown --features wasm --release
+
+      - name: Node parity smoke
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: compare narrative (JS vs Rust)
+        run: node scripts/compare-narrative.mjs
+
+      - name: JSON fixtures (calendar / realized / locks)
+        run: node scripts/parity-fixtures.mjs
+
+  android-assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: assembleDebug
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+  web-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Vitest (period / session helpers)
+        working-directory: web
+        run: npm ci && npm test
