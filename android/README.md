@@ -10,6 +10,17 @@
 
 CI assembles the debug APK with `./gradlew assembleDebug` (no NDK required for that step).
 
+## Release signing
+
+Tagged releases are built by [the release workflow](../.github/workflows/release-android.yml). The workflow expects these secrets in the protected GitHub `release` environment:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+The keystore is decoded only into the temporary Actions runner. Keep a separate encrypted backup of the keystore and credentials; GitHub does not allow secret values to be recovered after upload, and Android updates must use the same signing identity.
+
 ## Features implemented
 
 ### Persistence & migration safety

@@ -1,4 +1,16 @@
-# Functional Requirements: Personal-Use Fertility Risk Planner
+# EasyBC
+
+EasyBC is a private, on-device fertility risk planner for Android. It is a personal planning tool, not an FDA-cleared contraceptive product.
+
+## Download for Android
+
+Download the latest signed APK from [GitHub Releases](https://github.com/keyneom/easy-bc/releases/latest). EasyBC currently supports Android 8.0 or newer on 64-bit ARM devices.
+
+Because the APK is distributed directly rather than through Google Play, Android will ask you to allow installation from your browser or file manager. Download the APK and its `.sha256` file from the same release, then follow Android's installation prompt.
+
+All application data stays on the device unless you explicitly export a backup or enable calendar sync.
+
+## Functional Requirements: Personal-Use Fertility Risk Planner
 
 ## Product Overview
 

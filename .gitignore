@@ -7,6 +7,10 @@ web/dist/
 android/.gradle/
 android/**/build/
 android/local.properties
+android/.kotlin/
+*.jks
+*.keystore
+.release-signing/
 
 # Claude Code local session state
 .claude/
