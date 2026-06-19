@@ -318,16 +318,17 @@ fn validate_body_signals(
     let Some(signals) = body_signals else {
         return Ok(());
     };
-    for maybe_day in [
+    for day in [
         signals.cervical_mucus_peak_day,
         signals.basal_body_temperature_shift_day,
         signals.lh_surge_day,
         signals.wearable_temperature_shift_day,
-    ] {
-        if let Some(day) = maybe_day {
-            if day < 1 || day > cycle_length_days {
-                return Err(crate::PlannerError::BodySignalsOutOfRange);
-            }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if day < 1 || day > cycle_length_days {
+            return Err(crate::PlannerError::BodySignalsOutOfRange);
         }
     }
     Ok(())

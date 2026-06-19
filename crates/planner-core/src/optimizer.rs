@@ -463,9 +463,7 @@ fn greedy_reduce_risk(
             let Some(cand) = &cycle_best[y] else { continue };
             let better = match best_y {
                 None => true,
-                Some(by) => {
-                    marginal_candidate_beats(cand, cycle_best[by].as_ref().unwrap())
-                }
+                Some(by) => marginal_candidate_beats(cand, cycle_best[by].as_ref().unwrap()),
             };
             if better {
                 best_y = Some(y);
@@ -740,8 +738,8 @@ fn best_monotonic_abstinence_swap(
         if early_from == Act::A || years[y].base_risk_by_day[early_d] <= 0.0 {
             continue;
         }
-        for later_d in 0..plans[later_y].len() {
-            if plans[later_y][later_d] != Act::A {
+        for (later_d, later_action) in plans[later_y].iter().copied().enumerate() {
+            if later_action != Act::A {
                 continue;
             }
             for later_to in action_predecessors(
@@ -1331,17 +1329,9 @@ fn best_marginal_upgrade_for_cycle<F: Fn(usize, usize) -> bool>(
             if benefit <= 0.0 {
                 continue;
             }
-            let Some(cost) = marginal_upgrade_cost(
-                y,
-                d,
-                cur,
-                to,
-                years,
-                plans,
-                year_burden_points,
-                opts,
-                ux,
-            ) else {
+            let Some(cost) =
+                marginal_upgrade_cost(y, d, cur, to, years, plans, year_burden_points, opts, ux)
+            else {
                 continue;
             };
             let candidate = MarginalCandidate {
@@ -1354,7 +1344,7 @@ fn best_marginal_upgrade_for_cycle<F: Fn(usize, usize) -> bool>(
             };
             if best
                 .as_ref()
-                .map_or(true, |b| marginal_candidate_beats(&candidate, b))
+                .is_none_or(|b| marginal_candidate_beats(&candidate, b))
             {
                 best = Some(candidate);
             }
