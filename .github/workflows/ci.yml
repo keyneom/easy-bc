@@ -16,7 +16,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         run: rustup show active-toolchain
@@ -36,7 +36,7 @@ jobs:
           cargo build -p planner-core --target wasm32-unknown-unknown --features wasm --release
 
       - name: Node parity smoke
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "24"
       - name: compare narrative (JS vs Rust)
@@ -48,10 +48,10 @@ jobs:
   android-assemble:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify Gradle wrapper integrity
         run: bash scripts/verify-gradle-wrapper.sh
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -71,7 +71,7 @@ jobs:
   web-unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build WebAssembly planner from source
         shell: bash
         run: |
@@ -80,7 +80,7 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.117 --locked
           cd web
           npm run build:wasm
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
       - name: Install dependencies

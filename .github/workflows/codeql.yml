@@ -18,8 +18,8 @@ jobs:
     if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@v7
+      - uses: github/codeql-action/init@v4
         with:
           languages: javascript-typescript
       - name: Build WebAssembly planner from source
@@ -30,7 +30,7 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.117 --locked
           cd web
           npm run build:wasm
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
@@ -40,19 +40,19 @@ jobs:
         run: |
           npm ci
           npm run build
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
 
   android:
     if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify Gradle wrapper integrity
         run: bash scripts/verify-gradle-wrapper.sh
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: java-kotlin
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -68,4 +68,4 @@ jobs:
       - name: Build Android app
         working-directory: android
         run: ./gradlew --no-daemon assembleDebug
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4

@@ -23,7 +23,7 @@ jobs:
     env:
       VITE_GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build WebAssembly planner from source
         shell: bash
         run: |
@@ -32,7 +32,7 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.117 --locked
           cd web
           npm run build:wasm
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
@@ -51,10 +51,10 @@ jobs:
         run: npm run build -- --base=./
       - name: Configure Pages
         if: github.event.repository.visibility == 'public'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       - name: Upload Pages artifact
         if: github.event.repository.visibility == 'public'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: web/dist
 
@@ -71,4 +71,4 @@ jobs:
     steps:
       - name: Deploy
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
