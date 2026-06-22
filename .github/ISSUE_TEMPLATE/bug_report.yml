@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible EasyBC problem without sharing personal health data.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not include period dates, sexual activity, body-signal observations, credentials, backup files,
+        screenshots containing personal data, or security exploit details. Use private vulnerability reporting
+        for security issues.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android
+        - Web
+        - Planner core
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.18 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Use synthetic example data only.
+      placeholder: Steps, expected result, and actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Browser/OS or Android version and device model. Omit account identifiers.

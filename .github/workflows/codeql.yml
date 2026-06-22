@@ -1,0 +1,71 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "17 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  javascript:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - name: Build WebAssembly planner from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo install wasm-bindgen-cli --version 0.2.117 --locked
+          cd web
+          npm run build:wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build web app
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - uses: github/codeql-action/analyze@v3
+
+  android:
+    if: github.event.repository.visibility == 'public'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Gradle wrapper integrity
+        run: bash scripts/verify-gradle-wrapper.sh
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: java-kotlin
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build native planner from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo install cargo-ndk --version 4.1.2 --locked
+          sdkmanager "ndk;27.0.12077973"
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          ./scripts/android-build-native.sh
+      - name: Build Android app
+        working-directory: android
+        run: ./gradlew --no-daemon assembleDebug
+      - uses: github/codeql-action/analyze@v3

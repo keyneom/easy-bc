@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light-mode variant: dark-purple background. -->
+    <color name="ic_launcher_background">#3E1E3C</color>
+</resources>

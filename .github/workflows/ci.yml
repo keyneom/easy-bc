@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy -p planner-core --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test -p planner-core
+
+      - name: wasm target + build
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build -p planner-core --target wasm32-unknown-unknown --features wasm --release
+
+      - name: Node parity smoke
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: compare narrative (JS vs Rust)
+        run: node scripts/compare-narrative.mjs
+
+      - name: JSON fixtures (calendar / realized / locks)
+        run: node scripts/parity-fixtures.mjs
+
+  android-assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Gradle wrapper integrity
+        run: bash scripts/verify-gradle-wrapper.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Build native planner from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo install cargo-ndk --version 4.1.2 --locked
+          sdkmanager "ndk;27.0.12077973"
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          ./scripts/android-build-native.sh
+      - name: assembleDebug
+        working-directory: android
+        run: ./gradlew assembleDebug
+
+  web-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build WebAssembly planner from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo install wasm-bindgen-cli --version 0.2.117 --locked
+          cd web
+          npm run build:wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+      - name: Vitest (period / session helpers)
+        working-directory: web
+        run: npm test
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
+      - name: Production build
+        working-directory: web
+        run: npm run build

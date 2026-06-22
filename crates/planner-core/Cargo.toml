@@ -1,0 +1,29 @@
+[package]
+name = "planner-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fertility risk planner core (calendar model + whole-horizon optimizer)"
+
+[lib]
+# cdylib: Android JNI; rlib: workspace tests and tools.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+wasm = ["wasm-bindgen", "serde-wasm-bindgen"]
+ffi = ["uniffi"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+uniffi = { version = "0.28", optional = true }
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"], optional = true }
+
+[dev-dependencies]
+serde_json = "1.0"
