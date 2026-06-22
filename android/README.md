@@ -33,6 +33,8 @@ The keystore is decoded only into the temporary Actions runner. Keep a separate 
 
 The Settings screen can opt into the same encrypted Google Drive snapshot used by the web app. Google Authorization requests only `drive.appdata`; Credential Manager evaluates the `keyneom.github.io` passkey PRF; HKDF-SHA-256 derives an AES-256-GCM content key. Payload JSON is gzip-compressed when that reduces its size, then encrypted; original uncompressed v1 snapshots remain readable. Tokens and derived key material are neither persisted nor included in the payload. Device-permission toggles such as calendar and notification enablement remain local, while planner settings, labels, periods, and user-entered day logs merge by timestamp.
 
+Planner output remains derived rather than synced. The payload carries the planner inputs and setup state, and each platform regenerates its plan locally. The optional setup marker is backward-compatible with snapshots written before v0.1.19.
+
 Android passkeys require the host-root Digital Asset Links association described in [`docs/github-pages-passkeys.md`](../docs/github-pages-passkeys.md). Production testing must use the release-signed APK; a debug-signed APK has a different certificate and must not replace an installed release build.
 
 ### Native device calendar sync

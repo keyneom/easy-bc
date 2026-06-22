@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PortablePlannerOptions, SyncPayloadV1 } from "./types";
-import { mergeSyncPayloads } from "./types";
+import { mergeSyncPayloads, plannerConfiguredFromPayload } from "./types";
 
 const options = (ageYears: number): PortablePlannerOptions => ({
   ageYears,
@@ -46,6 +46,25 @@ describe("mergeSyncPayloads", () => {
 
     expect(merged.planner.value.ageYears).toBe(35);
     expect(merged.calendarDayLogs["2026-01-02"]?.notes).toBe("new");
+  });
+
+  it("preserves an explicit configured marker when upgrading an equal-time legacy planner", () => {
+    const legacy = payload(35, "2026-02-01T00:00:00.000Z");
+    const current = payload(35, "2026-02-01T00:00:00.000Z");
+    current.planner.configured = true;
+
+    const merged = mergeSyncPayloads(legacy, current);
+
+    expect(merged.planner.configured).toBe(true);
+  });
+
+  it("recognizes and upgrades a used legacy snapshot", () => {
+    const legacy = payload(35, "2026-02-01T00:00:00.000Z");
+    legacy.periodRecords = [{ start: "2026-01-01" }];
+
+    expect(plannerConfiguredFromPayload(legacy)).toBe(true);
+    expect(mergeSyncPayloads(legacy, payload(34, "1970-01-01T00:00:00.000Z")).planner.configured)
+      .toBe(true);
   });
 
   it("propagates period and abstinence deletions", () => {

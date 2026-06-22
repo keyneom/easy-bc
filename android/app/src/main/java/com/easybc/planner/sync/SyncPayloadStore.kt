@@ -118,6 +118,7 @@ class SyncPayloadStore(private val db: AppDatabase) {
                     customCondomResidual = settings.customCondomResidual,
                 ),
                 updatedAt = instant(settings.updatedAt),
+                configured = settings.onboardingComplete,
             ),
             periodRecords = periods,
             deletedPeriodStarts = periodTombstones,
@@ -165,7 +166,8 @@ class SyncPayloadStore(private val db: AppDatabase) {
                 useWithdrawalBackupOnProtectedDays = planner.useWithdrawalBackupOnProtectedDays,
                 combinedMethodIndependence = planner.combinedMethodIndependence,
                 ovulationSdDays = planner.ovulationSdDays,
-                onboardingComplete = true,
+                onboardingComplete = payload.planner.configured
+                    ?: (current.onboardingComplete || payload.periodRecords.isNotEmpty()),
                 // Permission-bound enablement remains local to each device.
                 calendarSyncEnabled = current.calendarSyncEnabled,
                 calendarLabelPeriod = prefs?.calendarLabelPeriod ?: current.calendarLabelPeriod,

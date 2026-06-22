@@ -66,9 +66,18 @@ object SyncMerge {
                 b.androidPreferences.updatedAt,
             )
         }
+        val selectedPlanner = newer(a.planner, a.planner.updatedAt, b.planner, b.planner.updatedAt)
+        val otherPlanner = if (selectedPlanner === a.planner) b.planner else a.planner
+        val planner = when {
+            selectedPlanner.configured != null -> selectedPlanner
+            timestamp(selectedPlanner.updatedAt) == timestamp(otherPlanner.updatedAt) &&
+                otherPlanner.configured != null -> selectedPlanner.copy(configured = otherPlanner.configured)
+            periodActive.isNotEmpty() -> selectedPlanner.copy(configured = true)
+            else -> selectedPlanner
+        }
         return SyncPayloadV1(
             exportedAt = Instant.now().toString(),
-            planner = newer(a.planner, a.planner.updatedAt, b.planner, b.planner.updatedAt),
+            planner = planner,
             periodRecords = periodActive.values.sortedBy { it.start },
             deletedPeriodStarts = periodDeleted,
             calendarDayLogs = dayLogs,
@@ -88,4 +97,3 @@ object SyncMerge {
         return merged
     }
 }
-

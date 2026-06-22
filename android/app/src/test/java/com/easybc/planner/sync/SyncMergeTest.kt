@@ -41,9 +41,31 @@ class SyncMergeTest {
         assertEquals("2026-01-20T00:00:00Z", merged.deletedPeriodStarts["2026-01-10"])
     }
 
+    @Test
+    fun explicitConfiguredMarkerUpgradesEqualTimeLegacyPlanner() {
+        val legacy = payload(35, "2026-02-01T00:00:00Z")
+        val current = payload(35, "2026-02-01T00:00:00Z").copy(
+            planner = TimestampedPlanner(
+                value = SyncPlannerOptions(ageYears = 35),
+                updatedAt = "2026-02-01T00:00:00Z",
+                configured = true,
+            )
+        )
+
+        assertEquals(true, SyncMerge.merge(legacy, current).planner.configured)
+    }
+
+    @Test
+    fun periodHistoryUpgradesLegacyPlannerAsConfigured() {
+        val legacy = payload(35, "2026-02-01T00:00:00Z").copy(
+            periodRecords = listOf(SyncPeriodRecord(start = "2026-01-01"))
+        )
+
+        assertEquals(true, SyncMerge.merge(legacy, payload(34, SYNC_EPOCH)).planner.configured)
+    }
+
     private fun payload(age: Int, updatedAt: String) = SyncPayloadV1(
         exportedAt = updatedAt,
         planner = TimestampedPlanner(SyncPlannerOptions(ageYears = age), updatedAt),
     )
 }
-

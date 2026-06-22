@@ -11,6 +11,8 @@ export type SyncPayloadV1 = {
   planner: {
     value: PortablePlannerOptions;
     updatedAt: string;
+    /** Added compatibly to v1; absent on snapshots written before v0.1.19. */
+    configured?: boolean;
   };
   periodRecords: PeriodRecord[];
   deletedPeriodStarts: Record<string, string>;
@@ -72,6 +74,26 @@ function timestamp(value?: string): string {
 
 function newer<T>(a: T, aTime: string | undefined, b: T, bTime: string | undefined): T {
   return timestamp(aTime) >= timestamp(bTime) ? a : b;
+}
+
+export function plannerConfiguredFromPayload(payload: SyncPayloadV1): boolean {
+  // Legacy Android snapshots did not encode onboardingComplete. Period history
+  // is the only portable evidence that those snapshots were actively used.
+  return payload.planner.configured ?? payload.periodRecords.length > 0;
+}
+
+function mergePlanner(a: SyncPayloadV1, b: SyncPayloadV1): SyncPayloadV1["planner"] {
+  const aIsNewer = timestamp(a.planner.updatedAt) >= timestamp(b.planner.updatedAt);
+  const selected = aIsNewer ? a.planner : b.planner;
+  const other = aIsNewer ? b.planner : a.planner;
+  if (selected.configured !== undefined) return selected;
+  if (
+    timestamp(selected.updatedAt) === timestamp(other.updatedAt) &&
+    other.configured !== undefined
+  ) {
+    return { ...selected, configured: other.configured };
+  }
+  return selected;
 }
 
 function mergePeriods(
@@ -140,7 +162,7 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
     if (!current || timestamp(log.updatedAt) > timestamp(current.updatedAt)) dayLogs[date] = log;
   }
   const abstinence = mergeAbstinence(a, b);
-  const planner = newer(a.planner, a.planner.updatedAt, b.planner, b.planner.updatedAt);
+  const selectedPlanner = mergePlanner(a, b);
   const ecJournal = newer(
     a.ecJournal,
     a.ecJournal.updatedAt,
@@ -150,10 +172,10 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
   const androidPreferences = a.androidPreferences && b.androidPreferences
     ? newer(a.androidPreferences, a.androidPreferences.updatedAt, b.androidPreferences, b.androidPreferences.updatedAt)
     : (a.androidPreferences ?? b.androidPreferences);
-  return {
+  const merged: SyncPayloadV1 = {
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
-    planner,
+    planner: selectedPlanner,
     periodRecords: period.records,
     deletedPeriodStarts: period.deleted,
     calendarDayLogs: dayLogs,
@@ -161,6 +183,10 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
     ecJournal,
     ...(androidPreferences ? { androidPreferences } : {}),
   };
+  if (merged.planner.configured === undefined && plannerConfiguredFromPayload(merged)) {
+    merged.planner = { ...merged.planner, configured: true };
+  }
+  return merged;
 }
 
 export function parseSyncPayload(value: string): SyncPayloadV1 {

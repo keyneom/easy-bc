@@ -14,6 +14,8 @@ The web build reads a public OAuth web client ID from the GitHub Actions variabl
 
 Sync requests only `https://www.googleapis.com/auth/drive.appdata`. EasyBC creates one hidden `easybc-sync-v1.json` file in Drive's app-data folder. The file contains a versioned AES-GCM envelope; planner settings, period records, and user-entered logs are adaptively gzip-compressed and then encrypted on the device before upload. OAuth tokens and passkey material are never included in that payload. Original uncompressed v1 snapshots remain readable.
 
+The payload stores planner inputs and whether the user completed planner setup, not calculated planner output. Each device regenerates that derived output locally after sync and when the app reloads. Snapshots written before v0.1.19 are upgraded during merge; existing snapshots with period history are treated as configured so they do not require recreation.
+
 The passkey is scoped to the final relying-party host. WebAuthn PRF output is expanded with HKDF-SHA-256 into the AES-256-GCM key for each sync operation. The raw cloud key is never persisted. Localhost creates a separate development passkey and cannot unlock the production snapshot.
 
 WebAuthn uses the origin host—not the project path—as its relying-party identity. Android uses the same `keyneom.github.io` relying-party identity through Credential Manager. The root Pages site must therefore publish `https://keyneom.github.io/.well-known/assetlinks.json` with `delegate_permission/common.get_login_creds`, package `com.easybc.planner`, and the SHA-256 fingerprint of the release signing certificate. That file belongs in the separate `keyneom/keyneom.github.io` repository because a project site cannot publish host-root `/.well-known` content.

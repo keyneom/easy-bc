@@ -49,6 +49,7 @@ import {
   dayLogKey,
   daysSinceFirstCycleStart,
   estimateIncidentAdditionalRisk,
+  hydratePersistedSession,
   incidentActionForType,
   initialLocksForPastDays,
   resolveHorizonRowAndDay,
@@ -62,7 +63,11 @@ import { EC_COPY } from "./strings";
 import { DayDetailPanel } from "./components/DayDetailPanel";
 import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components/MonthCalendar";
 import { SyncSettings } from "./components/SyncSettings";
-import { portablePlannerOptions, type SyncPayloadV1 } from "./sync/types";
+import {
+  plannerConfiguredFromPayload,
+  portablePlannerOptions,
+  type SyncPayloadV1,
+} from "./sync/types";
 
 interface DayWeight {
   day: number;
@@ -291,6 +296,7 @@ export default function App() {
   const [incidentChoice, setIncidentChoice] = useState<IncidentType | "">("");
   const [incidentDay, setIncidentDay] = useState(1);
   const [calendarDensity, setCalendarDensity] = useState<CalendarDensity>("comfortable");
+  const [planRegenerationPending, setPlanRegenerationPending] = useState(false);
 
   const sortedStarts = useMemo(() => periodStartsFromRecords(periodRecords), [periodRecords]);
   const sortedRecords = useMemo(
@@ -311,15 +317,7 @@ export default function App() {
       setPeriodRecords(pr);
       const raw = await idbGet<PersistedSession>(KV_SESSION);
       const savedOptions = await idbGet<Partial<WasmOptions>>(KV_OPTIONS);
-      const s = raw
-        ? {
-            ...defaultPersistedSession(),
-            ...raw,
-            dayLogs: raw.dayLogs ?? {},
-            calendarDayLogs: raw.calendarDayLogs ?? {},
-            voluntaryAbstinenceDates: raw.voluntaryAbstinenceDates ?? {},
-          }
-        : defaultPersistedSession();
+      const s = hydratePersistedSession(raw, pr.length);
       setSession(s);
       setLocks(s.locks);
       const loadedOptions: WasmOptions = {
@@ -329,6 +327,7 @@ export default function App() {
       };
       optionsFingerprintRef.current = JSON.stringify(portablePlannerOptions(loadedOptions));
       setOpts(loadedOptions);
+      if (s.plannerConfigured) setPlanRegenerationPending(true);
       setStorageReady(true);
     })();
   }, []);
@@ -368,6 +367,7 @@ export default function App() {
     };
     const nextSession: PersistedSession = {
       ...session,
+      plannerConfigured: plannerConfiguredFromPayload(payload),
       calendarDayLogs: payload.calendarDayLogs,
       voluntaryAbstinenceDates: payload.voluntaryAbstinenceDates,
       voluntaryAbstinenceUpdatedAt: payload.voluntaryAbstinenceUpdatedAt,
@@ -384,6 +384,7 @@ export default function App() {
     setOpts(nextOptions);
     setPlan(null);
     setPreview(null);
+    if (nextSession.plannerConfigured) setPlanRegenerationPending(true);
     await Promise.all([
       savePeriodRecords(payload.periodRecords),
       idbSet(KV_SESSION, nextSession),
@@ -396,7 +397,7 @@ export default function App() {
     setPlanError(null);
     setPreview(null);
     setLocks([]);
-    setSession((s) => ({ ...s, locks: [] }));
+    setSession((s) => ({ ...s, plannerConfigured: true, locks: [] }));
     try {
       const lengths = opts.calendarCycles?.map((c) => c.cycleLengthDays) ?? [];
       const sorted = [...sortedStarts].sort();
@@ -419,6 +420,12 @@ export default function App() {
       setPlan(null);
     }
   }, [wasmReady, opts, applyPastLocks, sortedStarts, session.dayLogs]);
+
+  useEffect(() => {
+    if (!planRegenerationPending || !wasmReady || !storageReady) return;
+    runPlan();
+    setPlanRegenerationPending(false);
+  }, [planRegenerationPending, runPlan, storageReady, wasmReady]);
 
   const mergeLock = useCallback((yearIndex: number, day: number, action: PlannerAction) => {
     setLocks((prev) => {
@@ -872,9 +879,14 @@ export default function App() {
           {tab === "settings" && (
             <section className="settings-screen">
               <div className="screen-heading">
-                <p className="eyebrow">Welcome</p>
-                <h2>Set up your profile</h2>
-                <p>Configure your profile to get a personalized cycle plan. All calculations run on this device.</p>
+                <p className="eyebrow">{session.plannerConfigured ? "Settings" : "Welcome"}</p>
+                <h2>{session.plannerConfigured ? "Profile & planning" : "Set up your profile"}</h2>
+                <p>
+                  {session.plannerConfigured
+                    ? "Update your inputs to regenerate your personalized cycle plan."
+                    : "Configure your profile to get a personalized cycle plan."}
+                  {" "}All calculations run on this device.
+                </p>
               </div>
               <SyncSettings
                 options={opts}
@@ -1237,7 +1249,7 @@ export default function App() {
                     setTab("planner");
                   }}
                 >
-                  Generate plan
+                  {session.plannerConfigured ? "Update plan" : "Generate plan"}
                 </button>
               </fieldset>
 

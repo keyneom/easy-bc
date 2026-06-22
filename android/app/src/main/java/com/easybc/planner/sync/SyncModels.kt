@@ -41,6 +41,8 @@ data class SyncPayloadV1(
 data class TimestampedPlanner(
     val value: SyncPlannerOptions,
     val updatedAt: String = SYNC_EPOCH,
+    /** Null only for snapshots written before v0.1.19. */
+    val configured: Boolean? = null,
 )
 
 @Serializable

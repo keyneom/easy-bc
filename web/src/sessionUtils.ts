@@ -35,6 +35,8 @@ export type PlannerDayRiskLike = {
 };
 
 export type PersistedSession = {
+  /** Whether the user has committed planner settings and should have a derived plan. */
+  plannerConfigured: boolean;
   locks: DayLock[];
   realizedCumulativeRisk: number;
   ecJournalFlag: boolean;
@@ -59,6 +61,7 @@ export type PersistedSession = {
 export const SYNC_EPOCH = "1970-01-01T00:00:00.000Z";
 
 export const defaultPersistedSession = (): PersistedSession => ({
+  plannerConfigured: false,
   locks: [],
   realizedCumulativeRisk: 0,
   ecJournalFlag: false,
@@ -71,6 +74,29 @@ export const defaultPersistedSession = (): PersistedSession => ({
   plannerOptionsUpdatedAt: SYNC_EPOCH,
   ecJournalUpdatedAt: SYNC_EPOCH,
 });
+
+export function hydratePersistedSession(
+  raw: Partial<PersistedSession> | undefined,
+  periodRecordCount: number,
+): PersistedSession {
+  const hydrated: PersistedSession = {
+    ...defaultPersistedSession(),
+    ...raw,
+    locks: raw?.locks ?? [],
+    dayLogs: raw?.dayLogs ?? {},
+    calendarDayLogs: raw?.calendarDayLogs ?? {},
+    voluntaryAbstinenceDates: raw?.voluntaryAbstinenceDates ?? {},
+    voluntaryAbstinenceUpdatedAt: raw?.voluntaryAbstinenceUpdatedAt ?? {},
+    deletedPeriodStarts: raw?.deletedPeriodStarts ?? {},
+    deletedVoluntaryAbstinenceDates: raw?.deletedVoluntaryAbstinenceDates ?? {},
+  };
+  return {
+    ...hydrated,
+    plannerConfigured: raw?.plannerConfigured ?? (
+      hydrated.plannerOptionsUpdatedAt !== SYNC_EPOCH && periodRecordCount > 0
+    ),
+  };
+}
 
 export function dayLogKey(rowIndex: number, day: number): string {
   return `${rowIndex}:${day}`;

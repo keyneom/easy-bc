@@ -32,7 +32,11 @@ function localPayload(
   return {
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
-    planner: { value: portablePlannerOptions(options), updatedAt: session.plannerOptionsUpdatedAt },
+    planner: {
+      value: portablePlannerOptions(options),
+      updatedAt: session.plannerOptionsUpdatedAt,
+      configured: session.plannerConfigured,
+    },
     periodRecords,
     deletedPeriodStarts: session.deletedPeriodStarts,
     calendarDayLogs: session.calendarDayLogs,
