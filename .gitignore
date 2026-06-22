@@ -1,0 +1,35 @@
+/target/
+web/node_modules/
+web/dist/
+.DS_Store
+.idea/
+.vscode/
+
+# Local configuration and credentials
+.oauth-import/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+google-services.json
+
+# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.kotlin/
+android/app/src/main/jniLibs/**/*.so
+*.jks
+*.keystore
+.release-signing/
+*.apk
+*.aab
+
+# Generated WebAssembly package (rebuild with `npm run build:wasm` in web/)
+web/pkg/
+
+# Claude Code local session state
+.claude/

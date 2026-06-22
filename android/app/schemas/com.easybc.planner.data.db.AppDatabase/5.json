@@ -1,0 +1,290 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 5,
+    "identityHash": "8807cbcb97b144e4498f4baddc0cdba7",
+    "entities": [
+      {
+        "tableName": "period_records",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `startDate` INTEGER NOT NULL, `endDate` INTEGER, `createdAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startDate",
+            "columnName": "startDate",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "endDate",
+            "columnName": "endDate",
+            "affinity": "INTEGER",
+            "notNull": false
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "day_logs",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`date` INTEGER NOT NULL, `actualAction` TEXT NOT NULL, `notes` TEXT, `mucus` TEXT, `bbtCelsius` REAL, `opk` TEXT, `mittelschmerz` INTEGER NOT NULL, `breastTender` INTEGER NOT NULL, `reconciled` INTEGER NOT NULL, PRIMARY KEY(`date`))",
+        "fields": [
+          {
+            "fieldPath": "date",
+            "columnName": "date",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actualAction",
+            "columnName": "actualAction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notes",
+            "columnName": "notes",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mucus",
+            "columnName": "mucus",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "bbtCelsius",
+            "columnName": "bbtCelsius",
+            "affinity": "REAL",
+            "notNull": false
+          },
+          {
+            "fieldPath": "opk",
+            "columnName": "opk",
+            "affinity": "TEXT",
+            "notNull": false
+          },
+          {
+            "fieldPath": "mittelschmerz",
+            "columnName": "mittelschmerz",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "breastTender",
+            "columnName": "breastTender",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reconciled",
+            "columnName": "reconciled",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "date"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      },
+      {
+        "tableName": "user_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `ageYears` INTEGER NOT NULL, `horizonYears` INTEGER NOT NULL, `targetCumulativeFailure` REAL NOT NULL, `cycleLengthDays` INTEGER NOT NULL, `actsPerWeek` REAL NOT NULL, `persistentMethod` TEXT NOT NULL, `protectedDayMethod` TEXT NOT NULL, `condomMode` TEXT NOT NULL, `customCondomResidual` REAL NOT NULL, `streakAversion` REAL NOT NULL, `holdLifecycleConstant` INTEGER NOT NULL, `withdrawalMode` TEXT NOT NULL, `withdrawalTypicalAnnualFailure` REAL NOT NULL, `withdrawalRelativeRisk` REAL NOT NULL, `useWithdrawalBackupOnProtectedDays` INTEGER NOT NULL, `combinedMethodIndependence` REAL NOT NULL, `ovulationSdDays` REAL NOT NULL, `onboardingComplete` INTEGER NOT NULL, `calendarSyncEnabled` INTEGER NOT NULL, `calendarLabelPeriod` TEXT NOT NULL, `calendarLabelFertile` TEXT NOT NULL, `calendarLabelActionU` TEXT NOT NULL, `calendarLabelActionC` TEXT NOT NULL, `calendarLabelActionA` TEXT NOT NULL, `calendarLabelActionW` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ageYears",
+            "columnName": "ageYears",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "horizonYears",
+            "columnName": "horizonYears",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetCumulativeFailure",
+            "columnName": "targetCumulativeFailure",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cycleLengthDays",
+            "columnName": "cycleLengthDays",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actsPerWeek",
+            "columnName": "actsPerWeek",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "persistentMethod",
+            "columnName": "persistentMethod",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "protectedDayMethod",
+            "columnName": "protectedDayMethod",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "condomMode",
+            "columnName": "condomMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "customCondomResidual",
+            "columnName": "customCondomResidual",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "streakAversion",
+            "columnName": "streakAversion",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "holdLifecycleConstant",
+            "columnName": "holdLifecycleConstant",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "withdrawalMode",
+            "columnName": "withdrawalMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "withdrawalTypicalAnnualFailure",
+            "columnName": "withdrawalTypicalAnnualFailure",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "withdrawalRelativeRisk",
+            "columnName": "withdrawalRelativeRisk",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "useWithdrawalBackupOnProtectedDays",
+            "columnName": "useWithdrawalBackupOnProtectedDays",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "combinedMethodIndependence",
+            "columnName": "combinedMethodIndependence",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ovulationSdDays",
+            "columnName": "ovulationSdDays",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "onboardingComplete",
+            "columnName": "onboardingComplete",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarSyncEnabled",
+            "columnName": "calendarSyncEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarLabelPeriod",
+            "columnName": "calendarLabelPeriod",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarLabelFertile",
+            "columnName": "calendarLabelFertile",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarLabelActionU",
+            "columnName": "calendarLabelActionU",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarLabelActionC",
+            "columnName": "calendarLabelActionC",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarLabelActionA",
+            "columnName": "calendarLabelActionA",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "calendarLabelActionW",
+            "columnName": "calendarLabelActionW",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [],
+        "foreignKeys": []
+      }
+    ],
+    "views": [],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '8807cbcb97b144e4498f4baddc0cdba7')"
+    ]
+  }
+}
