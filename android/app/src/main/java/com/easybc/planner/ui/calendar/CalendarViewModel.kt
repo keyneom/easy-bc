@@ -18,6 +18,10 @@ import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.temporal.ChronoUnit
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
 
 data class DayCellData(
     val date: LocalDate,
@@ -31,6 +35,7 @@ data class DayCellData(
     val plannerAction: RecommendedAction?,
     val riskScore: Int?,
     val overrideCost: OverrideCost?,
+    val riskRows: List<MethodRiskRow> = emptyList(),
     val dayLog: DayLog?,
     val events: List<DayEventEntity> = emptyList(),
     /**
@@ -101,6 +106,15 @@ data class CycleLedger(
     val cycleOverPlan: Boolean get() = realizedSoFar > plannedCycleRisk + 1e-12
     val overBudget: Boolean get() = !targetMet
 }
+
+data class MethodRiskRow(
+    val action: RecommendedAction,
+    val expectedDayPattern: Double,
+    val expectedSingleAct: Double,
+    val plausibleLow: Double,
+    val plausibleHigh: Double,
+    val peakAligned: Double,
+)
 
 class CalendarViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EasyBCApp
@@ -641,6 +655,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         var plannerAction: RecommendedAction? = null
         var riskScore: Int? = null
         var overrideCost: OverrideCost? = null
+        var riskRows: List<MethodRiskRow> = emptyList()
 
         if (plan != null && cycleIdx != null && cycleDay != null) {
             val yearOutput = plan.years.getOrNull(cycleIdx)
@@ -650,6 +665,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
                     plannerAction = dw.recommendedAction
                     riskScore = dw.rawRiskScore
                     overrideCost = dw.overrideCost
+                    riskRows = buildMethodRiskRows(yearOutput, dw, plan.validation.methodLibrary)
                 }
             }
         }
@@ -666,6 +682,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             plannerAction = plannerAction,
             riskScore = riskScore,
             overrideCost = overrideCost,
+            riskRows = riskRows,
             dayLog = dayLog,
             events = ctx.dayEventsByEpoch[date.toEpochDay()].orEmpty(),
             cycleFlag = cycleFlag,
@@ -674,6 +691,93 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             isPeriodStartDay = isPeriodStartDay,
             hasPeriodRecord = recordedIsPeriod,
         )
+    }
+
+    private fun buildMethodRiskRows(
+        year: YearOutput,
+        dayWeight: DayWeight,
+        methodLibrary: MethodLibraryUsed,
+    ): List<MethodRiskRow> {
+        val persistent = methodLibrary.persistentMethodResidual.takeIf { it.isFinite() } ?: 1.0
+        val mean = year.signalSummary?.posteriorOvulationMeanDay
+            ?: max(1.0, (year.cycleLengthDays - 14).toDouble())
+        val sd = max(0.5, year.signalSummary?.posteriorOvulationSdDays ?: year.cycleSdDays)
+        val minOvulationDay = max(1, floor(mean - 2.0 * sd).toInt())
+        val maxOvulationDay = min(year.cycleLengthDays, ceil(mean + 2.0 * sd).toInt())
+        val ageMult = ageMultiplier(year.age)
+        var plausibleLowBase = Double.POSITIVE_INFINITY
+        var plausibleHighBase = 0.0
+        for (ovulationDay in minOvulationDay..maxOvulationDay) {
+            val value = fertileKernel(dayWeight.day - ovulationDay) * ageMult * persistent
+            plausibleLowBase = min(plausibleLowBase, value)
+            plausibleHighBase = max(plausibleHighBase, value)
+        }
+        if (!plausibleLowBase.isFinite()) plausibleLowBase = 0.0
+        val perActBase = dayWeight.perActConceptionProbability * persistent
+        val peakBase = fertileKernel(0) * ageMult * persistent
+
+        return listOf(
+            RecommendedAction.U,
+            RecommendedAction.W,
+            RecommendedAction.C,
+            RecommendedAction.A,
+        ).map { action ->
+            val residual = when (action) {
+                RecommendedAction.U -> 1.0
+                RecommendedAction.W -> methodLibrary.withdrawalResidual.takeIf { it.isFinite() } ?: 1.0
+                RecommendedAction.C -> methodLibrary.protectedDayMethodResidual.takeIf { it.isFinite() } ?: 1.0
+                RecommendedAction.A -> 0.0
+            }
+            val expectedDayPattern = when (action) {
+                RecommendedAction.U -> dayWeight.rawRiskProbability
+                RecommendedAction.W -> dayWeight.withdrawalRiskProbability
+                RecommendedAction.C -> dayWeight.protectedRiskProbability
+                RecommendedAction.A -> 0.0
+            }
+            MethodRiskRow(
+                action = action,
+                expectedDayPattern = expectedDayPattern,
+                expectedSingleAct = perActBase * residual,
+                plausibleLow = plausibleLowBase * residual,
+                plausibleHigh = plausibleHighBase * residual,
+                peakAligned = peakBase * residual,
+            )
+        }
+    }
+
+    private fun fertileKernel(rel: Int): Double = when (rel) {
+        -5 -> 0.10
+        -4 -> 0.16
+        -3 -> 0.14
+        -2 -> 0.27
+        -1 -> 0.31
+        0 -> 0.33
+        1 -> 0.08
+        else -> 0.0
+    }
+
+    private fun ageMultiplier(age: Int): Double {
+        val anchors = listOf(
+            18.0 to 1.00,
+            26.0 to 1.00,
+            29.0 to 0.86,
+            34.0 to 0.77,
+            37.0 to 0.63,
+            40.0 to 0.49,
+            44.0 to 0.28,
+            50.0 to 0.10,
+        )
+        val a = age.toDouble()
+        if (a <= anchors.first().first) return anchors.first().second
+        for (index in 1 until anchors.size) {
+            val (prevAge, prevValue) = anchors[index - 1]
+            val (nextAge, nextValue) = anchors[index]
+            if (a <= nextAge) {
+                val t = ((a - prevAge) / (nextAge - prevAge)).coerceIn(0.0, 1.0)
+                return prevValue + t * (nextValue - prevValue)
+            }
+        }
+        return anchors.last().second
     }
 
 }

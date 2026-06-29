@@ -28,13 +28,13 @@
     <p class="notice">EasyBC is local-first. It has no EasyBC account server, advertising SDK, or analytics SDK.</p>
     <h2>Data stored locally</h2>
     <p>Period records, day logs, body-signal observations, planner settings, and generated plans stay in application or browser storage. Android platform backup is disabled.</p>
-    <h2>Optional Google Drive sync</h2>
+    <h2>Optional encrypted cloud sync</h2>
     <p>When explicitly enabled in the web or Android app, EasyBC requests only the Google Drive app-data scope. It encrypts user-authored records on the device before placing one encrypted file in Drive's hidden application-data folder. OAuth access tokens and raw encryption keys are kept only in memory for the active operation.</p>
-    <p>EasyBC uses Google user data only to provide sync requested by the user and does not sell or transfer that data to third parties.</p>
+    <p>EasyBC uses Google user data only to provide encrypted cloud sync requested by the user and does not sell or transfer that data to third parties.</p>
     <h2>User-directed exports</h2>
     <p>Manual JSON backups, iCalendar exports, and entries written to a device calendar are not encrypted by EasyBC. Treat them as sensitive files.</p>
     <h2>Retention and deletion</h2>
-    <p>Local data remains until records or application storage are deleted. Synced data remains in the Drive app-data folder until the user chooses <strong>Delete cloud copy</strong> in EasyBC or removes EasyBC's hidden app data through their Google Account. Revoking access prevents future access but does not by itself guarantee file deletion.</p>
+    <p>Local data remains until records or application storage are deleted. Encrypted cloud data remains in the Drive app-data folder until the user chooses <strong>Delete encrypted cloud copy</strong> in EasyBC or removes EasyBC's hidden app data through their Google Account. Revoking access prevents future access but does not by itself guarantee file deletion.</p>
     <h2>Security reports</h2>
     <p>Use the repository's <a href="https://github.com/keyneom/easy-bc/security/advisories/new">private security advisory form</a>. Do not post personal health data in public issues.</p>
   </body>

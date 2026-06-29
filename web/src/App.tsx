@@ -37,7 +37,7 @@ import {
   setPeriodEnd,
   type PeriodRecord,
 } from "./tracker/periodRecordsStore";
-import { daysBetweenInclusive } from "./tracker/calendarMath";
+import { addDaysIso, daysBetweenInclusive } from "./tracker/calendarMath";
 import { buildPlannerIcs, downloadIcsFile } from "./export/plannerToIcs";
 import {
   resolvePlannerDayMeta,
@@ -64,7 +64,7 @@ import {
   type PlannerAction,
 } from "./sessionUtils";
 import { EC_COPY } from "./strings";
-import { DayDetailPanel } from "./components/DayDetailPanel";
+import { DayDetailPanel, type MethodRiskRow } from "./components/DayDetailPanel";
 import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components/MonthCalendar";
 import { SyncSettings } from "./components/SyncSettings";
 import { currentRpId, passkeysSupported } from "./sync/passkey";
@@ -444,6 +444,249 @@ function PlannerYearCard({ year, calendarMode }: { year: YearOut; calendarMode: 
   );
 }
 
+type ChoiceOption<T extends string> = { value: T; label: string };
+
+function ChoiceChipGroup<T extends string>({
+  label,
+  description,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  description?: string;
+  value: T;
+  options: ChoiceOption<T>[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="choice-chip-field">
+      <div>
+        <span className="choice-chip-label">{label}</span>
+        {description && <p className="field-hint compact">{description}</p>}
+      </div>
+      <div className="choice-chip-row" role="group" aria-label={label}>
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className="choice-chip"
+            aria-pressed={value === option.value}
+            onClick={() => onChange(option.value)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const PERSISTENT_METHOD_OPTIONS: ChoiceOption<PersistentMethod>[] = [
+  { value: "none", label: "None" },
+  { value: "pill_or_ring", label: "Pill/ring" },
+  { value: "patch", label: "Patch" },
+  { value: "shot", label: "Shot" },
+  { value: "implant", label: "Implant" },
+  { value: "hormonal_iud", label: "Hormonal IUD" },
+  { value: "copper_iud", label: "Copper IUD" },
+  { value: "vasectomy", label: "Vasectomy" },
+];
+
+const PROTECTED_METHOD_OPTIONS: ChoiceOption<ProtectedDayMethod>[] = [
+  { value: "none", label: "None" },
+  { value: "external_condom", label: "External condom" },
+  { value: "internal_condom", label: "Internal condom" },
+  { value: "diaphragm", label: "Diaphragm" },
+  { value: "spermicide", label: "Spermicide" },
+  { value: "vaginal_ph_modulator", label: "pH modulator" },
+];
+
+const CONDOM_MODE_OPTIONS: ChoiceOption<WasmOptions["condomMode"]>[] = [
+  { value: "perfect", label: "Perfect" },
+  { value: "typical", label: "Typical" },
+  { value: "custom", label: "Custom" },
+];
+
+const WITHDRAWAL_MODE_OPTIONS: ChoiceOption<WithdrawalMode>[] = [
+  { value: "none", label: "Not used" },
+  { value: "typical", label: "Typical" },
+  { value: "custom", label: "Custom" },
+];
+
+function hasCalendarLogData(log: CalendarDayLog | undefined): boolean {
+  if (!log) return false;
+  if (log.actualAction && log.actualAction !== "NONE") return true;
+  if (log.notes?.trim()) return true;
+  if (log.mucus || log.opk || log.bbtCelsius != null) return true;
+  if (log.mittelschmerz || log.breastTender || log.reconciled) return true;
+  return Boolean(log.events?.length);
+}
+
+function riskForLoggedAction(day: DayWeight, action: CalendarDayLog["actualAction"]): number {
+  switch (action) {
+    case "U":
+      return day.rawRiskProbability;
+    case "W":
+      return day.withdrawalRiskProbability;
+    case "C":
+      return day.protectedRiskProbability;
+    case "A":
+    case "NONE":
+    case undefined:
+      return 0;
+  }
+}
+
+function fertileKernel(rel: number): number {
+  switch (rel) {
+    case -5:
+      return 0.10;
+    case -4:
+      return 0.16;
+    case -3:
+      return 0.14;
+    case -2:
+      return 0.27;
+    case -1:
+      return 0.31;
+    case 0:
+      return 0.33;
+    case 1:
+      return 0.08;
+    default:
+      return 0;
+  }
+}
+
+function ageMultiplier(age: number): number {
+  const anchors: Array<[number, number]> = [
+    [18, 1.00],
+    [26, 1.00],
+    [29, 0.86],
+    [34, 0.77],
+    [37, 0.63],
+    [40, 0.49],
+    [44, 0.28],
+    [50, 0.10],
+  ];
+  if (age <= anchors[0][0]) return anchors[0][1];
+  for (let index = 1; index < anchors.length; index += 1) {
+    const [prevAge, prevValue] = anchors[index - 1];
+    const [nextAge, nextValue] = anchors[index];
+    if (age <= nextAge) {
+      const t = Math.max(0, Math.min(1, (age - prevAge) / (nextAge - prevAge)));
+      return prevValue + t * (nextValue - prevValue);
+    }
+  }
+  return anchors[anchors.length - 1][1];
+}
+
+function methodResidual(action: PlannerAction, methodLibrary: MethodLibraryUsed | null): number {
+  if (action === "A") return 0;
+  if (action === "C") return finiteOr(methodLibrary?.protectedDayMethodResidual, 1);
+  if (action === "W") return finiteOr(methodLibrary?.withdrawalResidual, 1);
+  return 1;
+}
+
+function finiteOr(value: number | undefined | null, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function buildMethodRiskRows(
+  year: YearOut,
+  dayWeight: DayWeight,
+  methodLibrary: MethodLibraryUsed | null,
+): MethodRiskRow[] {
+  const persistent = finiteOr(methodLibrary?.persistentMethodResidual, 1);
+  const mean = year.signalSummary?.posteriorOvulationMeanDay ?? Math.max(1, year.cycleLengthDays - 14);
+  const sd = Math.max(0.5, year.signalSummary?.posteriorOvulationSdDays ?? year.cycleSdDays);
+  const minOvulationDay = Math.max(1, Math.floor(mean - 2 * sd));
+  const maxOvulationDay = Math.min(year.cycleLengthDays, Math.ceil(mean + 2 * sd));
+  const perActBase = dayWeight.perActConceptionProbability * persistent;
+  const peakBase = fertileKernel(0) * ageMultiplier(year.age) * persistent;
+  let plausibleLowBase = Number.POSITIVE_INFINITY;
+  let plausibleHighBase = 0;
+  for (let ovulationDay = minOvulationDay; ovulationDay <= maxOvulationDay; ovulationDay += 1) {
+    const value = fertileKernel(dayWeight.day - ovulationDay) * ageMultiplier(year.age) * persistent;
+    plausibleLowBase = Math.min(plausibleLowBase, value);
+    plausibleHighBase = Math.max(plausibleHighBase, value);
+  }
+  if (!Number.isFinite(plausibleLowBase)) plausibleLowBase = 0;
+
+  const expectedDayPattern: Record<PlannerAction, number> = {
+    U: dayWeight.rawRiskProbability,
+    W: dayWeight.withdrawalRiskProbability,
+    C: dayWeight.protectedRiskProbability,
+    A: 0,
+  };
+
+  return ACTION_ORDER.map((action) => {
+    const residual = methodResidual(action, methodLibrary);
+    return {
+      action,
+      expectedDayPattern: expectedDayPattern[action],
+      expectedSingleAct: perActBase * residual,
+      plausibleLow: plausibleLowBase * residual,
+      plausibleHigh: plausibleHighBase * residual,
+      peakAligned: peakBase * residual,
+    };
+  });
+}
+
+type WebCycleLedger = {
+  currentDayInCycle: number;
+  cycleLengthDays: number;
+  plannedCycleRisk: number;
+  realizedSoFar: number;
+  savedRiskVsBaseline: number;
+  extraRiskVsBaseline: number;
+  horizonRisk: number;
+  horizonTarget: number;
+  targetMet: boolean;
+};
+
+function CycleLedgerCard({ ledger }: { ledger: WebCycleLedger }) {
+  const fraction =
+    ledger.plannedCycleRisk > 0
+      ? Math.min(1, ledger.realizedSoFar / ledger.plannedCycleRisk)
+      : ledger.realizedSoFar > 0
+        ? 1
+        : 0;
+  const overBudget = !ledger.targetMet;
+  return (
+    <section className="cycle-ledger-card">
+      <div className="cycle-ledger-head">
+        <span>Cycle risk ledger</span>
+        <span>Day {ledger.currentDayInCycle} of {ledger.cycleLengthDays}</span>
+      </div>
+      <div className="cycle-ledger-meter" aria-hidden>
+        <span
+          className={overBudget ? "cycle-ledger-over" : undefined}
+          style={{ width: `${fraction * 100}%` }}
+        />
+      </div>
+      <div className="cycle-ledger-copy">
+        <span>
+          Logged {formatPercent(ledger.realizedSoFar)}; plan{" "}
+          {formatPercent(ledger.plannedCycleRisk)}
+        </span>
+        {ledger.savedRiskVsBaseline > 1e-12 ? (
+          <strong>Saved {formatPercent(ledger.savedRiskVsBaseline)} vs plan</strong>
+        ) : ledger.extraRiskVsBaseline > 1e-12 ? (
+          <strong className="danger-text">Spent {formatPercent(ledger.extraRiskVsBaseline)} vs plan</strong>
+        ) : null}
+      </div>
+      {!ledger.targetMet && (
+        <p className="danger-text compact">
+          Horizon over target: {formatPercent(ledger.horizonRisk)} of{" "}
+          {formatPercent(ledger.horizonTarget)}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function optionsForWasm(
   o: WasmOptions,
   initialActionLocks?: DayLock[],
@@ -645,17 +888,17 @@ export default function App() {
     async (reason: "startup" | "change") => {
       if (!syncState) return;
       if (!syncClientId) {
-        setAutoSyncNotice({
-          kind: "error",
-          message: "Encrypted sync is enabled, but this build is missing its Google web client ID.",
-        });
+      setAutoSyncNotice({
+        kind: "error",
+        message: "Encrypted cloud sync is enabled, but this build is missing its Google web client ID.",
+      });
         return;
       }
       if (!passkeysSupported()) {
-        setAutoSyncNotice({
-          kind: "error",
-          message: "Encrypted sync is enabled, but this browser cannot use passkeys here.",
-        });
+      setAutoSyncNotice({
+        kind: "error",
+        message: "Encrypted cloud sync is enabled, but this browser cannot use passkeys here.",
+      });
         return;
       }
       if (autoSyncRunningRef.current) {
@@ -671,8 +914,8 @@ export default function App() {
         kind: "info",
         message:
           reason === "startup"
-            ? "Checking encrypted sync…"
-            : "Syncing encrypted changes…",
+            ? "Checking encrypted cloud sync…"
+            : "Merging encrypted cloud changes…",
       });
 
       try {
@@ -690,12 +933,12 @@ export default function App() {
         setSyncState(nextState);
         setAutoSyncNotice({
           kind: "success",
-          message: `Encrypted sync updated ${formatLastSync(result.syncedAt)}.`,
+          message: `Encrypted cloud sync updated ${formatLastSync(result.syncedAt)}.`,
         });
       } catch (error) {
         setAutoSyncNotice({
           kind: "error",
-          message: `Encrypted sync needs attention: ${
+          message: `Encrypted cloud sync needs attention: ${
             error instanceof Error ? error.message : String(error)
           }`,
         });
@@ -1137,6 +1380,96 @@ export default function App() {
       ? estimateIncidentAdditionalRisk(incidentDayWeight, incidentChoice, y?.actsPerWeek)
       : 0;
   const methodLibrary = plan ? (plan.validation?.methodLibrary ?? fallbackMethodLibrary(opts)) : null;
+  const todayIso = todayIsoLocal();
+  const activePlannerActions = useMemo<PlannerAction[]>(() => {
+    if (!plan?.years?.length) return ["U", "C", "A"];
+    const active = new Set<PlannerAction>();
+    for (const year of plan.years) {
+      for (const day of year.dayWeights) active.add(day.recommendedAction);
+    }
+    return ACTION_ORDER.filter((action) => active.has(action));
+  }, [plan]);
+  const openPeriodNudge = useMemo(() => {
+    const open = [...sortedRecords].reverse().find((record) => record.end == null);
+    if (!open) return null;
+    const predictedEnd = derivedBleedingEnd(open, sortedRecords, todayIso);
+    return todayIso > predictedEnd ? { start: open.start, predictedEnd } : null;
+  }, [sortedRecords, todayIso]);
+  const unreconciledCount = useMemo(() => {
+    if (!calendarMode || !plan) return 0;
+    let count = 0;
+    for (let offset = 30; offset >= 1; offset -= 1) {
+      const iso = addDaysIso(todayIso, -offset);
+      const meta = plannerMetaForDate(iso);
+      if (!meta || meta.recommendedAction === "A") continue;
+      const log = session.calendarDayLogs[iso];
+      if (!log?.reconciled && !log?.actualAction) count += 1;
+    }
+    return count;
+  }, [calendarMode, plan, plannerMetaForDate, session.calendarDayLogs, todayIso]);
+  const currentCycleLedger = useMemo<WebCycleLedger | null>(() => {
+    if (!plan || !horizonToday || sortedStarts.length === 0 || lengths.length === 0) return null;
+    const year = plan.years[horizonToday.row];
+    if (!year) return null;
+    const persistentResidual = methodLibrary?.persistentMethodResidual;
+    const residual = Number.isFinite(persistentResidual) ? persistentResidual! : 1;
+    const cycleStartOffset = lengths
+      .slice(0, horizonToday.row)
+      .reduce((sum, length) => sum + length, 0);
+    const cycleStartIso = addDaysIso(sortedStarts[0], cycleStartOffset);
+    let realizedSurvival = 1;
+    let plannedSurvival = 1;
+
+    for (let day = 1; day <= horizonToday.dayInCycle; day += 1) {
+      const dayWeight = year.dayWeights[day - 1];
+      if (!dayWeight) continue;
+      const iso = addDaysIso(cycleStartIso, day - 1);
+      const log = session.calendarDayLogs[iso];
+      if (!hasCalendarLogData(log)) continue;
+      const loggedRisk = riskForLoggedAction(dayWeight, log?.actualAction);
+      const incidentRisk = (log?.events ?? [])
+        .filter((event) => event.kind === "condom_broke" || event.kind === "unplanned_unprotected")
+        .reduce(
+          (sum) => sum + dayWeight.perActConceptionProbability * residual,
+          0,
+        );
+      realizedSurvival *= 1 - Math.max(loggedRisk, Math.min(0.999, incidentRisk));
+      plannedSurvival *= 1 - dayWeight.recommendedRiskProbability;
+    }
+
+    const realizedSoFar = Math.max(0, Math.min(1, 1 - realizedSurvival));
+    const plannedForLoggedDays = Math.max(0, Math.min(1, 1 - plannedSurvival));
+    const delta = realizedSoFar - plannedForLoggedDays;
+    const horizonRisk = totalProjectedRisk(plan, opts);
+    return {
+      currentDayInCycle: horizonToday.dayInCycle,
+      cycleLengthDays: lengths[horizonToday.row] ?? year.cycleLengthDays,
+      plannedCycleRisk: year.cycleRisk,
+      realizedSoFar,
+      savedRiskVsBaseline: Math.max(0, -delta),
+      extraRiskVsBaseline: Math.max(0, delta),
+      horizonRisk,
+      horizonTarget: opts.targetCumulativeFailure,
+      targetMet: horizonRisk <= opts.targetCumulativeFailure + 1e-12,
+    };
+  }, [
+    horizonToday,
+    lengths,
+    methodLibrary?.persistentMethodResidual,
+    opts,
+    plan,
+    session.calendarDayLogs,
+    sortedStarts,
+  ]);
+  const selectedRiskRows = useMemo<MethodRiskRow[] | undefined>(() => {
+    if (!selectedDayIso || !plan) return undefined;
+    const meta = plannerMetaForDate(selectedDayIso);
+    if (!meta) return undefined;
+    const year = plan.years[meta.row];
+    const dayWeight = year?.dayWeights[meta.dayInCycle - 1];
+    if (!year || !dayWeight) return undefined;
+    return buildMethodRiskRows(year, dayWeight, methodLibrary);
+  }, [methodLibrary, plan, plannerMetaForDate, selectedDayIso]);
 
   useEffect(() => {
     if (!plan || !resultRef.current) return;
@@ -1231,6 +1564,29 @@ export default function App() {
                   </span>
                 </div>
               )}
+              {openPeriodNudge && (
+                <button
+                  type="button"
+                  className="calendar-nudge calendar-nudge-period"
+                  onClick={() => {
+                    const today = new Date();
+                    setViewYear(today.getFullYear());
+                    setViewMonth(today.getMonth());
+                    setSelectedDayIso(todayIso);
+                  }}
+                >
+                  <span>Period still open past predicted end.</span>
+                  <strong>Confirm today →</strong>
+                </button>
+              )}
+              {unreconciledCount > 0 && (
+                <div className="calendar-nudge calendar-nudge-reconcile">
+                  <span>
+                    Reconcile {unreconciledCount} past {unreconciledCount === 1 ? "day" : "days"}
+                  </span>
+                  <strong>Open days to log what happened</strong>
+                </div>
+              )}
               {cycleDayToday !== null && lastStart && (
                 <p className="meta">
                   Last logged period <strong>start</strong>: {lastStart} — approx. cycle day{" "}
@@ -1242,8 +1598,11 @@ export default function App() {
                 monthIndex={viewMonth}
                 periodRecords={periodRecords}
                 ageYears={opts.ageYears}
-                todayIso={todayIsoLocal()}
+                todayIso={todayIso}
+                selectedDayIso={selectedDayIso}
                 voluntaryAbstinence={session.voluntaryAbstinenceDates}
+                calendarDayLogs={session.calendarDayLogs}
+                activeActions={activePlannerActions}
                 plannerDayMeta={plannerMetaForDate}
                 calendarDensity={calendarDensity}
                 onCalendarDensityChange={setCalendarDensity}
@@ -1256,6 +1615,7 @@ export default function App() {
                   setViewMonth(today.getMonth());
                 }}
               />
+              {currentCycleLedger && <CycleLedgerCard ledger={currentCycleLedger} />}
               <DayDetailPanel
                 iso={selectedDayIso}
                 onClose={() => setSelectedDayIso(null)}
@@ -1271,6 +1631,7 @@ export default function App() {
                     ? Boolean(session.voluntaryAbstinenceDates[selectedDayIso])
                     : false
                 }
+                activeActions={activePlannerActions}
                 onToggleCredit={() => {
                   if (!selectedDayIso) return;
                   setSession((s) => {
@@ -1312,17 +1673,24 @@ export default function App() {
                 }}
                 calendarPlanActive={calendarMode && Boolean(plan)}
                 dayLog={selectedDayIso ? session.calendarDayLogs[selectedDayIso] : undefined}
+                riskRows={selectedRiskRows}
                 onUpdateDayLog={(patch) => {
                   if (!selectedDayIso) return;
                   setSession((current) => ({
                     ...current,
                     calendarDayLogs: {
                       ...current.calendarDayLogs,
-                      [selectedDayIso]: {
-                        ...current.calendarDayLogs[selectedDayIso],
-                        ...patch,
-                        updatedAt: new Date().toISOString(),
-                      } satisfies CalendarDayLog,
+                      [selectedDayIso]: (() => {
+                        const next = {
+                          ...current.calendarDayLogs[selectedDayIso],
+                          ...patch,
+                          updatedAt: new Date().toISOString(),
+                        } satisfies CalendarDayLog;
+                        if ("actualAction" in patch) {
+                          next.reconciled = patch.actualAction ? true : undefined;
+                        }
+                        return next;
+                      })(),
                     },
                   }));
                 }}
@@ -1400,24 +1768,11 @@ export default function App() {
                   {" "}All calculations run on this device.
                 </p>
               </div>
-              <SyncSettings
-                options={opts}
-                periodRecords={periodRecords}
-                session={session}
-                syncState={syncState}
-                onApplyPayload={applySyncedPayload}
-                onSyncStateChange={setSyncState}
-                onSyncComplete={markSyncComplete}
-              />
-              <p className="settings-links">
-                <a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy policy</a>
-                <span aria-hidden>·</span>
-                <a href="https://github.com/keyneom/easy-bc" rel="noreferrer" target="_blank">
-                  Source code
-                </a>
-              </p>
-              <fieldset className="settings-form">
-                <legend>Profile &amp; planning</legend>
+              <fieldset className="settings-form settings-form-android">
+                <legend>Profile</legend>
+                <div className="settings-subsection-title">
+                  <h3>Profile</h3>
+                </div>
                 <label>
                   Age
                   <input
@@ -1430,6 +1785,9 @@ export default function App() {
                     }
                   />
                 </label>
+                <div className="settings-subsection-title">
+                  <h3>Risk Target</h3>
+                </div>
                 <label>
                   {calendarMode
                     ? "Horizon (predicted menstrual cycles)"
@@ -1484,6 +1842,9 @@ export default function App() {
                     receives no credit.
                   </span>
                 </div>
+                <div className="settings-subsection-title">
+                  <h3>Behavior</h3>
+                </div>
                 <label>
                   Acts per week
                   <input
@@ -1508,63 +1869,30 @@ export default function App() {
                     }
                   />
                 </label>
-                <label>
-                  Persistent method
-                  <select
-                    value={opts.persistentMethod}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        persistentMethod: e.target.value as PersistentMethod,
-                      }))
-                    }
-                  >
-                    <option value="none">none</option>
-                    <option value="pill_or_ring">pill or ring</option>
-                    <option value="patch">patch</option>
-                    <option value="shot">shot</option>
-                    <option value="implant">implant</option>
-                    <option value="hormonal_iud">hormonal IUD</option>
-                    <option value="copper_iud">copper IUD</option>
-                    <option value="vasectomy">vasectomy</option>
-                  </select>
-                </label>
-                <label>
-                  Protected-day method
-                  <select
-                    value={opts.protectedDayMethod}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        protectedDayMethod: e.target.value as ProtectedDayMethod,
-                      }))
-                    }
-                  >
-                    <option value="none">none</option>
-                    <option value="external_condom">external condom</option>
-                    <option value="internal_condom">internal condom</option>
-                    <option value="diaphragm">diaphragm</option>
-                    <option value="spermicide">spermicide</option>
-                    <option value="vaginal_ph_modulator">vaginal pH modulator</option>
-                  </select>
-                </label>
+                <div className="settings-subsection-title">
+                  <h3>Contraceptive Methods</h3>
+                </div>
+                <ChoiceChipGroup
+                  label="Persistent / background method"
+                  description="An always-on method that reduces baseline risk for all days."
+                  value={opts.persistentMethod}
+                  options={PERSISTENT_METHOD_OPTIONS}
+                  onChange={(persistentMethod) => setOpts((o) => ({ ...o, persistentMethod }))}
+                />
+                <ChoiceChipGroup
+                  label="Protected-day method"
+                  description="Used on days marked C. Controls what protected means in the plan."
+                  value={opts.protectedDayMethod}
+                  options={PROTECTED_METHOD_OPTIONS}
+                  onChange={(protectedDayMethod) => setOpts((o) => ({ ...o, protectedDayMethod }))}
+                />
                 {opts.protectedDayMethod === "external_condom" && (
-                  <label>
-                    External condom calibration
-                    <select
-                      value={opts.condomMode}
-                      onChange={(e) =>
-                        setOpts((o) => ({
-                          ...o,
-                          condomMode: e.target.value as WasmOptions["condomMode"],
-                        }))
-                      }
-                    >
-                      <option value="typical">typical</option>
-                      <option value="perfect">perfect</option>
-                      <option value="custom">custom</option>
-                    </select>
-                  </label>
+                  <ChoiceChipGroup
+                    label="Condom use quality"
+                    value={opts.condomMode}
+                    options={CONDOM_MODE_OPTIONS}
+                    onChange={(condomMode) => setOpts((o) => ({ ...o, condomMode }))}
+                  />
                 )}
                 {opts.protectedDayMethod === "external_condom" &&
                   opts.condomMode === "custom" && (
@@ -1586,22 +1914,13 @@ export default function App() {
                       />
                     </label>
                   )}
-                <label>
-                  Withdrawal mode
-                  <select
-                    value={opts.withdrawalMode}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        withdrawalMode: e.target.value as WithdrawalMode,
-                      }))
-                    }
-                  >
-                    <option value="none">not used</option>
-                    <option value="typical">typical-use calibration</option>
-                    <option value="custom">custom relative risk</option>
-                  </select>
-                </label>
+                <ChoiceChipGroup
+                  label="Withdrawal"
+                  description="If enabled, the planner can recommend W on moderate-risk days."
+                  value={opts.withdrawalMode}
+                  options={WITHDRAWAL_MODE_OPTIONS}
+                  onChange={(withdrawalMode) => setOpts((o) => ({ ...o, withdrawalMode }))}
+                />
                 {opts.withdrawalMode === "custom" ? (
                   <label>
                     Withdrawal relative risk (0-1)
@@ -1673,6 +1992,9 @@ export default function App() {
                     </span>
                   </label>
                 )}
+                <div className="settings-subsection-title">
+                  <h3>Preferences &amp; Advanced</h3>
+                </div>
                 <label>
                   <input
                     type="checkbox"
@@ -1831,6 +2153,35 @@ export default function App() {
                     </p>
                   )}
                 </div>
+              </section>
+
+              <div className="settings-subsection-title settings-subsection-outside">
+                <h3>Encrypted Cloud Sync</h3>
+              </div>
+              <SyncSettings
+                options={opts}
+                periodRecords={periodRecords}
+                session={session}
+                syncState={syncState}
+                onApplyPayload={applySyncedPayload}
+                onSyncStateChange={setSyncState}
+                onSyncComplete={markSyncComplete}
+              />
+              <section className="settings-platform-card">
+                <h3>Platform-specific settings</h3>
+                <p className="hint">
+                  Android keeps <strong>Device Calendar Export</strong>, reminder scheduling, and
+                  <strong> Backup File</strong> export/import in its native settings screen. The web
+                  app keeps browser-safe settings here and uses <strong>Encrypted Cloud Sync</strong>
+                  for shared planner, period, and logged-day data.
+                </p>
+                <p className="settings-links">
+                  <a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy policy</a>
+                  <span aria-hidden>·</span>
+                  <a href="https://github.com/keyneom/easy-bc" rel="noreferrer" target="_blank">
+                    Source code
+                  </a>
+                </p>
               </section>
 
             </section>

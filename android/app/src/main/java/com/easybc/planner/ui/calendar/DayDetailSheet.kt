@@ -214,6 +214,10 @@ fun DayDetailSheet(
                 }
             }
 
+            if (cell.riskRows.isNotEmpty()) {
+                MethodRiskEstimateCard(cell.riskRows)
+            }
+
             HorizontalDivider()
 
             // Log what actually happened
@@ -377,6 +381,70 @@ fun DayDetailSheet(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun MethodRiskEstimateCard(rows: List<MethodRiskRow>) {
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Method risk estimate",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = "Percent conception risk for this day. Expected day is averaged across " +
+                    "ovulation timing and planned frequency; single-act range and peak are conditional what-ifs.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            rows.forEach { row ->
+                MethodRiskEstimateRow(row)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MethodRiskEstimateRow(row: MethodRiskRow) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = row.action.shortLabel,
+            modifier = Modifier.width(24.dp),
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Bold,
+            color = actionForegroundColor(row.action),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Expected day ${formatRiskPercent(row.expectedDayPattern)}",
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                "Single act avg ${formatRiskPercent(row.expectedSingleAct)} · " +
+                    "2-SD ${formatRiskPercent(row.plausibleLow)}–${formatRiskPercent(row.plausibleHigh)} · " +
+                    "Peak ${formatRiskPercent(row.peakAligned)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+private fun formatRiskPercent(value: Double): String {
+    val pct = value * 100.0
+    return when {
+        pct > 0.0 && pct < 0.01 -> "<0.01%"
+        pct < 1.0 -> "%.2f%%".format(pct)
+        else -> "%.1f%%".format(pct)
     }
 }
 

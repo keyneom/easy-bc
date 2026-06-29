@@ -11,6 +11,11 @@ export type PlannerWallDayWeight = {
   day: number;
   recommendedAction: string;
   rawRiskScore: number;
+  rawRiskProbability?: number;
+  protectedRiskProbability?: number;
+  withdrawalRiskProbability?: number;
+  recommendedRiskProbability?: number;
+  perActConceptionProbability?: number;
   overrideCost?: PlannerWallOverrideCost;
 };
 
@@ -25,6 +30,11 @@ export type PlannerWallPlan = {
 export type PlannerDayMeta = {
   recommendedAction: string;
   rawRiskScore: number;
+  rawRiskProbability: number;
+  protectedRiskProbability: number;
+  withdrawalRiskProbability: number;
+  recommendedRiskProbability: number;
+  perActConceptionProbability: number;
   overrideCost: PlannerWallOverrideCost;
   row: number;
   dayInCycle: number;
@@ -46,6 +56,11 @@ export function resolvePlannerDayMeta(
   return {
     recommendedAction: dw.recommendedAction,
     rawRiskScore: dw.rawRiskScore,
+    rawRiskProbability: dw.rawRiskProbability ?? 0,
+    protectedRiskProbability: dw.protectedRiskProbability ?? 0,
+    withdrawalRiskProbability: dw.withdrawalRiskProbability ?? 0,
+    recommendedRiskProbability: dw.recommendedRiskProbability ?? 0,
+    perActConceptionProbability: dw.perActConceptionProbability ?? 0,
     overrideCost: oc,
     row: slice.row,
     dayInCycle: slice.day,

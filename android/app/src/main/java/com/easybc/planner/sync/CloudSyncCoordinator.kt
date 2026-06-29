@@ -17,7 +17,7 @@ class CloudSyncCoordinator(
 
         if (operation == CloudSyncOperation.SETUP) {
             require(existing == null) {
-                "An EasyBC snapshot already exists in this Drive. Use Enable on this device instead."
+                "An encrypted EasyBC cloud snapshot already exists in this Drive. Use Enable encrypted cloud sync on this device instead."
             }
             val passkey = passkeys.create(activity)
             try {
@@ -31,7 +31,7 @@ class CloudSyncCoordinator(
                 )
                 val fileId = drive.writeSnapshot(accessToken, envelope)
                 store.rememberSync(fileId, envelope.updatedAt)
-                return "Encrypted sync is set up. The cloud key was discarded after upload."
+                return "Encrypted cloud sync is set up. The cloud key was discarded after upload."
             } finally {
                 passkey.secret.fill(0)
             }
@@ -41,7 +41,7 @@ class CloudSyncCoordinator(
         if (operation == CloudSyncOperation.DELETE) {
             drive.deleteSnapshot(accessToken, existing.fileId)
             store.forgetSync()
-            return "The encrypted EasyBC snapshot was deleted from Google Drive."
+            return "The encrypted EasyBC cloud snapshot was deleted from Google Drive."
         }
         if (operation == CloudSyncOperation.RESET) {
             val passkey = passkeys.create(activity)
@@ -56,7 +56,7 @@ class CloudSyncCoordinator(
                 )
                 drive.writeSnapshot(accessToken, envelope, existing.fileId)
                 store.rememberSync(existing.fileId, envelope.updatedAt)
-                return "The cloud snapshot now uses the new passkey and this device's local data."
+                return "The encrypted cloud snapshot now uses the new passkey and this device's local data."
             } finally {
                 passkey.secret.fill(0)
             }
@@ -85,13 +85,12 @@ class CloudSyncCoordinator(
             store.apply(merged)
             store.rememberSync(existing.fileId, envelope.updatedAt)
             return if (operation == CloudSyncOperation.ENABLE) {
-                "This device is enabled and the latest records were merged."
+                "Encrypted cloud sync is enabled on this device and the latest records were merged."
             } else {
-                "Encrypted records and settings are up to date."
+                "Encrypted cloud data, records, and settings are up to date."
             }
         } finally {
             secret.fill(0)
         }
     }
 }
-

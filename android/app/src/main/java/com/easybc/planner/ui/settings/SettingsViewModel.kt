@@ -78,7 +78,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _draft.value = UserSettingsEntity()
     }
 
-    // ── Calendar sync ────────────────────────────────────────────────────
+    // ── Device calendar export/update ────────────────────────────────────
 
     fun calendarPermissionGranted(): Boolean = calendarSync.hasPermission()
 
@@ -95,7 +95,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             try {
                 val currentSettings = repo.getSettings() ?: run {
-                    _calendarStatus.value = SyncStatus.Error("Set up your profile before syncing.")
+                    _calendarStatus.value = SyncStatus.Error("Set up your profile before updating the device calendar.")
                     return@launch
                 }
                 val periods = repo.periodsFlow.first()
@@ -107,7 +107,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     cycleCalc = cycleCalc,
                 )
                 _calendarStatus.value = SyncStatus.Success(
-                    "Synced ${result.eventCount} events " +
+                    "Updated ${result.eventCount} device-calendar events " +
                         "(${result.periodDays} period, " +
                         "${result.fertileDays} fertile, " +
                         "${result.actionDays} plan days)."
@@ -115,7 +115,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             } catch (e: SecurityException) {
                 _calendarStatus.value = SyncStatus.Error("Calendar permission denied.")
             } catch (e: Exception) {
-                _calendarStatus.value = SyncStatus.Error(e.message ?: "Sync failed.")
+                _calendarStatus.value = SyncStatus.Error(e.message ?: "Device calendar update failed.")
             }
         }
     }
@@ -160,16 +160,16 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    // ── Export / import ──────────────────────────────────────────────────
+    // ── Backup file export/import ────────────────────────────────────────
 
     fun exportBackup(uri: Uri) {
         _backupStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
                 val bytes = DataBackup.exportTo(app, uri, app.database)
-                _backupStatus.value = SyncStatus.Success("Backup exported ($bytes bytes).")
+                _backupStatus.value = SyncStatus.Success("Backup file exported ($bytes bytes).")
             } catch (e: Exception) {
-                _backupStatus.value = SyncStatus.Error(e.message ?: "Export failed.")
+                _backupStatus.value = SyncStatus.Error(e.message ?: "Backup file export failed.")
             }
         }
     }
@@ -192,7 +192,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             } catch (e: IllegalArgumentException) {
                 _backupStatus.value = SyncStatus.Error(e.message ?: "Invalid backup file.")
             } catch (e: Exception) {
-                _backupStatus.value = SyncStatus.Error(e.message ?: "Import failed.")
+                _backupStatus.value = SyncStatus.Error(e.message ?: "Backup file import failed.")
             }
         }
     }
@@ -205,7 +205,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _backupStatus.value = SyncStatus.Idle
     }
 
-    // ── Encrypted Google Drive sync ─────────────────────────────────────
+    // ── Encrypted cloud sync ─────────────────────────────────────────────
 
     suspend fun beginCloudAuthorization(activity: Activity): AuthorizationStep =
         googleAuthorization.begin(activity)
@@ -226,7 +226,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 _lastCloudSync.value = syncStore.lastSyncedAt()
                 _cloudStatus.value = SyncStatus.Success(message)
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Cloud sync failed.")
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Encrypted cloud sync failed.")
             }
         }
     }

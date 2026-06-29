@@ -48,7 +48,9 @@ export function SyncSettings({
     setBusy(operation);
     setNotice({
       kind: "info",
-      message: operation === "delete" ? "Waiting for Google…" : "Waiting for Google and your passkey…",
+      message: operation === "delete"
+        ? "Waiting for Google Drive…"
+        : "Waiting for Google Drive and your passkey…",
     });
     try {
       const local = buildLocalSyncPayload(options, periodRecords, session);
@@ -81,7 +83,7 @@ export function SyncSettings({
   const unavailable = !clientId || !passkeysSupported();
   const resetEncryption = () => {
     const confirmed = window.confirm(
-      "Replace the encrypted Drive snapshot with this device's local EasyBC data and a new passkey? Other devices must receive the new passkey before they can sync again.",
+      "Replace the encrypted Drive snapshot with this device's local EasyBC data and a new passkey? Other devices must receive the new passkey before they can use encrypted cloud sync again.",
     );
     if (confirmed) void run("reset");
   };
@@ -98,7 +100,7 @@ export function SyncSettings({
         <span className="sync-icon"><Cloud aria-hidden /></span>
         <div>
           <p className="eyebrow">Optional</p>
-          <h3 id="encrypted-sync-title">Encrypted cross-device sync</h3>
+          <h3 id="encrypted-sync-title">Encrypted cloud sync</h3>
           <p>
             Keep period records, day logs, and planner settings in Google Drive. EasyBC encrypts them
             before upload; Drive receives ciphertext and the app never stores the cloud key.
@@ -115,20 +117,20 @@ export function SyncSettings({
         <div className="sync-connected">
           <span className="status-dot" aria-hidden />
           <div>
-            <strong>Sync enabled on this device</strong>
-            <span>Last synced {formatLastSync(syncState.lastSyncedAt)}</span>
+            <strong>Encrypted cloud sync enabled on this device</strong>
+            <span>Last encrypted cloud update {formatLastSync(syncState.lastSyncedAt)}</span>
           </div>
         </div>
       ) : (
         <p className="sync-explainer">
-          First device? Create the encrypted snapshot and passkey. Existing device? Enable sync to
-          unlock and merge the snapshot already in Drive.
+          First device? Create the encrypted cloud snapshot and passkey. Existing device? Enable
+          encrypted cloud sync to unlock and merge the snapshot already in Drive.
         </p>
       )}
 
       {!clientId && (
         <p className="sync-notice sync-notice-info">
-          Google Drive sync needs a web OAuth client ID before these controls can be used.
+          Encrypted cloud sync needs a web OAuth client ID before these controls can be used.
         </p>
       )}
       {!passkeysSupported() && (
@@ -148,26 +150,26 @@ export function SyncSettings({
           <>
             <button type="button" onClick={() => void run("sync")} disabled={unavailable || busy !== null}>
               <RefreshCw aria-hidden className={busy === "sync" ? "spin" : undefined} />
-              {busy === "sync" ? "Syncing…" : "Sync now"}
+              {busy === "sync" ? "Merging…" : "Merge encrypted cloud data"}
             </button>
             <button className="ghost" type="button" onClick={resetEncryption} disabled={unavailable || busy !== null}>
               <KeyRound aria-hidden />
-              {busy === "reset" ? "Replacing…" : "Replace passkey and cloud copy"}
+              {busy === "reset" ? "Replacing…" : "Replace passkey and encrypted cloud copy"}
             </button>
             <button className="ghost" type="button" onClick={deleteCloudCopy} disabled={!clientId || busy !== null}>
               <Trash2 aria-hidden />
-              {busy === "delete" ? "Deleting…" : "Delete cloud copy"}
+              {busy === "delete" ? "Deleting…" : "Delete encrypted cloud copy"}
             </button>
           </>
         ) : (
           <>
             <button type="button" onClick={() => void run("setup")} disabled={unavailable || busy !== null}>
               <KeyRound aria-hidden />
-              {busy === "setup" ? "Setting up…" : "Set up sync"}
+              {busy === "setup" ? "Setting up…" : "Set up encrypted cloud sync"}
             </button>
             <button className="ghost" type="button" onClick={() => void run("enable")} disabled={unavailable || busy !== null}>
               <Cloud aria-hidden />
-              {busy === "enable" ? "Enabling…" : "Enable on this device"}
+              {busy === "enable" ? "Enabling…" : "Enable encrypted cloud sync on this device"}
             </button>
             <button className="ghost" type="button" onClick={resetEncryption} disabled={unavailable || busy !== null}>
               <KeyRound aria-hidden />
@@ -175,13 +177,13 @@ export function SyncSettings({
             </button>
             <button className="ghost" type="button" onClick={deleteCloudCopy} disabled={!clientId || busy !== null}>
               <Trash2 aria-hidden />
-              {busy === "delete" ? "Deleting…" : "Delete cloud copy"}
+              {busy === "delete" ? "Deleting…" : "Delete encrypted cloud copy"}
             </button>
           </>
         )}
       </div>
       <p className="field-hint sync-footnote">
-        A synced passkey is required on each device. If it is lost, a device with local EasyBC data
+        The encrypted-cloud passkey must be available on each device. If it is lost, a device with local EasyBC data
         can create a new encrypted snapshot without losing that local copy.
       </p>
     </section>

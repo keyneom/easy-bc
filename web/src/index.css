@@ -366,16 +366,24 @@ h3 {
 }
 
 .tracker-cell-today {
-  border: 3px solid var(--primary);
+  border-color: var(--outline);
 }
 
 .tracker-cell-today .tracker-cell-day {
   font-weight: 850;
 }
 
+.tracker-cell-selected {
+  border: 2px solid var(--primary);
+}
+
 .tracker-cell-bleeding {
   border-color: var(--period);
   background: var(--period-bg);
+}
+
+.tracker-cell-bleeding-predicted {
+  border-style: dashed;
 }
 
 .tracker-cell-fertile {
@@ -392,19 +400,28 @@ h3 {
 }
 
 .tracker-cell-action-U {
-  box-shadow: inset 0 -4px var(--unprotected);
+  background: var(--unprotected-bg);
+  border-color: color-mix(in srgb, var(--unprotected) 45%, transparent);
 }
 
 .tracker-cell-action-W {
-  box-shadow: inset 0 -4px var(--withdrawal);
+  background: var(--withdrawal-bg);
+  border-color: color-mix(in srgb, var(--withdrawal) 45%, transparent);
 }
 
 .tracker-cell-action-C {
-  box-shadow: inset 0 -4px var(--protected);
+  background: var(--protected-bg);
+  border-color: color-mix(in srgb, var(--protected) 45%, transparent);
 }
 
 .tracker-cell-action-A {
-  box-shadow: inset 0 -4px var(--abstain);
+  background: var(--abstain-bg);
+  border-color: color-mix(in srgb, var(--abstain) 45%, transparent);
+}
+
+.tracker-cell.tracker-cell-bleeding {
+  background: var(--period-bg);
+  border-color: var(--period);
 }
 
 .tracker-cell-credit {
@@ -429,6 +446,40 @@ h3 {
   color: var(--muted);
   font-size: 0.66rem;
   font-weight: 700;
+}
+
+.tracker-grid-week .tracker-cell-plan-letter {
+  font-size: 1.2rem;
+}
+
+.tracker-cell-phase {
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 650;
+}
+
+.tracker-cell-period-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 0.22rem;
+  border-radius: 50%;
+  background: var(--period);
+}
+
+.tracker-cell-period-dot-predicted {
+  border: 1px solid var(--period);
+  background: transparent;
+}
+
+.tracker-cell-log-dot {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--primary);
 }
 
 .tracker-cell-credit-dot {
@@ -466,9 +517,88 @@ h3 {
 }
 
 .swatch-bleeding { background: var(--period); }
+.swatch-bleeding-predicted {
+  border: 1px solid var(--period);
+  background: transparent;
+}
 .swatch-fertile { background: var(--fertile); }
 .swatch-credit { background: #ffb300; }
 .swatch-sample { background: var(--outline); }
+.swatch-log { background: var(--primary); }
+.swatch-action-U { background: var(--unprotected); }
+.swatch-action-W { background: var(--withdrawal); }
+.swatch-action-C { background: var(--protected); }
+.swatch-action-A { background: var(--abstain); }
+
+.calendar-nudge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  margin: 0 0 0.7rem;
+  padding: 0.75rem 1rem;
+  border-radius: 0;
+  color: var(--text);
+  text-align: left;
+  font-size: 0.86rem;
+  box-shadow: none;
+}
+
+.calendar-nudge strong {
+  color: var(--primary-strong);
+  white-space: nowrap;
+}
+
+.calendar-nudge-period {
+  background: #fff7e8;
+}
+
+.calendar-nudge-reconcile {
+  background: var(--secondary-container);
+}
+
+.cycle-ledger-card {
+  margin: 0.75rem 0 1rem;
+  padding: 0.85rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.cycle-ledger-head,
+.cycle-ledger-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.cycle-ledger-meter {
+  height: 8px;
+  margin: 0.45rem 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--surface-variant);
+}
+
+.cycle-ledger-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.cycle-ledger-meter .cycle-ledger-over {
+  background: #d32f2f;
+}
+
+.danger-text {
+  color: #b3261e;
+}
 
 .day-panel-backdrop,
 .modal-backdrop {
@@ -516,6 +646,164 @@ h3 {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
+.day-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 1rem 0 0.75rem;
+}
+
+.day-status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.day-status-period {
+  background: var(--period-bg);
+  color: var(--period);
+}
+
+.day-recommendation-card,
+.override-card {
+  margin: 0.75rem 0;
+  padding: 0.95rem;
+  border-radius: 18px;
+}
+
+.day-recommendation-card > span,
+.override-card > span {
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.day-recommendation-card > strong {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 1.65rem;
+  line-height: 1;
+}
+
+.action-card-U { background: var(--unprotected-bg); color: var(--unprotected); }
+.action-card-W { background: var(--withdrawal-bg); color: var(--withdrawal); }
+.action-card-C { background: var(--protected-bg); color: var(--protected); }
+.action-card-A { background: var(--abstain-bg); color: var(--abstain); }
+
+.risk-score-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.65rem;
+  align-items: center;
+  margin-top: 0.85rem;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.risk-score-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.risk-score-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: currentColor;
+}
+
+.override-card {
+  border: 1px solid var(--outline-soft);
+  background: var(--surface);
+}
+
+.override-card p {
+  margin: 0.25rem 0 0.65rem;
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.override-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.override-counts strong {
+  padding: 0.35rem 0.55rem;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--primary-strong);
+  font-size: 0.74rem;
+}
+
+.method-risk-card {
+  margin: 0.75rem 0;
+  padding: 0.95rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.method-risk-card h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.9rem;
+}
+
+.method-risk-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.method-risk-row {
+  display: grid;
+  grid-template-columns: 2.2rem repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.55rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 14px;
+  background: var(--surface-variant);
+}
+
+.method-risk-row > strong {
+  display: grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.method-risk-row span {
+  display: grid;
+  gap: 0.12rem;
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.2;
+}
+
+.method-risk-row b {
+  color: var(--text);
+  font-size: 0.74rem;
+}
+
+.method-risk-U > strong { color: var(--unprotected); }
+.method-risk-W > strong { color: var(--withdrawal); }
+.method-risk-C > strong { color: var(--protected); }
+.method-risk-A > strong { color: var(--abstain); }
 
 .day-panel-dl {
   display: grid;
@@ -581,6 +869,30 @@ h3 {
 
 .action-log strong {
   font-size: 1rem;
+}
+
+.clear-action-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: -0.35rem 0 0.8rem;
+  padding: 0.65rem;
+  border-radius: 14px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.clear-action-confirm span {
+  margin-right: auto;
+}
+
+.clear-action-confirm button {
+  min-height: 34px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.76rem;
 }
 
 .day-events {
@@ -750,6 +1062,22 @@ h3 {
   margin: 0 auto;
 }
 
+.settings-subsection-title {
+  grid-column: 1 / -1;
+  margin: 0.25rem 0 -0.1rem;
+}
+
+.settings-subsection-title h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 850;
+}
+
+.settings-subsection-outside {
+  margin: 0.5rem 0 0.55rem;
+}
+
 .settings-links {
   display: flex;
   justify-content: center;
@@ -761,6 +1089,23 @@ h3 {
 .settings-links a {
   color: var(--primary-strong);
   font-weight: 700;
+}
+
+.settings-platform-card {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 22px;
+  background: var(--surface);
+}
+
+.settings-platform-card h3 {
+  margin-bottom: 0.35rem;
+}
+
+.settings-platform-card .settings-links {
+  justify-content: flex-start;
+  margin: 0.75rem 0 0;
 }
 
 .sync-card {
@@ -1335,8 +1680,61 @@ input[type="radio"] {
 }
 
 .settings-form .card,
-.primary-action {
+.primary-action,
+.choice-chip-field {
   grid-column: 1 / -1;
+}
+
+.settings-form-android {
+  gap: 0.7rem 1rem;
+}
+
+.settings-form-android legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.choice-chip-field {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.45rem 0;
+}
+
+.choice-chip-label {
+  color: var(--text);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.choice-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.choice-chip {
+  min-height: 36px;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--outline);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.choice-chip:hover:not(:disabled) {
+  background: var(--surface-variant);
+  color: var(--primary-strong);
+}
+
+.choice-chip[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--outline));
+  background: var(--primary-container);
+  color: var(--on-primary-container);
 }
 
 .settings-form .card {

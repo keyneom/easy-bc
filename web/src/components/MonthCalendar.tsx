@@ -1,11 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarDays, CalendarRange, ChevronLeft, ChevronRight, Grid3X3 } from "lucide-react";
-import { allBleedingDates, estimateCyclePhase } from "../tracker/cyclePhase";
-import { monthGrid, toIsoDate } from "../tracker/calendarMath";
+import { derivedBleedingEnd, estimateCyclePhase } from "../tracker/cyclePhase";
+import { compareIso, eachIsoInRange, monthGrid, toIsoDate } from "../tracker/calendarMath";
 import type { PeriodRecord } from "../tracker/types";
 import type { PlannerDayMeta } from "../tracker/plannerWallMeta";
+import type { CalendarDayLog, PlannerAction } from "../sessionUtils";
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const ACTION_ORDER: PlannerAction[] = ["U", "W", "C", "A"];
+const ACTION_LABELS: Record<PlannerAction, string> = {
+  U: "Unprotected",
+  W: "Withdrawal",
+  C: "Protected",
+  A: "Abstain",
+};
+
+const PHASE_LABELS: Record<string, string> = {
+  menstrual: "Period",
+  follicular: "Follicular",
+  fertile: "Fertile",
+  luteal: "Luteal",
+  unknown: "Unknown",
+};
 
 export type CalendarDensity = "compact" | "comfortable";
 
@@ -15,7 +31,10 @@ type Props = {
   periodRecords: PeriodRecord[];
   ageYears: number;
   todayIso: string;
+  selectedDayIso: string | null;
   voluntaryAbstinence: Record<string, true>;
+  calendarDayLogs: Record<string, CalendarDayLog>;
+  activeActions: PlannerAction[];
   plannerDayMeta?: (iso: string) => PlannerDayMeta | null;
   calendarDensity: CalendarDensity;
   onCalendarDensityChange: (d: CalendarDensity) => void;
@@ -31,7 +50,10 @@ export function MonthCalendar({
   periodRecords,
   ageYears,
   todayIso,
+  selectedDayIso,
   voluntaryAbstinence,
+  calendarDayLogs,
+  activeActions,
   plannerDayMeta,
   calendarDensity,
   onCalendarDensityChange,
@@ -57,10 +79,17 @@ export function MonthCalendar({
     });
   }, [year, monthIndex, weekOffset]);
   const cells = viewMode === "month" ? monthCells : weekCells;
-  const bleeding = useMemo(
-    () => allBleedingDates(periodRecords, todayIso),
-    [periodRecords, todayIso],
-  );
+  const periodStatus = useMemo(() => {
+    const sorted = [...periodRecords].sort((a, b) => compareIso(a.start, b.start));
+    const status = new Map<string, { predicted: boolean }>();
+    for (const record of sorted) {
+      const end = derivedBleedingEnd(record, sorted, todayIso);
+      for (const iso of eachIsoInRange(record.start, end)) {
+        status.set(iso, { predicted: record.end == null });
+      }
+    }
+    return status;
+  }, [periodRecords, todayIso]);
   const phaseByIso = useMemo(() => {
     const m = new Map<string, ReturnType<typeof estimateCyclePhase>>();
     for (const c of cells) {
@@ -84,7 +113,7 @@ export function MonthCalendar({
   };
 
   return (
-    <section className="tracker-month" aria-label="Calendar month">
+    <section className={`tracker-month tracker-density-${calendarDensity}`} aria-label="Calendar month">
       <div className="tracker-month-nav">
         <button type="button" className="icon-button" aria-label="Previous" onClick={navigatePrevious}>
           <ChevronLeft aria-hidden />
@@ -142,7 +171,11 @@ export function MonthCalendar({
           const meta = plannerDayMeta?.(c.iso);
           const action = meta?.recommendedAction;
           const risk = meta?.rawRiskScore;
-          const showRisk = calendarDensity === "comfortable" && meta != null;
+          const period = periodStatus.get(c.iso);
+          const isBleeding = period != null;
+          const isSelected = selectedDayIso === c.iso;
+          const hasDayLog = hasMeaningfulDayLog(calendarDayLogs[c.iso]);
+          const showRisk = viewMode === "week" && meta != null;
           const titleTip =
             meta != null
               ? `${c.iso}: plan ${action}, raw risk ${risk}`
@@ -151,9 +184,12 @@ export function MonthCalendar({
             "tracker-cell",
             c.inMonth ? "tracker-cell-in-month" : "tracker-cell-pad",
             c.iso === todayIso ? "tracker-cell-today" : "",
-            bleeding.has(c.iso) ? "tracker-cell-bleeding" : "",
-            phase === "fertile" && c.inMonth && !bleeding.has(c.iso) ? "tracker-cell-fertile" : "",
+            isSelected ? "tracker-cell-selected" : "",
+            isBleeding ? "tracker-cell-bleeding" : "",
+            period?.predicted ? "tracker-cell-bleeding-predicted" : "",
+            phase === "fertile" && c.inMonth && !isBleeding ? "tracker-cell-fertile" : "",
             voluntaryAbstinence[c.iso] ? "tracker-cell-credit" : "",
+            hasDayLog ? "tracker-cell-logged" : "",
             est?.usingSampleCycle && c.inMonth ? "tracker-cell-sample" : "",
             action ? `tracker-cell-action-${action}` : "",
           ]
@@ -175,18 +211,32 @@ export function MonthCalendar({
               title={c.inMonth ? titleTip : undefined}
               aria-label={
                 c.inMonth
-                  ? `${c.iso}${c.iso === todayIso ? ", today" : ""}${bleeding.has(c.iso) ? ", bleeding logged" : ""}${ariaPlanner}`
+                  ? `${c.iso}${c.iso === todayIso ? ", today" : ""}${isBleeding ? ", bleeding" : ""}${hasDayLog ? ", logged data" : ""}${ariaPlanner}`
                   : undefined
               }
               aria-current={c.iso === todayIso ? "date" : undefined}
               onClick={() => c.inMonth && onSelectDay(c.iso)}
             >
               <span className="tracker-cell-day">{c.inMonth ? c.day : ""}</span>
+              {c.inMonth && isBleeding && (
+                <span
+                  className={`tracker-cell-period-dot ${
+                    period?.predicted ? "tracker-cell-period-dot-predicted" : ""
+                  }`}
+                  title={period?.predicted ? "Predicted/open period" : "Confirmed period"}
+                />
+              )}
               {c.inMonth && meta != null && (
                 <span className="tracker-cell-plan-block">
                   <span className="tracker-cell-plan-letter">{action}</span>
-                  {showRisk && <span className="tracker-cell-plan-risk">{risk}</span>}
+                  {showRisk && <span className="tracker-cell-plan-risk">Risk {risk}</span>}
+                  {showRisk && phase && (
+                    <span className="tracker-cell-phase">{PHASE_LABELS[phase] ?? phase}</span>
+                  )}
                 </span>
+              )}
+              {c.inMonth && hasDayLog && (
+                <span className="tracker-cell-log-dot" title="Logged day data" />
               )}
               {c.inMonth && voluntaryAbstinence[c.iso] && (
                 <span className="tracker-cell-credit-dot" title="Abstinence credit" />
@@ -196,25 +246,39 @@ export function MonthCalendar({
         })}
       </div>
       <ul className="tracker-legend hint">
+        {ACTION_ORDER.filter((action) => activeActions.includes(action)).map((action) => (
+          <li key={action}>
+            <span className={`swatch swatch-action-${action}`} /> {ACTION_LABELS[action]}
+          </li>
+        ))}
         <li>
-          <span className="swatch swatch-bleeding" /> Logged bleeding
+          <span className="swatch swatch-bleeding" /> Period
         </li>
         <li>
-          <span className="swatch swatch-fertile" /> Estimated fertile window (calendar-only)
+          <span className="swatch swatch-bleeding-predicted" /> Predicted/open period
         </li>
         <li>
-          <span className="swatch swatch-credit" /> Voluntary abstinence credit
+          <span className="swatch swatch-log" /> Logged day data
         </li>
         <li>
-          <span className="swatch swatch-sample" /> Sample cycle (no data yet)
+          <span className="swatch swatch-fertile" /> Fertile estimate
         </li>
         <li>
-          Letter + number = planner <strong>U</strong>/<strong>W</strong>/<strong>C</strong>/
-          <strong>A</strong> and raw risk (0–100) when calendar plan is active
+          <span className="swatch swatch-credit" /> Abstinence credit
         </li>
       </ul>
     </section>
   );
+}
+
+function hasMeaningfulDayLog(log: CalendarDayLog | undefined): boolean {
+  if (!log) return false;
+  if (log.actualAction && log.actualAction !== "NONE") return true;
+  if (log.notes?.trim()) return true;
+  if (log.mucus || log.opk || log.bbtCelsius != null) return true;
+  if (log.mittelschmerz || log.breastTender || log.reconciled) return true;
+  if (log.events?.length) return true;
+  return false;
 }
 
 export function todayIsoLocal(): string {

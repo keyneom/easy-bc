@@ -7,6 +7,15 @@ import { EC_CYCLE_EFFECTS_COPY } from "../strings";
 
 type AddEventKind = "condom_broke" | "unplanned_unprotected" | "plan_b_taken";
 
+export type MethodRiskRow = {
+  action: PlannerAction;
+  expectedDayPattern: number;
+  expectedSingleAct: number;
+  plausibleLow: number;
+  plausibleHigh: number;
+  peakAligned: number;
+};
+
 const EVENT_LABEL: Record<DayEvent["kind"], string> = {
   condom_broke: "Condom broke",
   unplanned_unprotected: "Unplanned unprotected",
@@ -66,6 +75,8 @@ type Props = {
   onMarkPeriodEnd: () => void;
   calendarPlanActive: boolean;
   dayLog?: CalendarDayLog;
+  activeActions: PlannerAction[];
+  riskRows?: MethodRiskRow[];
   onUpdateDayLog: (patch: Partial<CalendarDayLog>) => void;
 };
 
@@ -81,17 +92,23 @@ export function DayDetailPanel({
   onMarkPeriodEnd,
   calendarPlanActive,
   dayLog,
+  activeActions,
+  riskRows,
   onUpdateDayLog,
 }: Props) {
   const [addingEvent, setAddingEvent] = useState<AddEventKind | null>(null);
   const [ecType, setEcType] = useState<EcType>("levonorgestrel");
   const [ecHours, setEcHours] = useState<string>("");
+  const [confirmClearAction, setConfirmClearAction] = useState(false);
 
   if (!iso) return null;
 
   const oc = plannerMeta?.overrideCost;
   const events = dayLog?.events ?? [];
   const hasPlanB = events.some((e) => e.kind === "plan_b_taken");
+  const logActions = (["U", "W", "C", "A"] as PlannerAction[]).filter((action) =>
+    action === "U" || action === "A" || activeActions.includes(action),
+  );
 
   function commitEvent() {
     if (!iso || !addingEvent) return;
@@ -144,57 +161,117 @@ export function DayDetailPanel({
       {estimate?.usingSampleCycle && (
         <p className="warn compact">Sample cycle preview — log period bleeding for a personal estimate.</p>
       )}
-      <dl className="day-panel-dl">
-        <dt>Phase (estimate)</dt>
-        <dd>{estimate?.phase ?? "—"}</dd>
-        <dt>Cycle day (estimate)</dt>
-        <dd>{estimate?.cycleDay ?? "—"}</dd>
-        <dt>Next period (guess)</dt>
-        <dd>{estimate?.nextPeriodEstimate ?? "—"}</dd>
-        {calendarPlanActive && (
-          <>
-            <dt className="dt-optimizer">Planner recommendation</dt>
-            <dd>{plannerMeta?.recommendedAction ?? "— (recompute plan or date outside horizon)"}</dd>
-            <dt className="dt-optimizer">Raw risk score (optimizer)</dt>
-            <dd>
-              {plannerMeta != null
-                ? `${plannerMeta.rawRiskScore} (0–100 within that cycle in the model)`
-                : "—"}
-            </dd>
-            <dt className="dt-optimizer">Override cost (approx.)</dt>
-            <dd>
-              {oc != null
-                ? `${oc.condoms} condom-day(s), ${oc.abstinenceDays} abstinence day(s). ${oc.note || ""}`
-                : "—"}
-            </dd>
-          </>
+      <div className="day-chip-row" aria-label="Day status">
+        <span className="day-status-chip">{estimate?.phase ?? "Unknown phase"}</span>
+        {estimate?.cycleDay != null && (
+          <span className="day-status-chip">Cycle day {estimate.cycleDay}</span>
         )}
-      </dl>
+        {isBleeding && <span className="day-status-chip day-status-period">Period</span>}
+      </div>
+      {calendarPlanActive && plannerMeta && (
+        <section className={`day-recommendation-card action-card-${plannerMeta.recommendedAction}`}>
+          <span>Recommendation</span>
+          <strong>{plannerMeta.recommendedAction}</strong>
+          <div className="risk-score-row">
+            <span>Risk score</span>
+            <div className="risk-score-meter" aria-hidden>
+              <span style={{ width: `${Math.max(0, Math.min(100, plannerMeta.rawRiskScore))}%` }} />
+            </div>
+            <b>{plannerMeta.rawRiskScore}/100</b>
+          </div>
+        </section>
+      )}
+      {calendarPlanActive && !plannerMeta && (
+        <p className="meta">No planner recommendation for this date. Recompute the plan or extend calendar cycles.</p>
+      )}
+      {calendarPlanActive && oc && (oc.condoms > 0 || oc.abstinenceDays > 0 || oc.note) && (
+        <section className="override-card">
+          <span>If you use less protection</span>
+          <p>{oc.note || "The planner may need recovery days to stay on target."}</p>
+          <div className="override-counts">
+            {oc.condoms > 0 && <strong>+{oc.condoms} protected day(s)</strong>}
+            {oc.abstinenceDays > 0 && <strong>+{oc.abstinenceDays} abstinence day(s)</strong>}
+          </div>
+        </section>
+      )}
+      {calendarPlanActive && riskRows?.length ? (
+        <section className="method-risk-card" aria-label="Method risk estimate">
+          <div>
+            <h4>Method risk estimate</h4>
+            <p className="hint compact">
+              Percent conception risk for this day. “Expected day” is averaged across ovulation
+              uncertainty and your planned frequency; “single act” is one act on this date.
+              The 2-SD range and peak are conditional what-ifs.
+            </p>
+          </div>
+          <div className="method-risk-list">
+            {riskRows.map((row) => (
+              <div key={row.action} className={`method-risk-row method-risk-${row.action}`}>
+                <strong>{row.action}</strong>
+                <span>
+                  Expected day
+                  <b>{formatRiskPercent(row.expectedDayPattern)}</b>
+                </span>
+                <span>
+                  Single act avg
+                  <b>{formatRiskPercent(row.expectedSingleAct)}</b>
+                </span>
+                <span>
+                  2-SD act range
+                  <b>{formatRiskPercent(row.plausibleLow)}–{formatRiskPercent(row.plausibleHigh)}</b>
+                </span>
+                <span>
+                  Peak aligned
+                  <b>{formatRiskPercent(row.peakAligned)}</b>
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <p className="hint compact">{estimate?.notes}</p>
 
       <section className="day-log-section">
         <h4>Log what happened</h4>
         <div className="action-log-row" role="group" aria-label="Actual action">
-          {([
-            ["U", "Unprotected"],
-            ["W", "Withdrawal"],
-            ["C", "Protected"],
-            ["A", "Abstained"],
-          ] as [PlannerAction, string][]).map(([action, label]) => (
+          {logActions.map((action) => (
             <button
               key={action}
               type="button"
               className={`action-log action-log-${action}`}
               aria-pressed={dayLog?.actualAction === action}
-              onClick={() => onUpdateDayLog({
-                actualAction: dayLog?.actualAction === action ? undefined : action,
-              })}
+              onClick={() => {
+                if (dayLog?.actualAction === action) {
+                  setConfirmClearAction(true);
+                  return;
+                }
+                setConfirmClearAction(false);
+                onUpdateDayLog({ actualAction: action, reconciled: true });
+              }}
             >
               <strong>{action}</strong>
-              <span>{label}</span>
+              <span>{ACTION_LABEL[action]}</span>
             </button>
           ))}
         </div>
+        {confirmClearAction && (
+          <div className="clear-action-confirm">
+            <span>Clear logged action for this day?</span>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                onUpdateDayLog({ actualAction: undefined, reconciled: undefined });
+                setConfirmClearAction(false);
+              }}
+            >
+              Clear
+            </button>
+            <button type="button" className="ghost" onClick={() => setConfirmClearAction(false)}>
+              Cancel
+            </button>
+          </div>
+        )}
         <p className="hint compact">
           This sets the day's overall pattern. For a one-off incident — a broken
           condom or unprotected sex on a day you'd planned to abstain — add an
@@ -374,11 +451,12 @@ export function DayDetailPanel({
       </details>
 
       <div className="day-panel-actions">
+        <h4>Period tracking</h4>
         <button type="button" onClick={onMarkPeriodStart}>
-          Period started this day
+          {isBleeding ? "Confirm period started on this day" : "Mark period start"}
         </button>
         <button type="button" className="ghost" onClick={onMarkPeriodEnd}>
-          Last bleeding day was this day
+          {isBleeding ? "Confirm period ended on this day" : "Last bleeding day was this day"}
         </button>
         <label className="credit-toggle">
           <input type="checkbox" checked={hasCredit} onChange={onToggleCredit} />
@@ -389,4 +467,18 @@ export function DayDetailPanel({
     </div>
     </div>
   );
+}
+
+const ACTION_LABEL: Record<PlannerAction, string> = {
+  U: "Unprotected",
+  W: "Withdrawal",
+  C: "Protected",
+  A: "Abstained",
+};
+
+function formatRiskPercent(value: number): string {
+  const pct = value * 100;
+  if (pct > 0 && pct < 0.01) return "<0.01%";
+  if (pct < 1) return `${pct.toFixed(2)}%`;
+  return `${pct.toFixed(1)}%`;
 }

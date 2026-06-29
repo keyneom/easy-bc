@@ -21,6 +21,9 @@ if [[ "$ACTUAL_JAR_SHA256" != "$EXPECTED_JAR_SHA256" ]]; then
 fi
 grep -Fqx 'distributionUrl=https\://services.gradle.org/distributions/gradle-8.9-bin.zip' "$PROPERTIES"
 grep -Fqx "distributionSha256Sum=$EXPECTED_DISTRIBUTION_SHA256" "$PROPERTIES"
-unzip -l "$JAR" | grep -Fq 'org/gradle/wrapper/GradleWrapperMain.class'
+WRAPPER_LISTING="$(mktemp)"
+trap 'rm -f "$WRAPPER_LISTING"' EXIT
+unzip -l "$JAR" > "$WRAPPER_LISTING"
+grep -Fq 'org/gradle/wrapper/GradleWrapperMain.class' "$WRAPPER_LISTING"
 grep -Fq -- '-classpath "$APP_HOME/gradle/wrapper/gradle-wrapper.jar"' "$UNIX_LAUNCHER"
 grep -Fq -- '-classpath "%APP_HOME%\gradle\wrapper\gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain' "$WINDOWS_LAUNCHER"

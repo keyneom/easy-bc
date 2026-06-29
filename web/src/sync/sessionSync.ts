@@ -94,14 +94,14 @@ export async function runEncryptedSyncOperation({
   rpId: string;
   local: SyncPayloadV1;
 }): Promise<SyncRunResult> {
-  if (!clientId) throw new Error("Google Drive sync is not configured in this build.");
+  if (!clientId) throw new Error("Encrypted cloud sync is not configured in this build.");
   const token = await requestDriveAccessToken(clientId);
   const existing = await findDriveSnapshot(token);
 
   if (operation === "setup") {
     if (existing) {
       throw new Error(
-        "An EasyBC snapshot already exists in this Drive. Use “Enable on this device” instead.",
+        "An encrypted EasyBC cloud snapshot already exists in this Drive. Use “Enable encrypted cloud sync on this device” instead.",
       );
     }
     const passkey = await createSyncPasskey();
@@ -120,14 +120,14 @@ export async function runEncryptedSyncOperation({
         fileId,
         syncedAt: envelope.updatedAt,
         payload: local,
-        message: "Encrypted sync is set up. The cloud key was discarded after upload.",
+        message: "Encrypted cloud sync is set up. The cloud key was discarded after upload.",
       };
     } finally {
       passkey.secret.fill(0);
     }
   }
 
-  if (!existing) throw new Error("No EasyBC encrypted snapshot was found in this Google Drive.");
+  if (!existing) throw new Error("No EasyBC encrypted cloud snapshot was found in this Google Drive.");
 
   if (operation === "delete") {
     await deleteDriveSnapshot(token, existing.fileId);
@@ -136,7 +136,7 @@ export async function runEncryptedSyncOperation({
       fileId: null,
       syncedAt: null,
       payload: null,
-      message: "The encrypted EasyBC snapshot was deleted from Google Drive.",
+      message: "The encrypted EasyBC cloud snapshot was deleted from Google Drive.",
     };
   }
 
@@ -157,7 +157,7 @@ export async function runEncryptedSyncOperation({
         fileId: existing.fileId,
         syncedAt: envelope.updatedAt,
         payload: local,
-        message: "The cloud snapshot now uses the new passkey and this device's local data.",
+        message: "The encrypted cloud snapshot now uses the new passkey and this device's local data.",
       };
     } finally {
       passkey.secret.fill(0);
@@ -194,8 +194,8 @@ export async function runEncryptedSyncOperation({
       payload: merged,
       message:
         operation === "enable"
-          ? "This device is enabled and the latest records were merged."
-          : "Encrypted records and settings are up to date.",
+          ? "Encrypted cloud sync is enabled on this device and the latest records were merged."
+          : "Encrypted cloud data, records, and settings are up to date.",
     };
   } finally {
     secret.fill(0);

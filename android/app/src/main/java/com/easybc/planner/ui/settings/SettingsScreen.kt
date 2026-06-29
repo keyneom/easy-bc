@@ -268,16 +268,16 @@ fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
             SectionHeader("Reminders")
             ReminderSection(vm)
 
-            // ── Device Calendar ──
-            SectionHeader("Device Calendar")
+            // ── Device Calendar Export ──
+            SectionHeader("Device Calendar Export")
             DeviceCalendarSection(vm)
 
-            // ── Encrypted cross-device sync ──
-            SectionHeader("Encrypted Sync")
+            // ── Encrypted cloud sync ──
+            SectionHeader("Encrypted Cloud Sync")
             EncryptedSyncSection(vm)
 
-            // ── Backup & Restore ──
-            SectionHeader("Backup & Restore")
+            // ── Backup file ──
+            SectionHeader("Backup File")
             BackupRestoreSection(vm)
 
             // ── Advanced ──
@@ -365,7 +365,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     }
 
     Text(
-        "Sync planner settings, period records, and day logs through Google Drive. " +
+        "Merge planner settings, period records, and day logs through an encrypted Google Drive snapshot. " +
             "EasyBC encrypts the snapshot before upload and only requests access to its own hidden app-data file.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -381,12 +381,12 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             Icon(if (connected) Icons.Default.Cloud else Icons.Default.Key, null)
             Column {
                 Text(
-                    if (connected) "Sync enabled on this device" else "Passkey-protected cloud copy",
+                    if (connected) "Encrypted cloud sync enabled on this device" else "Passkey-protected encrypted cloud copy",
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Text(
-                    lastSync?.let { "Last synced ${formatSyncTime(it)}" }
-                        ?: "No cloud sync has completed on this device.",
+                    lastSync?.let { "Last encrypted cloud update ${formatSyncTime(it)}" }
+                        ?: "No encrypted cloud sync has completed on this device.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -404,19 +404,19 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Sync, null)
             Spacer(Modifier.width(8.dp))
-            Text("Sync now")
+            Text("Merge encrypted cloud data")
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = { confirming = CloudSyncOperation.RESET },
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
-            ) { Text("Replace passkey") }
+            ) { Text("Replace cloud passkey") }
             OutlinedButton(
                 onClick = { confirming = CloudSyncOperation.DELETE },
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
-            ) { Text("Delete cloud copy") }
+            ) { Text("Delete encrypted cloud copy") }
         }
     } else {
         Button(
@@ -426,13 +426,13 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Key, null)
             Spacer(Modifier.width(8.dp))
-            Text("Set up sync")
+            Text("Set up encrypted cloud sync")
         }
         OutlinedButton(
             onClick = { authorizeAndRun(CloudSyncOperation.ENABLE) },
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Enable on this device") }
+        ) { Text("Enable encrypted cloud sync on this device") }
     }
     StatusRow(status = status, onDismiss = vm::dismissCloudStatus)
 
@@ -440,14 +440,14 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         AlertDialog(
             onDismissRequest = { confirming = null },
             title = {
-                Text(if (operation == CloudSyncOperation.RESET) "Replace passkey and cloud copy?" else "Delete cloud copy?")
+                Text(if (operation == CloudSyncOperation.RESET) "Replace passkey and encrypted cloud copy?" else "Delete encrypted cloud copy?")
             },
             text = {
                 Text(
                     if (operation == CloudSyncOperation.RESET) {
-                        "This replaces the Drive snapshot with this device's local data and a new passkey. Other devices must enable sync with the new passkey."
+                        "This replaces the encrypted Drive snapshot with this device's local data and a new passkey. Other devices must enable encrypted cloud sync with the new passkey."
                     } else {
-                        "This permanently deletes the encrypted EasyBC snapshot from Drive. Local data stays on this device."
+                        "This permanently deletes the encrypted EasyBC cloud snapshot from Drive. Local data stays on this device."
                     }
                 )
             },
@@ -593,9 +593,9 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
     }
 
     Text(
-        "Keep an \"EasyBC Planner\" calendar on this device in sync with your " +
+        "Write and update an \"EasyBC Planner\" calendar on this device from your " +
             "logged periods, predicted cycles, fertile windows, and daily " +
-            "planner recommendations. Updates automatically whenever your " +
+            "planner recommendations. It can update automatically whenever your " +
             "data changes. No data leaves your phone — sharing it onward to " +
             "Google Calendar etc. is your call.",
         style = MaterialTheme.typography.bodySmall,
@@ -610,9 +610,9 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text("Auto-sync to device calendar", style = MaterialTheme.typography.bodyMedium)
+            Text("Automatically update device calendar", style = MaterialTheme.typography.bodyMedium)
             Text(
-                if (syncEnabled) "Events update automatically."
+                if (syncEnabled) "Device-calendar events update automatically."
                 else "Off — turn on to create the calendar and keep it fresh.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -645,7 +645,7 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
             "Using Google Calendar? Events live in a local \"EasyBC Planner\" " +
                 "calendar that Google Calendar hides by default. Open Google " +
                 "Calendar → menu → Settings → tap \"EasyBC Planner\" and turn " +
-                "on Sync / Show in calendar list.",
+                "on calendar visibility / show in calendar list.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -660,7 +660,7 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Sync, null)
             Spacer(Modifier.width(8.dp))
-            Text("Sync now")
+            Text("Update device calendar now")
         }
         OutlinedButton(
             onClick = { vm.removeCalendar() },
@@ -669,7 +669,7 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Delete, null)
             Spacer(Modifier.width(8.dp))
-            Text("Remove")
+            Text("Remove device calendar")
         }
     }
 
@@ -691,7 +691,7 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
                 "kind of event. Defaults are single letters so a glance at " +
                 "your calendar by someone else doesn't reveal anything — " +
                 "change or blank them however you like. Edits apply on the " +
-                "next sync.",
+                "next device-calendar update.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -715,8 +715,8 @@ private fun DeviceCalendarSection(vm: SettingsViewModel) {
             vm.updateDraft { d -> d.copy(calendarLabelActionW = v) }
         }
         Text(
-            "Remember to tap Save at the top of the screen, then Sync now, " +
-                "to push the new labels to your device calendar.",
+            "Remember to tap Save at the top of the screen, then Update " +
+                "device calendar now to write the new labels to your device calendar.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -753,10 +753,10 @@ private fun BackupRestoreSection(vm: SettingsViewModel) {
     var confirmImport by remember { mutableStateOf(false) }
 
     Text(
-        "Save all your cycle data, planner settings, and day logs to a JSON " +
-            "file, or restore from one. Use this to move between devices — " +
-            "no account required. The exported file is not encrypted, so keep " +
-            "it private. Importing replaces everything on this device.",
+        "Save all your cycle data, planner settings, and day logs to a backup " +
+            "JSON file, or restore from one. Use this to move between devices — " +
+            "no account required. The backup file is not encrypted, so keep " +
+            "it private. Importing a backup file replaces everything on this device.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -770,7 +770,7 @@ private fun BackupRestoreSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Upload, null)
             Spacer(Modifier.width(8.dp))
-            Text("Export")
+            Text("Export backup file")
         }
         OutlinedButton(
             onClick = { confirmImport = true },
@@ -779,7 +779,7 @@ private fun BackupRestoreSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Download, null)
             Spacer(Modifier.width(8.dp))
-            Text("Import")
+            Text("Import backup file")
         }
     }
 
@@ -788,13 +788,13 @@ private fun BackupRestoreSection(vm: SettingsViewModel) {
     if (confirmImport) {
         AlertDialog(
             onDismissRequest = { confirmImport = false },
-            title = { Text("Replace all data?") },
+            title = { Text("Import backup file and replace all data?") },
             text = {
                 Text(
-                    "Importing a backup wipes this device's period logs, day " +
+                    "Importing a backup file wipes this device's period logs, day " +
                         "logs, and settings and replaces them with the backup. " +
-                        "Your device calendar will not be changed — hit \"Sync " +
-                        "now\" afterward to push the imported data to your " +
+                        "Your device calendar will not be changed — use \"Update " +
+                        "device calendar now\" afterward to write the imported data to your " +
                         "device calendar.",
                 )
             },
@@ -802,7 +802,7 @@ private fun BackupRestoreSection(vm: SettingsViewModel) {
                 TextButton(onClick = {
                     confirmImport = false
                     importLauncher.launch(arrayOf(DataBackup.MIME_TYPE, "*/*"))
-                }) { Text("Choose file") }
+                }) { Text("Choose backup file") }
             },
             dismissButton = {
                 TextButton(onClick = { confirmImport = false }) { Text("Cancel") }
