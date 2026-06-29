@@ -1,7 +1,58 @@
+import { useState } from "react";
 import type { CyclePhaseEstimate } from "../tracker/cyclePhase";
 import type { PlannerDayMeta } from "../tracker/plannerWallMeta";
 import { X } from "lucide-react";
-import type { CalendarDayLog, PlannerAction } from "../sessionUtils";
+import type { CalendarDayLog, DayEvent, EcType, PlannerAction } from "../sessionUtils";
+import { EC_CYCLE_EFFECTS_COPY } from "../strings";
+
+type AddEventKind = "condom_broke" | "unplanned_unprotected" | "plan_b_taken";
+
+const EVENT_LABEL: Record<DayEvent["kind"], string> = {
+  condom_broke: "Condom broke",
+  unplanned_unprotected: "Unplanned unprotected",
+  plan_b_taken: "Emergency contraception",
+};
+
+const EC_LABEL: Record<EcType, string> = {
+  levonorgestrel: "Plan B (levonorgestrel)",
+  ulipristal: "ella (ulipristal)",
+  copper_iud: "Copper IUD",
+};
+
+function createId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `evt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function formatEventTime(occurredAt: string): string {
+  const t = new Date(occurredAt);
+  if (Number.isNaN(t.getTime())) return occurredAt;
+  return t.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+function timestampOnSelectedDate(iso: string): string {
+  const now = new Date();
+  const local = new Date(
+    `${iso}T${String(now.getHours()).padStart(2, "0")}:` +
+      `${String(now.getMinutes()).padStart(2, "0")}:00`,
+  );
+  return Number.isNaN(local.getTime()) ? `${iso}T12:00:00.000Z` : local.toISOString();
+}
+
+function describeEvent(event: DayEvent): string {
+  switch (event.kind) {
+    case "condom_broke":
+    case "unplanned_unprotected":
+      return EVENT_LABEL[event.kind];
+    case "plan_b_taken": {
+      const hours =
+        event.hoursFromAct != null ? ` · ${event.hoursFromAct}h after act` : "";
+      return `${EC_LABEL[event.ecType]}${hours}`;
+    }
+  }
+}
 
 type Props = {
   iso: string | null;
@@ -32,9 +83,45 @@ export function DayDetailPanel({
   dayLog,
   onUpdateDayLog,
 }: Props) {
+  const [addingEvent, setAddingEvent] = useState<AddEventKind | null>(null);
+  const [ecType, setEcType] = useState<EcType>("levonorgestrel");
+  const [ecHours, setEcHours] = useState<string>("");
+
   if (!iso) return null;
 
   const oc = plannerMeta?.overrideCost;
+  const events = dayLog?.events ?? [];
+  const hasPlanB = events.some((e) => e.kind === "plan_b_taken");
+
+  function commitEvent() {
+    if (!iso || !addingEvent) return;
+    const baseEvent = {
+      id: createId(),
+      occurredAt: timestampOnSelectedDate(iso),
+    };
+    let newEvent: DayEvent;
+    if (addingEvent === "plan_b_taken") {
+      const parsedHours = ecHours.trim() ? Number(ecHours) : undefined;
+      const hours = parsedHours == null || !Number.isFinite(parsedHours)
+        ? undefined
+        : Math.max(0, Math.min(120, parsedHours));
+      newEvent = {
+        ...baseEvent,
+        kind: "plan_b_taken",
+        ecType,
+        hoursFromAct: hours,
+      };
+    } else {
+      newEvent = { ...baseEvent, kind: addingEvent };
+    }
+    onUpdateDayLog({ events: [...events, newEvent] });
+    setAddingEvent(null);
+    setEcHours("");
+  }
+
+  function removeEvent(id: string) {
+    onUpdateDayLog({ events: events.filter((e) => e.id !== id) });
+  }
 
   return (
     <div className="day-panel-backdrop" role="presentation" onMouseDown={onClose}>
@@ -108,6 +195,12 @@ export function DayDetailPanel({
             </button>
           ))}
         </div>
+        <p className="hint compact">
+          This sets the day's overall pattern. For a one-off incident — a broken
+          condom or unprotected sex on a day you'd planned to abstain — add an
+          Event below instead; incidents are counted per act, so they carry more
+          weight than a whole-day pattern.
+        </p>
         <label>
           Notes
           <textarea
@@ -117,6 +210,108 @@ export function DayDetailPanel({
             onChange={(event) => onUpdateDayLog({ notes: event.target.value || undefined })}
           />
         </label>
+
+        <div className="day-events" aria-label="Events">
+          <div className="day-events-head">
+            <h5>Events</h5>
+            <span className="hint">
+              Discrete incidents — broken condom, unplanned unprotected sex, Plan
+              B — logged per act, on any day regardless of the plan.
+            </span>
+          </div>
+          {events.length > 0 && (
+            <ul className="day-events-list">
+              {events.map((event) => (
+                <li key={event.id}>
+                  <div>
+                    <strong>{describeEvent(event)}</strong>
+                    <span className="hint compact">{formatEventTime(event.occurredAt)}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={`Remove ${describeEvent(event)}`}
+                    onClick={() => removeEvent(event.id)}
+                  >
+                    <X aria-hidden />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {addingEvent === null ? (
+            <div className="day-events-add">
+              <button type="button" className="ghost" onClick={() => setAddingEvent("condom_broke")}>
+                + Condom broke
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setAddingEvent("unplanned_unprotected")}
+              >
+                + Unplanned unprotected
+              </button>
+              <button type="button" className="ghost" onClick={() => setAddingEvent("plan_b_taken")}>
+                + Emergency contraception
+              </button>
+            </div>
+          ) : (
+            <div className="day-events-form">
+              <strong>{EVENT_LABEL[addingEvent]}</strong>
+              {addingEvent === "plan_b_taken" && (
+                <>
+                  <label>
+                    Type
+                    <select value={ecType} onChange={(e) => setEcType(e.target.value as EcType)}>
+                      {(Object.keys(EC_LABEL) as EcType[]).map((kind) => (
+                        <option key={kind} value={kind}>
+                          {EC_LABEL[kind]}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Hours since the act (optional)
+                    <input
+                      type="number"
+                      min={0}
+                      max={120}
+                      step={0.5}
+                      value={ecHours}
+                      placeholder="e.g. 12"
+                      onChange={(e) => setEcHours(e.target.value)}
+                    />
+                  </label>
+                </>
+              )}
+              <div className="day-events-form-actions">
+                <button type="button" onClick={commitEvent}>
+                  Save event
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => {
+                    setAddingEvent(null);
+                    setEcHours("");
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {hasPlanB && (
+            <div className="ec-cycle-effects" role="note">
+              <strong>{EC_CYCLE_EFFECTS_COPY.heading}</strong>
+              <ul>
+                {EC_CYCLE_EFFECTS_COPY.points.map((point) => (
+                  <li key={point}>{point}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       </section>
 
       <details className="body-signals">

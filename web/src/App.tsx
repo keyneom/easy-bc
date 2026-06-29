@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertTriangle,
   CalendarDays,
   ChartSpline,
+  CheckCircle,
   History,
+  RefreshCw,
   Settings,
   ShieldCheck,
 } from "lucide-react";
-import init, { planFertilityRiskJson, replanPreviewJson } from "../pkg/planner_core.js";
+import init, { planFertilityRiskJson, replanPreviewJson, ecEffectJson } from "../pkg/planner_core.js";
 import {
   buildCalendarCycles,
   cycleLengthPosterior,
@@ -23,6 +26,7 @@ import {
   idbSet,
   KV_OPTIONS,
   KV_SESSION,
+  KV_SYNC_STATE,
 } from "./idbStore";
 import {
   addPeriodStartDate,
@@ -63,11 +67,25 @@ import { EC_COPY } from "./strings";
 import { DayDetailPanel } from "./components/DayDetailPanel";
 import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components/MonthCalendar";
 import { SyncSettings } from "./components/SyncSettings";
+import { currentRpId, passkeysSupported } from "./sync/passkey";
+import {
+  buildLocalSyncPayload,
+  formatLastSync,
+  rememberSyncState,
+  runEncryptedSyncOperation,
+  syncPayloadFingerprint,
+} from "./sync/sessionSync";
 import {
   plannerConfiguredFromPayload,
   portablePlannerOptions,
+  type LocalSyncState,
   type SyncPayloadV1,
 } from "./sync/types";
+import {
+  computeInFlightRealizedRisk,
+  type EcEffectFn,
+  type InFlightDay,
+} from "./tracker/realizedRisk";
 
 interface DayWeight {
   day: number;
@@ -77,6 +95,8 @@ interface DayWeight {
   protectedRiskProbability: number;
   withdrawalRiskProbability: number;
   recommendedRiskProbability: number;
+  /** Single-act conception probability (per_act × age_mult), no frequency scaling. */
+  perActConceptionProbability: number;
   overrideCost: {
     condoms: number;
     abstinenceDays: number;
@@ -135,6 +155,7 @@ interface MethodLibraryUsed {
 interface PlannerResult {
   achievedCumulativeRisk: number;
   targetMet: boolean;
+  warnings?: Array<{ message: string }>;
   validation?: {
     methodLibrary?: MethodLibraryUsed;
   };
@@ -221,6 +242,33 @@ function compactBodySignals(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function deriveCurrentCycleBodySignals(
+  logs: PersistedSession["calendarDayLogs"],
+  currentStart: string | undefined,
+  fallback?: BodySignalInputs,
+): BodySignalInputs | undefined {
+  if (!currentStart) return compactBodySignals(fallback);
+  const derived: BodySignalInputs = { ...(compactBodySignals(fallback) ?? {}) };
+  const today = todayIsoLocal();
+  for (const [iso, log] of Object.entries(logs)) {
+    if (iso < currentStart || iso > today) continue;
+    const cycleDay = daysSinceFirstCycleStart(
+      currentStart,
+      new Date(`${iso}T12:00:00`),
+    ) + 1;
+    if (log.mucus === "egg-white" || log.mucus === "eggwhite") {
+      derived.cervicalMucusPeakDay = Math.max(
+        derived.cervicalMucusPeakDay ?? 0,
+        cycleDay,
+      );
+    }
+    if (log.opk === "positive" || log.opk === "peak") {
+      derived.lhSurgeDay = Math.max(derived.lhSurgeDay ?? 0, cycleDay);
+    }
+  }
+  return compactBodySignals(derived);
+}
+
 function humanizeMethodLabel(value: string): string {
   return value.replaceAll("_", " ");
 }
@@ -237,9 +285,169 @@ function fallbackMethodLibrary(opts: WasmOptions): MethodLibraryUsed {
   };
 }
 
+const ACTION_ORDER: PlannerAction[] = ["U", "W", "C", "A"];
+
+const ACTION_LABELS: Record<PlannerAction, string> = {
+  U: "Unprotected",
+  W: "Withdrawal",
+  C: "Protected",
+  A: "Abstain",
+};
+
+function formatPercent(value: number): string {
+  const pct = value * 100;
+  if (pct < 0.01 && pct > 0) return "<0.01%";
+  if (pct < 1) return `${pct.toFixed(2)}%`;
+  return `${pct.toFixed(1)}%`;
+}
+
+function totalProjectedRisk(plan: PlannerResult, opts: WasmOptions): number {
+  const realized = Math.max(0, Math.min(1, opts.realizedCumulativeRisk));
+  const planned = Math.max(0, Math.min(1, plan.achievedCumulativeRisk));
+  return Math.max(0, Math.min(1, 1 - (1 - realized) * (1 - planned)));
+}
+
+function actionCounts(dayWeights: DayWeight[]): Record<PlannerAction, number> {
+  return dayWeights.reduce<Record<PlannerAction, number>>(
+    (counts, day) => {
+      counts[day.recommendedAction] += 1;
+      return counts;
+    },
+    { U: 0, W: 0, C: 0, A: 0 },
+  );
+}
+
+function PlannerRiskSummaryCard({
+  plan,
+  opts,
+  calendarMode,
+}: {
+  plan: PlannerResult;
+  opts: WasmOptions;
+  calendarMode: boolean;
+}) {
+  const projectedRisk = totalProjectedRisk(plan, opts);
+  const realized = Math.max(0, Math.min(1, opts.realizedCumulativeRisk));
+  const target = opts.targetCumulativeFailure;
+  const targetMet = projectedRisk <= target + 1e-9;
+  // Visual scale: extend slightly past target so the over-target case is legible.
+  const scaleMax = Math.max(target * 1.4, projectedRisk * 1.05, 0.001);
+  const realizedFrac = Math.min(realized / scaleMax, 1);
+  const projectedFrac = Math.min(projectedRisk / scaleMax, 1);
+  const targetFrac = Math.min(target / scaleMax, 1);
+  const sharePct = target > 0 ? Math.round((projectedRisk / target) * 100) : 0;
+
+  return (
+    <section className={`plan-risk-card ${targetMet ? "plan-risk-card-met" : "plan-risk-card-miss"}`}>
+      <div className="plan-risk-heading">
+        <span className="plan-risk-icon" aria-hidden>
+          {targetMet ? <CheckCircle /> : <AlertTriangle />}
+        </span>
+        <div>
+          <p className="eyebrow">{calendarMode ? "Cycle plan" : "Long-range plan"}</p>
+          <h2>{targetMet ? "On track for target" : "Above target"}</h2>
+        </div>
+      </div>
+      <div className="plan-risk-stats" aria-label="Plan risk summary">
+        <div>
+          <strong>{formatPercent(projectedRisk)}</strong>
+          <span>Projected</span>
+        </div>
+        <div>
+          <strong>{formatPercent(target)}</strong>
+          <span>Target</span>
+        </div>
+        <div>
+          <strong>{plan.years.length}</strong>
+          <span>{calendarMode ? "cycles" : "yr"}</span>
+        </div>
+      </div>
+      <div
+        className="plan-projection-meter"
+        role="img"
+        aria-label={`Projected ${formatPercent(projectedRisk)} versus target ${formatPercent(target)}`}
+      >
+        <span
+          className="plan-projection-realized"
+          style={{ width: `${realizedFrac * 100}%` }}
+          aria-hidden
+        />
+        <span
+          className="plan-projection-projected"
+          style={{ width: `${projectedFrac * 100}%` }}
+          aria-hidden
+        />
+        <span
+          className="plan-projection-target"
+          style={{ left: `${targetFrac * 100}%` }}
+          aria-hidden
+        />
+      </div>
+      <p className="plan-budget-label">
+        Projected is {sharePct}% of your target
+        {realized > 0 ? ` · realized so far ${formatPercent(realized)}` : ""}
+      </p>
+    </section>
+  );
+}
+
+function PlannerYearCard({ year, calendarMode }: { year: YearOut; calendarMode: boolean }) {
+  const counts = actionCounts(year.dayWeights);
+  const total = Math.max(1, year.cycleLengthDays);
+
+  return (
+    <article className="plan-year-card">
+      <div className="plan-year-card-head">
+        <div>
+          <h3>{calendarMode ? `Cycle ${year.yearIndex + 1}` : `Age ${year.age}`}</h3>
+          <p>{year.cycleLengthDays}-day cycle</p>
+        </div>
+        <div className="plan-year-risk">
+          <strong>Annual: {formatPercent(year.annualRisk)}</strong>
+          <span>Per-cycle: {formatPercent(year.cycleRisk)}</span>
+        </div>
+      </div>
+      <div className="action-distribution" aria-label="Recommended action distribution">
+        {ACTION_ORDER.map((action) => {
+          const count = counts[action];
+          if (count <= 0) return null;
+          return (
+            <span
+              key={action}
+              className={`action-distribution-segment action-${action}`}
+              style={{ flexGrow: count / total }}
+              title={`${ACTION_LABELS[action]}: ${count} days`}
+            />
+          );
+        })}
+      </div>
+      <div className="plan-count-row">
+        {ACTION_ORDER.map((action) => {
+          const count = counts[action];
+          if (count <= 0 && action === "W") return null;
+          return (
+            <span key={action} className={`plan-count-chip plan-count-${action}`}>
+              <strong>{count}</strong>
+              {action}
+            </span>
+          );
+        })}
+      </div>
+      {year.signalSummary && (
+        <p className="meta compact">
+          Signal-adjusted ovulation: mean day{" "}
+          <strong>{year.signalSummary.posteriorOvulationMeanDay.toFixed(1)}</strong>, SD{" "}
+          <strong>{year.signalSummary.posteriorOvulationSdDays.toFixed(2)}</strong>.
+        </p>
+      )}
+    </article>
+  );
+}
+
 function optionsForWasm(
   o: WasmOptions,
   initialActionLocks?: DayLock[],
+  bodySignalRowIndex = 0,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...o };
   const bodySignals = compactBodySignals(o.bodySignals);
@@ -250,7 +458,9 @@ function optionsForWasm(
   }
   if (o.calendarCycles?.length) {
     out.calendarCycles = o.calendarCycles.map((row, idx) => {
-      const rowSignals = compactBodySignals(row.bodySignals ?? (idx === 0 ? bodySignals : undefined));
+      const rowSignals = compactBodySignals(
+        row.bodySignals ?? (idx === bodySignalRowIndex ? bodySignals : undefined),
+      );
       if (rowSignals) return { ...row, bodySignals: rowSignals };
       const { bodySignals: _bodySignals, ...rest } = row;
       return rest;
@@ -273,6 +483,10 @@ type AppTab = "tracker" | "planner" | "history" | "settings";
 export default function App() {
   const resultRef = useRef<HTMLElement | null>(null);
   const optionsFingerprintRef = useRef("");
+  const autoSyncFingerprintRef = useRef("");
+  const autoSyncRunningRef = useRef(false);
+  const autoSyncQueuedRef = useRef(false);
+  const riskInputFingerprintRef = useRef("");
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState(false);
@@ -297,6 +511,13 @@ export default function App() {
   const [incidentDay, setIncidentDay] = useState(1);
   const [calendarDensity, setCalendarDensity] = useState<CalendarDensity>("comfortable");
   const [planRegenerationPending, setPlanRegenerationPending] = useState(false);
+  const [syncState, setSyncState] = useState<LocalSyncState | null>(null);
+  const [autoSyncNotice, setAutoSyncNotice] = useState<{
+    kind: "info" | "success" | "error";
+    message: string;
+  } | null>(null);
+  const syncClientId = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID?.trim() ?? "";
+  const syncRpId = useMemo(currentRpId, []);
 
   const sortedStarts = useMemo(() => periodStartsFromRecords(periodRecords), [periodRecords]);
   const sortedRecords = useMemo(
@@ -317,9 +538,11 @@ export default function App() {
       setPeriodRecords(pr);
       const raw = await idbGet<PersistedSession>(KV_SESSION);
       const savedOptions = await idbGet<Partial<WasmOptions>>(KV_OPTIONS);
+      const savedSync = await idbGet<LocalSyncState>(KV_SYNC_STATE);
       const s = hydratePersistedSession(raw, pr.length);
       setSession(s);
       setLocks(s.locks);
+      setSyncState(savedSync ?? null);
       const loadedOptions: WasmOptions = {
         ...defaultOptions(),
         ...savedOptions,
@@ -377,6 +600,7 @@ export default function App() {
       ecJournalFlag: payload.ecJournal.value,
       ecJournalUpdatedAt: payload.ecJournal.updatedAt,
       realizedCumulativeRisk: payload.planner.value.realizedCumulativeRisk,
+      androidPreferences: payload.androidPreferences ?? session.androidPreferences,
     };
     optionsFingerprintRef.current = JSON.stringify(portablePlannerOptions(nextOptions));
     setPeriodRecords(payload.periodRecords);
@@ -392,6 +616,119 @@ export default function App() {
     ]);
   }, [session]);
 
+  const localSyncFingerprint = useMemo(
+    () => syncPayloadFingerprint(buildLocalSyncPayload(opts, periodRecords, session)),
+    [opts, periodRecords, session],
+  );
+
+  const latestSyncInputsRef = useRef({
+    options: opts,
+    periodRecords,
+    session,
+    fingerprint: localSyncFingerprint,
+  });
+
+  useEffect(() => {
+    latestSyncInputsRef.current = {
+      options: opts,
+      periodRecords,
+      session,
+      fingerprint: localSyncFingerprint,
+    };
+  }, [localSyncFingerprint, opts, periodRecords, session]);
+
+  const markSyncComplete = useCallback((payload: SyncPayloadV1 | null) => {
+    autoSyncFingerprintRef.current = payload ? syncPayloadFingerprint(payload) : "";
+  }, []);
+
+  const runAutoSync = useCallback(
+    async (reason: "startup" | "change") => {
+      if (!syncState) return;
+      if (!syncClientId) {
+        setAutoSyncNotice({
+          kind: "error",
+          message: "Encrypted sync is enabled, but this build is missing its Google web client ID.",
+        });
+        return;
+      }
+      if (!passkeysSupported()) {
+        setAutoSyncNotice({
+          kind: "error",
+          message: "Encrypted sync is enabled, but this browser cannot use passkeys here.",
+        });
+        return;
+      }
+      if (autoSyncRunningRef.current) {
+        autoSyncQueuedRef.current = true;
+        return;
+      }
+
+      autoSyncRunningRef.current = true;
+      const { options, periodRecords: records, session: currentSession, fingerprint } =
+        latestSyncInputsRef.current;
+      autoSyncFingerprintRef.current = fingerprint;
+      setAutoSyncNotice({
+        kind: "info",
+        message:
+          reason === "startup"
+            ? "Checking encrypted sync…"
+            : "Syncing encrypted changes…",
+      });
+
+      try {
+        const local = buildLocalSyncPayload(options, records, currentSession);
+        const result = await runEncryptedSyncOperation({
+          operation: "sync",
+          clientId: syncClientId,
+          rpId: syncRpId,
+          local,
+        });
+        if (result.operation !== "sync") return;
+        autoSyncFingerprintRef.current = syncPayloadFingerprint(result.payload);
+        await applySyncedPayload(result.payload);
+        const nextState = await rememberSyncState(result.fileId, syncRpId, result.syncedAt);
+        setSyncState(nextState);
+        setAutoSyncNotice({
+          kind: "success",
+          message: `Encrypted sync updated ${formatLastSync(result.syncedAt)}.`,
+        });
+      } catch (error) {
+        setAutoSyncNotice({
+          kind: "error",
+          message: `Encrypted sync needs attention: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        });
+      } finally {
+        autoSyncRunningRef.current = false;
+        if (autoSyncQueuedRef.current) {
+          autoSyncQueuedRef.current = false;
+          window.setTimeout(() => void runAutoSync("change"), 250);
+        }
+      }
+    },
+    [applySyncedPayload, syncClientId, syncRpId, syncState],
+  );
+
+  useEffect(() => {
+    if (syncState) return;
+    autoSyncFingerprintRef.current = "";
+    autoSyncQueuedRef.current = false;
+    setAutoSyncNotice(null);
+  }, [syncState]);
+
+  useEffect(() => {
+    if (!storageReady || !wasmReady || !syncState) return;
+    if (autoSyncFingerprintRef.current === "") {
+      autoSyncFingerprintRef.current = localSyncFingerprint;
+      const h = window.setTimeout(() => void runAutoSync("startup"), 1_500);
+      return () => window.clearTimeout(h);
+    }
+    if (autoSyncFingerprintRef.current === localSyncFingerprint) return;
+    const h = window.setTimeout(() => void runAutoSync("change"), 1_800);
+    return () => window.clearTimeout(h);
+  }, [localSyncFingerprint, runAutoSync, storageReady, syncState, wasmReady]);
+
   const runPlan = useCallback(() => {
     if (!wasmReady) return;
     setPlanError(null);
@@ -401,6 +738,12 @@ export default function App() {
     try {
       const lengths = opts.calendarCycles?.map((c) => c.cycleLengthDays) ?? [];
       const sorted = [...sortedStarts].sort();
+      const firstStart = sorted[0];
+      const currentStart = sorted.at(-1);
+      const currentStartOffset = firstStart && currentStart
+        ? daysSinceFirstCycleStart(firstStart, new Date(`${currentStart}T12:00:00`))
+        : 0;
+      const currentRow = resolveHorizonRowAndDay(lengths, currentStartOffset)?.row ?? 0;
       let initialLocks: DayLock[] | undefined;
       if (applyPastLocks && lengths.length > 0 && sorted.length > 0) {
         const first = sorted[0];
@@ -410,16 +753,153 @@ export default function App() {
           initialLocks = initialLocksForPastDays(lengths, pos, session.dayLogs);
         }
       }
-      const json = planFertilityRiskJson(
-        JSON.stringify(optionsForWasm(opts, initialLocks)),
+      // Probe with no event budget first. The probe supplies the day-level
+      // per-act risks needed to price explicit incidents without duplicating
+      // the biological model in TypeScript.
+      const currentBodySignals = deriveCurrentCycleBodySignals(
+        session.calendarDayLogs,
+        currentStart,
+        opts.bodySignals,
       );
-      setPlan(JSON.parse(json) as PlannerResult);
+      const probeOptions = {
+        ...opts,
+        bodySignals: currentBodySignals,
+        realizedCumulativeRisk: 0,
+      };
+      const probeJson = planFertilityRiskJson(
+        JSON.stringify(optionsForWasm(probeOptions, initialLocks, currentRow)),
+      );
+      const probe = JSON.parse(probeJson) as PlannerResult;
+
+      let realizedCumulativeRisk = 0;
+      const persistentResidual =
+        probe.validation?.methodLibrary?.persistentMethodResidual;
+      if (
+        firstStart &&
+        currentStart &&
+        lengths.length > 0 &&
+        Number.isFinite(persistentResidual)
+      ) {
+        const today = todayIsoLocal();
+        const inFlightDays: InFlightDay[] = [];
+        for (const [iso, log] of Object.entries(session.calendarDayLogs)) {
+          if (iso < currentStart || iso > today || !(log.events?.length)) continue;
+          const cycleDay =
+            daysSinceFirstCycleStart(currentStart, new Date(`${iso}T12:00:00`)) + 1;
+          const dayWeight = probe.years[currentRow]?.dayWeights[cycleDay - 1];
+          if (!dayWeight) continue;
+          inFlightDays.push({
+            cycleDay,
+            dayWeight,
+            log,
+          });
+        }
+        // EC estimator backed by the canonical Rust model (via wasm). Uses the
+        // current cycle's ovulation posterior so Plan B timing is meaningful.
+        const currentYear = probe.years[currentRow];
+        const ovulationMeanDay =
+          currentYear?.signalSummary?.posteriorOvulationMeanDay ??
+          (currentYear ? currentYear.cycleLengthDays - 14 : 14);
+        const ovulationSdDays =
+          currentYear?.signalSummary?.posteriorOvulationSdDays ?? opts.ovulationSdDays;
+        const ecEffect: EcEffectFn = (ecType, hoursFromAct, actCycleDay) => {
+          try {
+            const json = ecEffectJson(
+              JSON.stringify({
+                ecType,
+                hoursFromAct,
+                actCycleDay,
+                ovulationMeanDay,
+                ovulationSdDays,
+              }),
+            );
+            const r = JSON.parse(json) as {
+              conceptionMultiplier: number;
+              ovulationDelayDays: number;
+            };
+            return {
+              conceptionMultiplier: r.conceptionMultiplier,
+              ovulationDelayDays: r.ovulationDelayDays,
+            };
+          } catch {
+            return { conceptionMultiplier: 1, ovulationDelayDays: 0 };
+          }
+        };
+        const aggregate = computeInFlightRealizedRisk(
+          inFlightDays,
+          { persistentMethodResidual: persistentResidual as number },
+          ecEffect,
+        );
+        realizedCumulativeRisk = Math.min(
+          opts.targetCumulativeFailure,
+          aggregate.realized,
+        );
+      }
+
+      const finalOptions = { ...probeOptions, realizedCumulativeRisk };
+      const finalPlan = realizedCumulativeRisk > 0
+        ? JSON.parse(
+            planFertilityRiskJson(
+              JSON.stringify(optionsForWasm(finalOptions, initialLocks, currentRow)),
+            ),
+          ) as PlannerResult
+        : probe;
+      setOpts((current) =>
+        Math.abs(current.realizedCumulativeRisk - realizedCumulativeRisk) < 1e-12
+          ? current
+          : { ...current, realizedCumulativeRisk }
+      );
+      setPlan(finalPlan);
       setYearIdx(0);
     } catch (e) {
       setPlanError(String(e));
       setPlan(null);
     }
-  }, [wasmReady, opts, applyPastLocks, sortedStarts, session.dayLogs]);
+  }, [
+    wasmReady,
+    opts,
+    applyPastLocks,
+    sortedStarts,
+    session.dayLogs,
+    session.calendarDayLogs,
+  ]);
+
+  const riskInputFingerprint = useMemo(
+    () => JSON.stringify({
+      periodStarts: sortedStarts,
+      calendarInputs: Object.fromEntries(
+        Object.entries(session.calendarDayLogs).map(([iso, log]) => [
+          iso,
+          { events: log.events, mucus: log.mucus, opk: log.opk },
+        ]),
+      ),
+      calendarCycles: opts.calendarCycles,
+      ageYears: opts.ageYears,
+      target: opts.targetCumulativeFailure,
+      persistentMethod: opts.persistentMethod,
+      actsPerWeek: opts.actsPerWeek,
+    }),
+    [
+      sortedStarts,
+      session.calendarDayLogs,
+      opts.calendarCycles,
+      opts.ageYears,
+      opts.targetCumulativeFailure,
+      opts.persistentMethod,
+      opts.actsPerWeek,
+    ],
+  );
+
+  useEffect(() => {
+    if (!storageReady) return;
+    if (riskInputFingerprintRef.current === "") {
+      riskInputFingerprintRef.current = riskInputFingerprint;
+      return;
+    }
+    if (riskInputFingerprintRef.current === riskInputFingerprint) return;
+    riskInputFingerprintRef.current = riskInputFingerprint;
+    if (session.plannerConfigured) setPlanRegenerationPending(true);
+  }, [riskInputFingerprint, session.plannerConfigured, storageReady]);
 
   useEffect(() => {
     if (!planRegenerationPending || !wasmReady || !storageReady) return;
@@ -631,7 +1111,7 @@ export default function App() {
   const incidentDayWeight = y?.dayWeights.find((d) => d.day === incidentDay) ?? null;
   const incidentAddedRisk =
     incidentChoice && incidentDayWeight
-      ? estimateIncidentAdditionalRisk(incidentDayWeight, incidentChoice)
+      ? estimateIncidentAdditionalRisk(incidentDayWeight, incidentChoice, y?.actsPerWeek)
       : 0;
   const methodLibrary = plan ? (plan.validation?.methodLibrary ?? fallbackMethodLibrary(opts)) : null;
 
@@ -699,6 +1179,15 @@ export default function App() {
       <main className="app-content">
       {!wasmReady && !wasmError && <p className="loading-state">Loading planner…</p>}
       {wasmError && <p className="warn">Planner failed to load: {wasmError}</p>}
+      {syncState && autoSyncNotice && (
+        <p className={`auto-sync-banner auto-sync-${autoSyncNotice.kind}`} role="status">
+          <RefreshCw
+            aria-hidden
+            className={autoSyncNotice.kind === "info" ? "spin" : undefined}
+          />
+          <span>{autoSyncNotice.message}</span>
+        </p>
+      )}
 
       {wasmReady && (
         <>
@@ -892,7 +1381,10 @@ export default function App() {
                 options={opts}
                 periodRecords={periodRecords}
                 session={session}
+                syncState={syncState}
                 onApplyPayload={applySyncedPayload}
+                onSyncStateChange={setSyncState}
+                onSyncComplete={markSyncComplete}
               />
               <p className="settings-links">
                 <a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy policy</a>
@@ -958,25 +1450,16 @@ export default function App() {
                     }
                   />
                 </label>
-                <label>
-                  Already-used risk (logged exposures)
-                  <input
-                    type="number"
-                    step={0.001}
-                    min={0}
-                    max={0.5}
-                    value={opts.realizedCumulativeRisk}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        realizedCumulativeRisk: Number(e.target.value),
-                      }))
-                    }
-                  />
+                <div className="derived-field">
+                  In-flight realized risk
+                  <strong>{formatPercent(opts.realizedCumulativeRisk)}</strong>
                   <span className="field-hint">
-                    Session autosaves to IndexedDB with calendar credits and locks.
+                    Derived from explicit risk events since the latest period start.
+                    It tightens the remaining plan automatically and releases when a
+                    new period starts. EC is logged but is not assigned an invented
+                    numeric efficacy credit.
                   </span>
-                </label>
+                </div>
                 <label>
                   Acts per week
                   <input
@@ -1191,8 +1674,8 @@ export default function App() {
                 <div className="card">
                   <h3>Optional body signals</h3>
                   <p className="hint compact">
-                    Applied to horizon year 0 in legacy mode, or the first projected cycle in
-                    calendar mode.
+                    Applied to horizon year 0 in legacy mode, or the active cycle in calendar
+                    mode. Calendar OPK and egg-white mucus logs are detected automatically.
                   </p>
                   <label>
                     LH surge day
@@ -1332,208 +1815,282 @@ export default function App() {
           {tab === "planner" && (
             <>
               {plan ? (
-                <>
-              <section className="incident-panel surface-card">
-                <h2>Log incident on a modeled day</h2>
-                <p className="hint">
-                  Logs the as-lived action for that day and estimates the extra risk versus the
-                  recommendation on the current row. Use <strong>already-used risk</strong> only for
-                  exposures outside the modeled horizon.
-                </p>
-                <div className="row">
-                  <select
-                    value={incidentChoice}
-                    onChange={(e) => setIncidentChoice(e.target.value as IncidentType | "")}
-                    aria-label="Incident type"
-                  >
-                    <option value="">Choose incident…</option>
-                    <option value="unprotected_on_abstinence">unprotected on abstinence</option>
-                    <option value="condom_on_abstinence">
-                      selected protected method on abstinence
-                    </option>
-                    <option value="condom_failure">protected-method failure</option>
-                    <option value="unprotected_instead_of_condom">
-                      unprotected instead of protected
-                    </option>
-                  </select>
-                  <input
-                    type="number"
-                    min={1}
-                    max={y?.cycleLengthDays ?? 1}
-                    value={incidentDay}
-                    onChange={(e) => setIncidentDay(Number(e.target.value))}
-                    aria-label="Incident cycle day"
-                  />
-                  <button type="button" disabled={!incidentChoice || !y} onClick={applyIncident}>
-                    Log incident day
-                  </button>
-                </div>
-                {incidentChoice && incidentDayWeight && (
-                  <p className="meta">
-                    Estimated extra risk versus the current recommendation for day {incidentDay}:{" "}
-                    <strong>{(incidentAddedRisk * 100).toFixed(3)}%</strong>. Logged action:{" "}
-                    <strong>{incidentActionForType(incidentChoice)}</strong>.
-                  </p>
-                )}
-              </section>
+                <section className="planner-screen">
+                  <PlannerRiskSummaryCard plan={plan} opts={opts} calendarMode={calendarMode} />
 
-              <section className="ec-panel">
-                <h2>{EC_COPY.title}</h2>
-                {EC_COPY.body.map((p) => (
-                  <p key={p} className="hint">
-                    {p}
-                  </p>
-                ))}
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={session.ecJournalFlag}
-                    onChange={(e) =>
-                      setSession((s) => ({
-                        ...s,
-                        ecJournalFlag: e.target.checked,
-                        ecJournalUpdatedAt: new Date().toISOString(),
-                      }))
-                    }
-                  />{" "}
-                  {EC_COPY.journalLabel}
-                </label>
-                <p className="field-hint">{EC_COPY.journalHint}</p>
-              </section>
+                  {plan.warnings?.length ? (
+                    <section className="plan-warning-list" aria-label="Planner warnings">
+                      {plan.warnings.map((warning, index) => (
+                        <p key={`${warning.message}-${index}`} className="warn">
+                          {warning.message}
+                        </p>
+                      ))}
+                    </section>
+                  ) : null}
 
-              {planError && <p className="warn">{planError}</p>}
+                  {planError && <p className="warn">{planError}</p>}
 
-              {plan && (
-                <>
-                  <section ref={resultRef}>
-                    <h2>Result</h2>
+                  <section className="plan-method-card">
+                    <p className="eyebrow">Methods used</p>
                     <p>
-                      Achieved cumulative risk:{" "}
-                      <strong>{(plan.achievedCumulativeRisk * 100).toFixed(2)}%</strong>
-                      {" — "}
-                      target met: <strong>{plan.targetMet ? "yes" : "no"}</strong>
+                      Persistent: <strong>{humanizeMethodLabel(methodLibrary!.persistentMethod)}</strong>
+                      {" · "}
+                      Protected days:{" "}
+                      <strong>{humanizeMethodLabel(methodLibrary!.protectedDayMethod)}</strong>
+                      {" · "}
+                      Withdrawal: <strong>{humanizeMethodLabel(methodLibrary!.withdrawalMode)}</strong>
                     </p>
-                    <p className="hint compact">
-                      Planner output appears here after you click <strong>Compute plan</strong>.
-                    </p>
-                    <p className="meta">
-                      Persistent method:{" "}
-                      <strong>
-                        {humanizeMethodLabel(methodLibrary!.persistentMethod)}
-                      </strong>{" "}
-                      ·
-                      protected-day method:{" "}
-                      <strong>
-                        {humanizeMethodLabel(methodLibrary!.protectedDayMethod)}
-                      </strong>{" "}
-                      ·
-                      withdrawal mode:{" "}
-                      <strong>
-                        {humanizeMethodLabel(methodLibrary!.withdrawalMode)}
-                      </strong>
-                    </p>
+                    <button type="button" className="ghost" onClick={() => setTab("settings")}>
+                      Update inputs
+                    </button>
                   </section>
 
-                  <section>
-                    <h2>Cycle strip (optimizer row)</h2>
+                  <section ref={resultRef} className="plan-years-section">
+                    <div className="section-title-row">
+                      <div>
+                        <p className="eyebrow">Year-by-Year Plan</p>
+                        <h2>{calendarMode ? "Projected cycle plan" : "Long-range plan"}</h2>
+                      </div>
+                      <span className="plan-mode-chip">
+                        {calendarMode ? "Calendar cycles" : "Representative years"}
+                      </span>
+                    </div>
+                    <div className="plan-year-list">
+                      {plan.years.map((year) => (
+                        <PlannerYearCard
+                          key={`${year.yearIndex}-${year.age}-${year.cycleLengthDays}`}
+                          year={year}
+                          calendarMode={calendarMode}
+                        />
+                      ))}
+                    </div>
+                  </section>
+
+                  <section className="ec-panel">
+                    <h2>{EC_COPY.title}</h2>
+                    {EC_COPY.body.map((p) => (
+                      <p key={p} className="hint">
+                        {p}
+                      </p>
+                    ))}
                     <label>
-                      {calendarMode
-                        ? "Which predicted cycle (index)"
-                        : "Which horizon year (0 = first year)"}
                       <input
-                        type="number"
-                        min={0}
-                        max={plan.years.length - 1}
-                        value={yearIdx}
-                        onChange={(e) => {
-                          setYearIdx(Number(e.target.value));
-                          setPreview(null);
-                        }}
-                      />
+                        type="checkbox"
+                        checked={session.ecJournalFlag}
+                        onChange={(e) =>
+                          setSession((s) => ({
+                            ...s,
+                            ecJournalFlag: e.target.checked,
+                            ecJournalUpdatedAt: new Date().toISOString(),
+                          }))
+                        }
+                      />{" "}
+                      {EC_COPY.journalLabel}
                     </label>
-                    {y && (
-                      <p className="meta">
-                        Age {y.age} · {y.cycleLengthDays} days · SD {y.cycleSdDays.toFixed(2)} ·{" "}
-                        {y.actsPerWeek.toFixed(2)} acts/wk · cycle risk{" "}
-                        {(y.cycleRisk * 100).toFixed(2)}% · annualized risk{" "}
-                        {(y.annualRisk * 100).toFixed(2)}% ·{" "}
-                        {y.literalCycle
-                          ? "literal projected cycle"
-                          : `${y.effectiveCyclesPerYear.toFixed(2)} cycles/year`}
+                    <p className="field-hint">{EC_COPY.journalHint}</p>
+                  </section>
+
+                  <details className="advanced-plan-panel">
+                    <summary>Advanced optimizer tools</summary>
+                    <section className="incident-panel surface-card">
+                      <h2>Log incident on a modeled day</h2>
+                      <p className="hint">
+                        Locks the as-lived action on this optimizer row and estimates its difference
+                        from the recommendation. For a real wall-date incident, use Calendar events;
+                        current-cycle events feed realized risk automatically.
                       </p>
-                    )}
-                    {y?.signalSummary && (
-                      <p className="meta">
-                        Signal-adjusted ovulation posterior: mean day{" "}
-                        <strong>{y.signalSummary.posteriorOvulationMeanDay.toFixed(1)}</strong>,
-                        SD <strong>{y.signalSummary.posteriorOvulationSdDays.toFixed(2)}</strong>.
-                      </p>
-                    )}
-                    {locks.length > 0 && (
-                      <div className="locks">
-                        <h3>Active locks</h3>
-                        <ul>
-                          {locks.map((l, i) => (
-                            <li key={`${l.yearIndex}-${l.day}-${i}`}>
-                              {calendarMode ? "Cycle" : "Year"} {l.yearIndex} · day {l.day} →{" "}
-                              {l.action}{" "}
-                              <button
-                                type="button"
-                                className="ghost"
-                                onClick={() =>
-                                  setLocks((prev) =>
-                                    prev.filter(
-                                      (x) =>
-                                        !(
-                                          x.yearIndex === l.yearIndex &&
-                                          x.day === l.day
-                                        ),
-                                    ),
-                                  )
-                                }
-                              >
-                                remove
-                              </button>
-                            </li>
+                      <div className="row">
+                        <select
+                          value={incidentChoice}
+                          onChange={(e) => setIncidentChoice(e.target.value as IncidentType | "")}
+                          aria-label="Incident type"
+                        >
+                          <option value="">Choose incident…</option>
+                          <option value="unprotected_on_abstinence">unprotected on abstinence</option>
+                          <option value="condom_on_abstinence">
+                            selected protected method on abstinence
+                          </option>
+                          <option value="condom_failure">protected-method failure</option>
+                          <option value="unprotected_instead_of_condom">
+                            unprotected instead of protected
+                          </option>
+                        </select>
+                        <input
+                          type="number"
+                          min={1}
+                          max={y?.cycleLengthDays ?? 1}
+                          value={incidentDay}
+                          onChange={(e) => setIncidentDay(Number(e.target.value))}
+                          aria-label="Incident cycle day"
+                        />
+                        <button type="button" disabled={!incidentChoice || !y} onClick={applyIncident}>
+                          Log incident day
+                        </button>
+                      </div>
+                      {incidentChoice && incidentDayWeight && (
+                        <p className="meta">
+                          Estimated extra risk versus the current recommendation for day{" "}
+                          {incidentDay}: <strong>{(incidentAddedRisk * 100).toFixed(3)}%</strong>.
+                          Logged action: <strong>{incidentActionForType(incidentChoice)}</strong>.
+                        </p>
+                      )}
+                    </section>
+
+                    <section className="surface-card">
+                      <h2>Cycle strip</h2>
+                      <label>
+                        {calendarMode
+                          ? "Which predicted cycle (index)"
+                          : "Which horizon year (0 = first year)"}
+                        <input
+                          type="number"
+                          min={0}
+                          max={plan.years.length - 1}
+                          value={yearIdx}
+                          onChange={(e) => {
+                            setYearIdx(Number(e.target.value));
+                            setPreview(null);
+                          }}
+                        />
+                      </label>
+                      {y && (
+                        <p className="meta">
+                          Age {y.age} · {y.cycleLengthDays} days · SD {y.cycleSdDays.toFixed(2)}
+                          {" · "}
+                          {y.actsPerWeek.toFixed(2)} acts/wk · cycle risk{" "}
+                          {formatPercent(y.cycleRisk)} · annualized risk {formatPercent(y.annualRisk)}
+                          {" · "}
+                          {y.literalCycle
+                            ? "literal projected cycle"
+                            : `${y.effectiveCyclesPerYear.toFixed(2)} cycles/year`}
+                        </p>
+                      )}
+                      {locks.length > 0 && (
+                        <div className="locks">
+                          <h3>Active locks</h3>
+                          <ul>
+                            {locks.map((l, i) => (
+                              <li key={`${l.yearIndex}-${l.day}-${i}`}>
+                                {calendarMode ? "Cycle" : "Year"} {l.yearIndex} · day {l.day} →{" "}
+                                {l.action}{" "}
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() =>
+                                    setLocks((prev) =>
+                                      prev.filter(
+                                        (x) =>
+                                          !(
+                                            x.yearIndex === l.yearIndex &&
+                                            x.day === l.day
+                                          ),
+                                      ),
+                                    )
+                                  }
+                                >
+                                  remove
+                                </button>
+                              </li>
+                            ))}
+                          </ul>
+                          <div className="row">
+                            <button
+                              type="button"
+                              disabled={previewLoading}
+                              onClick={() => void runPreviewAll()}
+                            >
+                              Preview replan with all locks
+                            </button>
+                            <button type="button" className="ghost" onClick={() => setLocks([])}>
+                              Clear locks
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {y && (
+                        <div className="calendar" role="grid" aria-label="Cycle days">
+                          {y.dayWeights.map((d) => (
+                            <button
+                              key={d.day}
+                              type="button"
+                              className={`day cell-${d.recommendedAction}`}
+                              aria-label={`Day ${d.day}, recommended ${d.recommendedAction}`}
+                              title={`Day ${d.day}: ${d.recommendedAction} (risk score ${d.rawRiskScore})`}
+                              onClick={() => setModalDay(d.day)}
+                            >
+                              <span className="dn">{d.day}</span>
+                              <span className="ac">{d.recommendedAction}</span>
+                            </button>
                           ))}
-                        </ul>
+                        </div>
+                      )}
+                      <p className="hint">
+                        Locks / as-lived logs for the <strong>optimizer grid</strong>. The{" "}
+                        <strong>Calendar</strong> tab is wall dates; switch there to see the same
+                        plan letters when calendar mode is on.
+                      </p>
+                    </section>
+
+                    {preview && (
+                      <section className="preview">
+                        <h2>Preview (with locks)</h2>
+                        {!preview.feasible && preview.message && (
+                          <p className="warn">{preview.message}</p>
+                        )}
+                        {preview.feasible && (
+                          <p>
+                            Preview cumulative risk:{" "}
+                            <strong>{formatPercent(preview.preview.achievedCumulativeRisk)}</strong>
+                            {" — "}
+                            target met: <strong>{preview.previewTargetMet ? "yes" : "no"}</strong>
+                          </p>
+                        )}
+                        <p>
+                          Baseline was {formatPercent(preview.baseline.achievedCumulativeRisk)};
+                          preview {formatPercent(preview.preview.achievedCumulativeRisk)}.
+                        </p>
+                        {preview.diffs.length > 0 ? (
+                          <>
+                            <h3>Days that change</h3>
+                            <table className="diffs">
+                              <thead>
+                                <tr>
+                                  <th>{calendarMode ? "Cycle #" : "Year #"}</th>
+                                  <th>Day</th>
+                                  <th>Baseline</th>
+                                  <th>Preview</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {preview.diffs.map((d, i) => (
+                                  <tr key={i}>
+                                    <td>{d.yearIndex}</td>
+                                    <td>{d.day}</td>
+                                    <td>{d.baselineAction}</td>
+                                    <td>{d.previewAction}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </>
+                        ) : (
+                          <p>No calendar changes (same as baseline).</p>
+                        )}
                         <div className="row">
                           <button
                             type="button"
-                            disabled={previewLoading}
-                            onClick={() => void runPreviewAll()}
+                            disabled={!preview.feasible}
+                            onClick={() => applyPreview()}
                           >
-                            Preview replan with all locks
+                            Apply preview as new plan
                           </button>
-                          <button type="button" className="ghost" onClick={() => setLocks([])}>
-                            Clear locks
+                          <button type="button" className="ghost" onClick={() => setPreview(null)}>
+                            Dismiss preview
                           </button>
                         </div>
-                      </div>
+                      </section>
                     )}
-                    {y && (
-                      <div className="calendar" role="grid" aria-label="Cycle days">
-                        {y.dayWeights.map((d) => (
-                          <button
-                            key={d.day}
-                            type="button"
-                            className={`day cell-${d.recommendedAction}`}
-                            aria-label={`Day ${d.day}, recommended ${d.recommendedAction}`}
-                            title={`Day ${d.day}: ${d.recommendedAction} (risk score ${d.rawRiskScore})`}
-                            onClick={() => setModalDay(d.day)}
-                          >
-                            <span className="dn">{d.day}</span>
-                            <span className="ac">{d.recommendedAction}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <p className="hint">
-                      Locks / as-lived logs for the <strong>optimizer grid</strong>. The{" "}
-                      <strong>Calendar</strong> tab is wall dates; switch there to see the same plan
-                      letters when calendar mode is on.
-                    </p>
-                  </section>
+                  </details>
 
                   {modalDay !== null && y && (
                     <div
@@ -1582,72 +2139,7 @@ export default function App() {
                       </div>
                     </div>
                   )}
-
-                  {preview && (
-                    <section className="preview">
-                      <h2>Preview (with locks)</h2>
-                      {!preview.feasible && preview.message && (
-                        <p className="warn">{preview.message}</p>
-                      )}
-                      {preview.feasible && (
-                        <p>
-                          Preview cumulative risk:{" "}
-                          <strong>
-                            {(preview.preview.achievedCumulativeRisk * 100).toFixed(2)}%
-                          </strong>
-                          {" — "}
-                          target met:{" "}
-                          <strong>{preview.previewTargetMet ? "yes" : "no"}</strong>
-                        </p>
-                      )}
-                      <p>
-                        Baseline was {(preview.baseline.achievedCumulativeRisk * 100).toFixed(2)}%;
-                        preview {(preview.preview.achievedCumulativeRisk * 100).toFixed(2)}%.
-                      </p>
-                      {preview.diffs.length > 0 ? (
-                        <>
-                          <h3>Days that change</h3>
-                          <table className="diffs">
-                            <thead>
-                              <tr>
-                                <th>{calendarMode ? "Cycle #" : "Year #"}</th>
-                                <th>Day</th>
-                                <th>Baseline</th>
-                                <th>Preview</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {preview.diffs.map((d, i) => (
-                                <tr key={i}>
-                                  <td>{d.yearIndex}</td>
-                                  <td>{d.day}</td>
-                                  <td>{d.baselineAction}</td>
-                                  <td>{d.previewAction}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </>
-                      ) : (
-                        <p>No calendar changes (same as baseline).</p>
-                      )}
-                      <div className="row">
-                        <button
-                          type="button"
-                          disabled={!preview.feasible}
-                          onClick={() => applyPreview()}
-                        >
-                          Apply preview as new plan
-                        </button>
-                        <button type="button" className="ghost" onClick={() => setPreview(null)}>
-                          Dismiss preview
-                        </button>
-                      </div>
-                    </section>
-                  )}
-                </>
-              )}
-                </>
+                </section>
               ) : (
                 <section className="empty-state">
                   <ChartSpline size={52} aria-hidden />

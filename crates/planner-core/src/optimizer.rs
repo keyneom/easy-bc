@@ -287,8 +287,24 @@ fn calibrate(opts: &UserOptions) -> Result<Calibrate, crate::PlannerError> {
 }
 
 /// Remaining cumulative risk budget after logged exposures (`realized_cumulative_risk`).
+///
+/// Depletion is intentional and correct *while a cycle is in flight*: once you've
+/// taken on real exposure this horizon, the planner should plan the remaining days
+/// tighter to keep the whole-horizon target. The thing that would be wrong is making
+/// the depletion *permanent* after a cycle resolves with no pregnancy — that's
+/// handled client-side by releasing the just-resolved cycle's contribution on the
+/// next confirmed period start (see docs/risk-accounting-and-ec.md). The core's job
+/// is simply: given whatever realized exposure the client reports as still-in-play,
+/// budget the rest of the horizon against it.
 pub fn effective_cumulative_target(opts: &UserOptions) -> f64 {
-    (opts.target_cumulative_failure - opts.realized_cumulative_risk).max(0.0)
+    let realized = opts.realized_cumulative_risk;
+    if realized >= opts.target_cumulative_failure {
+        return 0.0;
+    }
+    // Solve 1 - (1 - realized) * (1 - future) <= target for `future`.
+    // Subtracting the two probabilities directly is slightly over-conservative
+    // because cumulative pregnancy probabilities compose through survival.
+    ((opts.target_cumulative_failure - realized) / (1.0 - realized)).clamp(0.0, 1.0)
 }
 
 fn risk_still_above_budget(current_risk: f64, budget: f64) -> bool {
@@ -836,6 +852,10 @@ fn build_planner_result(
         .map(|(y, yr)| {
             let risk_scores = normalize_risk_scores(&yr.base_risk_by_day);
             let plan = &plans[y];
+            // Undo the frequency scaling baked into base_risk_by_day to recover
+            // the single-act conception probability. acts_per_day can be 0 (no
+            // sex modeled) — then there's no act to price, so per-act is 0.
+            let acts_per_day = yr.acts_per_week / 7.0;
             let day_weights: Vec<DayWeight> = plan
                 .iter()
                 .enumerate()
@@ -844,6 +864,11 @@ fn build_planner_result(
                     recommended_action: action.to_recommended(),
                     raw_risk_score: risk_scores[d],
                     raw_risk_probability: yr.base_risk_by_day[d] * cal.persistent_residual,
+                    per_act_conception_probability: if acts_per_day > 0.0 {
+                        yr.base_risk_by_day[d] / acts_per_day
+                    } else {
+                        0.0
+                    },
                     protected_risk_probability: yr.base_risk_by_day[d]
                         * cal.persistent_residual
                         * cal.protected_day_residual,

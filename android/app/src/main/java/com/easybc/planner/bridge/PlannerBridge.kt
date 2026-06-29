@@ -9,6 +9,8 @@ import kotlin.math.roundToInt
 interface PlannerBridge {
     fun planFromJson(optionsJson: String): Result<String>
     fun replanPreviewFromJson(requestJson: String): Result<String>
+    /** Estimate an emergency-contraception dose's effect (EcEffectRequest → EcEffectResponse JSON). */
+    fun ecEffectFromJson(requestJson: String): Result<String>
     val isNative: Boolean
 }
 
@@ -25,6 +27,10 @@ class NativePlannerBridge : PlannerBridge {
 
     override fun replanPreviewFromJson(requestJson: String): Result<String> = runCatching {
         uniffi.planner_core.replanPreviewJson(requestJson)
+    }
+
+    override fun ecEffectFromJson(requestJson: String): Result<String> = runCatching {
+        uniffi.planner_core.ecEffectEstimateJson(requestJson)
     }
 }
 
@@ -43,6 +49,14 @@ class MockPlannerBridge : PlannerBridge {
 
     override fun replanPreviewFromJson(requestJson: String): Result<String> =
         Result.failure(UnsupportedOperationException("Replan preview not available in mock bridge"))
+
+    // The mock bridge has no native EC model; report "no effect" so dev builds
+    // without the .so don't credit (or crash on) emergency contraception.
+    override fun ecEffectFromJson(requestJson: String): Result<String> =
+        Result.success(
+            """{"conceptionMultiplier":1.0,"conceptionMultiplierLow":1.0,""" +
+                """"conceptionMultiplierHigh":1.0,"ovulationDelayDays":0.0}""",
+        )
 
     private fun generateMockResult(opts: UserOptions): PlannerResult {
         val numYears = if (opts.calendarCycles != null && opts.calendarCycles.isNotEmpty()) {

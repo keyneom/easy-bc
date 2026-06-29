@@ -583,6 +583,100 @@ h3 {
   font-size: 1rem;
 }
 
+.day-events {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--outline-soft);
+}
+
+.day-events-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.day-events-head h5 {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.day-events-list {
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.day-events-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--outline);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.day-events-list li div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.day-events-list strong {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.day-events-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.day-events-form {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.65rem;
+  border: 1px dashed var(--outline);
+  border-radius: 12px;
+}
+
+.day-events-form-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.ec-cycle-effects {
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
+}
+
+.ec-cycle-effects strong {
+  display: block;
+  font-size: 0.85rem;
+  margin-bottom: 0.35rem;
+}
+
+.ec-cycle-effects ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.3rem;
+}
+
+.ec-cycle-effects li {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: color-mix(in srgb, currentColor 85%, transparent);
+}
+
 .action-log:hover:not(:disabled) {
   color: var(--text);
 }
@@ -823,6 +917,336 @@ h3 {
 
 @keyframes sync-spin {
   to { transform: rotate(360deg); }
+}
+
+.auto-sync-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.82rem;
+  box-shadow: 0 6px 18px rgba(32, 29, 36, 0.06);
+}
+
+.auto-sync-banner svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.auto-sync-info svg {
+  color: var(--primary);
+}
+
+.auto-sync-success {
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--outline-soft));
+  background: color-mix(in srgb, var(--primary-container) 28%, var(--surface));
+  color: var(--primary-strong);
+}
+
+.auto-sync-error {
+  border-color: #f5b45c;
+  background: #fff7e8;
+  color: #6c4100;
+}
+
+.planner-screen {
+  width: min(100%, 840px);
+  margin: 0 auto;
+}
+
+.plan-risk-card {
+  margin: 0 0 1rem;
+  padding: 1.2rem;
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+}
+
+.plan-risk-card-met {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+}
+
+.plan-risk-card-miss {
+  background: #ffebee;
+  color: #410002;
+}
+
+.plan-risk-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.plan-risk-heading h2 {
+  margin-bottom: 0;
+}
+
+.plan-risk-icon {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.48);
+  color: var(--primary-strong);
+}
+
+.plan-risk-card-miss .plan-risk-icon {
+  color: #d32f2f;
+}
+
+.plan-risk-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.plan-risk-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 1.1rem 0 0.9rem;
+  text-align: center;
+}
+
+.plan-risk-stats div {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.plan-risk-stats strong {
+  font-size: clamp(1.25rem, 4.5vw, 1.75rem);
+  line-height: 1.1;
+}
+
+.plan-risk-stats span,
+.plan-budget-label {
+  color: color-mix(in srgb, currentColor 72%, transparent);
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.plan-budget-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.plan-budget-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.plan-risk-card-miss .plan-budget-meter span {
+  background: #d32f2f;
+}
+
+.plan-projection-meter {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  overflow: hidden;
+}
+
+.plan-projection-realized,
+.plan-projection-projected {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+}
+
+.plan-projection-realized {
+  background: color-mix(in srgb, var(--primary) 30%, transparent);
+  z-index: 1;
+}
+
+.plan-projection-projected {
+  background: var(--primary);
+  z-index: 2;
+  opacity: 0.85;
+}
+
+.plan-risk-card-miss .plan-projection-projected {
+  background: #d32f2f;
+}
+
+.plan-projection-target {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--text);
+  border-radius: 1px;
+  z-index: 3;
+  transform: translateX(-1px);
+}
+
+.plan-budget-label {
+  margin: 0.45rem 0 0;
+}
+
+.plan-method-card,
+.plan-years-section,
+.advanced-plan-panel {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 22px;
+  background: var(--surface);
+}
+
+.plan-method-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.plan-method-card p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.plan-method-card .eyebrow {
+  margin-bottom: 0.25rem;
+  color: var(--primary-strong);
+}
+
+.section-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.85rem;
+}
+
+.section-title-row h2 {
+  margin-bottom: 0;
+  font-size: 1.2rem;
+}
+
+.plan-mode-chip {
+  flex: 0 0 auto;
+  padding: 0.42rem 0.65rem;
+  border-radius: 999px;
+  background: var(--surface-soft);
+  color: var(--primary-strong);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.plan-year-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.plan-year-card {
+  padding: 0.95rem;
+  border: 1px solid var(--outline);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.plan-year-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.plan-year-card h3 {
+  margin-bottom: 0.18rem;
+  font-size: 0.96rem;
+}
+
+.plan-year-card p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.plan-year-risk {
+  display: grid;
+  gap: 0.18rem;
+  text-align: right;
+  font-size: 0.76rem;
+}
+
+.plan-year-risk span {
+  color: var(--muted);
+}
+
+.action-distribution {
+  display: flex;
+  height: 20px;
+  margin: 0.85rem 0 0.65rem;
+  overflow: hidden;
+  border-radius: 7px;
+  background: var(--surface-variant);
+}
+
+.action-distribution-segment {
+  min-width: 3px;
+}
+
+.action-U { background: var(--unprotected); }
+.action-W { background: var(--withdrawal); }
+.action-C { background: var(--protected); }
+.action-A { background: var(--abstain); }
+
+.plan-count-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-evenly;
+  gap: 0.5rem 0.9rem;
+}
+
+.plan-count-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 800;
+}
+
+.plan-count-chip strong {
+  font-size: 0.95rem;
+}
+
+.plan-count-U strong { color: var(--unprotected); }
+.plan-count-W strong { color: var(--withdrawal); }
+.plan-count-C strong { color: var(--protected); }
+.plan-count-A strong { color: var(--abstain); }
+
+.advanced-plan-panel {
+  padding: 0;
+  overflow: hidden;
+}
+
+.advanced-plan-panel summary {
+  cursor: pointer;
+  padding: 1rem;
+  color: var(--primary-strong);
+  font-weight: 850;
+}
+
+.advanced-plan-panel > section {
+  margin: 0 1rem 1rem;
 }
 
 fieldset,
@@ -1180,6 +1604,25 @@ pre {
 
   .sync-actions button {
     width: 100%;
+  }
+
+  .plan-method-card,
+  .section-title-row,
+  .plan-year-card-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plan-method-card button {
+    justify-content: center;
+  }
+
+  .plan-year-risk {
+    text-align: left;
+  }
+
+  .plan-risk-stats {
+    gap: 0.35rem;
   }
 
   .history-table th:nth-child(3),

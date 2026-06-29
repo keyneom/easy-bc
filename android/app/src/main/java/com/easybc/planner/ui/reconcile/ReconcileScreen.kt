@@ -96,6 +96,7 @@ fun ReconcileScreen(
                         onToggleSelect = { vm.toggleSelection(row.date) },
                         onAsPlanned = { vm.acceptAsPlanned(row.date) },
                         onReconcile = { action -> vm.reconcileOne(row.date, action) },
+                        onCondomBreak = { vm.logCondomBreak(row.date) },
                     )
                 }
             }
@@ -162,6 +163,7 @@ private fun ReconcileRow(
     onToggleSelect: () -> Unit,
     onAsPlanned: () -> Unit,
     onReconcile: (String) -> Unit,
+    onCondomBreak: () -> Unit,
 ) {
     val containerColor = if (selected) {
         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
@@ -214,13 +216,11 @@ private fun ReconcileRow(
                 ) {
                     Text("Abstained", style = MaterialTheme.typography.labelSmall)
                 }
-                if (row.plannerAction == RecommendedAction.C) {
-                    OutlinedButton(
-                        onClick = { onReconcile("CB") },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text("Cond. broke", style = MaterialTheme.typography.labelSmall)
-                    }
+                OutlinedButton(
+                    onClick = onCondomBreak,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Cond. broke", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }

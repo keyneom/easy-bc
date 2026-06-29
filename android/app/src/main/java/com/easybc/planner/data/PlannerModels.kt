@@ -199,6 +199,13 @@ data class DayWeight(
     val protectedRiskProbability: Double = 0.0,
     val withdrawalRiskProbability: Double = 0.0,
     val recommendedRiskProbability: Double = 0.0,
+    /**
+     * Single-act conception probability (per_act × age_mult), WITHOUT the
+     * acts_per_week/7 frequency scaling baked into the *RiskProbability fields.
+     * Use to price a discrete logged incident; see the realized-risk ledger in
+     * CalendarViewModel and docs/risk-accounting-and-ec.md.
+     */
+    val perActConceptionProbability: Double = 0.0,
     val overrideCost: OverrideCost,
 )
 

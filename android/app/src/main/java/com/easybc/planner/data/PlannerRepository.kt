@@ -4,11 +4,42 @@ import com.easybc.planner.BuildConfig
 import com.easybc.planner.bridge.PlannerBridge
 import com.easybc.planner.data.db.*
 import com.easybc.planner.util.CycleCalculator
+import com.easybc.planner.util.EcModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.util.UUID
+
+/** A logged Plan B / EC dose, located within the planner's cycle grid. */
+private data class EcDose(
+    val row: Int,
+    val day: Int,
+    val type: EcModel.EcType,
+    val hours: Double?,
+)
+
+/** Mirrors the Rust `EcEffectRequest` / `EcEffectResponse` JSON boundary. */
+@Serializable
+private data class EcEffectRequest(
+    val ecType: String,
+    val hoursFromAct: Double? = null,
+    val actCycleDay: Double,
+    val ovulationMeanDay: Double,
+    val ovulationSdDays: Double,
+)
+
+@Serializable
+private data class EcEffectResponse(
+    val conceptionMultiplier: Double = 1.0,
+    val conceptionMultiplierLow: Double = 1.0,
+    val conceptionMultiplierHigh: Double = 1.0,
+    val ovulationDelayDays: Double = 0.0,
+)
 
 class PlannerRepository(
     private val db: AppDatabase,
@@ -25,11 +56,13 @@ class PlannerRepository(
     private val settingsDao = db.userSettingsDao()
     private val periodDao = db.periodRecordDao()
     private val dayLogDao = db.dayLogDao()
+    private val dayEventDao = db.dayEventDao()
     private val syncMetadataDao = db.syncMetadataDao()
 
     val settingsFlow: Flow<UserSettingsEntity?> = settingsDao.getSettingsFlow()
     val periodsFlow: Flow<List<PeriodRecord>> = periodDao.getAllAscFlow()
     val dayLogsFlow: Flow<List<DayLog>> = dayLogDao.getAllFlow()
+    val dayEventsFlow: Flow<List<DayEventEntity>> = dayEventDao.getAllFlow()
 
     // The planner is an expensive multi-year Rust optimization. Each of the
     // three flows below is `shareIn`'d so every consumer (Calendar,
@@ -64,9 +97,9 @@ class PlannerRepository(
      * per screen.
      */
     val calendarPlannerResultFlow: Flow<PlannerResult?> =
-        combine(settingsFlow, periodsFlow, dayLogsFlow) { s, p, d ->
+        combine(settingsFlow, periodsFlow, dayLogsFlow, dayEventsFlow) { s, p, d, events ->
             if (s == null || !s.onboardingComplete) return@combine null
-            computePlan(s, p, d, useCalendarCycles = true)
+            computePlan(s, p, d, events, useCalendarCycles = true)
         }.flowOn(Dispatchers.Default)
             .shareIn(appScope, SharingStarted.WhileSubscribed(SHARE_KEEPALIVE_MS), replay = 1)
 
@@ -79,7 +112,13 @@ class PlannerRepository(
     val calendarBaselinePlannerResultFlow: Flow<PlannerResult?> =
         combine(settingsFlow, periodsFlow) { s, p ->
             if (s == null || !s.onboardingComplete) return@combine null
-            computePlan(s, p, dayLogs = emptyList(), useCalendarCycles = true)
+            computePlan(
+                s,
+                p,
+                dayLogs = emptyList(),
+                dayEvents = emptyList(),
+                useCalendarCycles = true,
+            )
         }.flowOn(Dispatchers.Default)
             .shareIn(appScope, SharingStarted.WhileSubscribed(SHARE_KEEPALIVE_MS), replay = 1)
 
@@ -88,6 +127,7 @@ class PlannerRepository(
         settings: UserSettingsEntity,
         periods: List<PeriodRecord>,
         dayLogs: List<DayLog>,
+        dayEvents: List<DayEventEntity> = emptyList(),
         useCalendarCycles: Boolean,
     ): PlannerResult? {
         val condomMode = try {
@@ -115,7 +155,7 @@ class PlannerRepository(
         // cycle can be anchored to real dates. The posterior still shrinks
         // heavily toward the age prior while history is short.
         val observedCycles = if (useCalendarCycles) cycleCalc.deriveCycles(periods) else emptyList()
-        val calendarCycles = if (useCalendarCycles && observedCycles.isNotEmpty()) {
+        val baseCalendarCycles = if (useCalendarCycles && observedCycles.isNotEmpty()) {
             cycleCalc.buildCalendarCycles(periods, settings)
         } else {
             null
@@ -130,6 +170,16 @@ class PlannerRepository(
         } else {
             emptyList()
         }
+        val calendarCycles = baseCalendarCycles?.toMutableList()?.also { cycles ->
+            val active = cycleCalc.dateToCycleDay(LocalDate.now(), coverageCycles)
+            if (active != null && active.first in cycles.indices) {
+                val cycle = coverageCycles[active.first]
+                val signals = deriveCurrentCycleBodySignals(dayLogs, cycle)
+                if (signals != null) {
+                    cycles[active.first] = cycles[active.first].copy(bodySignals = signals)
+                }
+            }
+        }
         val loggedActionLocks = if (calendarCycles != null) {
             buildLoggedActionLocks(
                 dayLogs = dayLogs,
@@ -142,7 +192,7 @@ class PlannerRepository(
             emptyList()
         }
 
-        val options = UserOptions(
+        val baseOptions = UserOptions(
             ageYears = settings.ageYears,
             horizonYears = settings.horizonYears,
             targetCumulativeFailure = settings.targetCumulativeFailure,
@@ -165,9 +215,35 @@ class PlannerRepository(
             initialActionLocks = loggedActionLocks,
         )
 
-        val json = PlannerJson.encodeToString(UserOptions.serializer(), options)
         val bridgeStart = System.nanoTime()
-        val resultJson = bridge.planFromJson(json).getOrNull()
+        val probeJson = PlannerJson.encodeToString(UserOptions.serializer(), baseOptions)
+        val probe = bridge.planFromJson(probeJson).getOrNull()?.let {
+            runCatching { PlannerJson.decodeFromString<PlannerResult>(it) }.getOrNull()
+        }
+        val realized = if (
+            useCalendarCycles &&
+            probe != null &&
+            calendarCycles != null &&
+            dayEvents.isNotEmpty()
+        ) {
+            aggregateInFlightEventRisk(
+                settings = settings,
+                periods = periods,
+                events = dayEvents,
+                coverageCycles = coverageCycles,
+                plan = probe,
+            )
+        } else {
+            0.0
+        }
+        val options = baseOptions.copy(realizedCumulativeRisk = realized)
+        val resultJson = if (realized > 0.0) {
+            bridge.planFromJson(
+                PlannerJson.encodeToString(UserOptions.serializer(), options)
+            ).getOrNull()
+        } else {
+            probe?.let { PlannerJson.encodeToString(PlannerResult.serializer(), it) }
+        }
         val bridgeMs = (System.nanoTime() - bridgeStart) / 1_000_000
         val decodeStart = System.nanoTime()
         val result = resultJson?.let {
@@ -190,6 +266,136 @@ class PlannerRepository(
             )
         }
         return result
+    }
+
+    private fun deriveCurrentCycleBodySignals(
+        dayLogs: List<DayLog>,
+        cycle: CycleCalculator.DerivedCycle,
+    ): BodySignalInputs? {
+        val start = cycle.startDate.toEpochDay()
+        val endExclusive = start + cycle.lengthDays
+        var mucusPeakDay: Int? = null
+        var lhSurgeDay: Int? = null
+        for (log in dayLogs) {
+            if (log.date !in start until endExclusive) continue
+            val cycleDay = (log.date - start).toInt() + 1
+            if (log.mucus == "eggwhite") {
+                mucusPeakDay = maxOf(mucusPeakDay ?: 0, cycleDay)
+            }
+            if (log.opk == "positive" || log.opk == "peak") {
+                lhSurgeDay = maxOf(lhSurgeDay ?: 0, cycleDay)
+            }
+        }
+        if (mucusPeakDay == null && lhSurgeDay == null) return null
+        return BodySignalInputs(
+            cervicalMucusPeakDay = mucusPeakDay,
+            lhSurgeDay = lhSurgeDay,
+        )
+    }
+
+    /**
+     * Estimate an EC dose's effect via the Rust core (native `.so`). Returns
+     * [EcModel.Estimate.NONE] only when the native estimator is unavailable
+     * (mock bridge / dev build without the library).
+     */
+    fun estimateEcEffect(
+        ecType: EcModel.EcType,
+        hoursFromAct: Double?,
+        actCycleDay: Double,
+        ovulationMeanDay: Double,
+        ovulationSdDays: Double,
+    ): EcModel.Estimate {
+        val request = EcEffectRequest(
+            ecType = ecType.wire,
+            hoursFromAct = hoursFromAct,
+            actCycleDay = actCycleDay,
+            ovulationMeanDay = ovulationMeanDay,
+            ovulationSdDays = ovulationSdDays,
+        )
+        val responseJson = bridge.ecEffectFromJson(
+            PlannerJson.encodeToString(EcEffectRequest.serializer(), request),
+        ).getOrNull() ?: return EcModel.Estimate.NONE
+        val resp = runCatching {
+            PlannerJson.decodeFromString(EcEffectResponse.serializer(), responseJson)
+        }.getOrNull() ?: return EcModel.Estimate.NONE
+        return EcModel.Estimate(
+            conceptionMultiplier = resp.conceptionMultiplier,
+            conceptionMultiplierLow = resp.conceptionMultiplierLow,
+            conceptionMultiplierHigh = resp.conceptionMultiplierHigh,
+            ovulationDelayDays = resp.ovulationDelayDays,
+        )
+    }
+
+    /**
+     * Conservative additional-risk estimate for explicit incidents in the
+     * active (unresolved) cycle. A new period changes [currentStart], so the
+     * previous cycle's events drop out automatically.
+     *
+     * Event probabilities share one unknown ovulation day, so summing their
+     * marginal per-act probabilities is used as a conservative union bound
+     * instead of assuming independence. The plan's embedded per-day risk is
+     * subtracted once per incident day to avoid double-counting.
+     */
+    private fun aggregateInFlightEventRisk(
+        settings: UserSettingsEntity,
+        periods: List<PeriodRecord>,
+        events: List<DayEventEntity>,
+        coverageCycles: List<CycleCalculator.DerivedCycle>,
+        plan: PlannerResult,
+    ): Double {
+        val currentStart = periods.maxOfOrNull { it.startDate } ?: return 0.0
+        val today = LocalDate.now().toEpochDay()
+        val persistentResidual = plan.validation.methodLibrary.persistentMethodResidual
+        if (!persistentResidual.isFinite()) return 0.0
+
+        // Plan B / EC doses in the active window, mapped to (row, dayInCycle).
+        val doses = events.asSequence()
+            .filter { it.date in currentStart..today && it.kind == "plan_b_taken" }
+            .mapNotNull { ev ->
+                val info = cycleCalc.dateToCycleDay(LocalDate.ofEpochDay(ev.date), coverageCycles)
+                    ?: return@mapNotNull null
+                EcModel.EcType.fromWire(ev.ecType)?.let { type ->
+                    EcDose(info.first, info.second, type, ev.hoursFromAct)
+                }
+            }
+            .toList()
+
+        var incidentUpperBound = 0.0
+        var embeddedPlanRisk = 0.0
+        events
+            .asSequence()
+            .filter {
+                it.date in currentStart..today &&
+                    (it.kind == "condom_broke" || it.kind == "unplanned_unprotected")
+            }
+            .groupBy { it.date }
+            .forEach { (epochDay, dayEvents) ->
+                val info = cycleCalc.dateToCycleDay(LocalDate.ofEpochDay(epochDay), coverageCycles)
+                    ?: return@forEach
+                val year = plan.years.getOrNull(info.first) ?: return@forEach
+                val dayWeight = year.dayWeights.getOrNull(info.second - 1) ?: return@forEach
+                // Strongest EC dose covering an act on this day (dose on/after it).
+                val ovuMean = year.signalSummary?.posteriorOvulationMeanDay
+                    ?: (year.cycleLengthDays - 14).toDouble()
+                val ovuSd = year.signalSummary?.posteriorOvulationSdDays ?: settings.ovulationSdDays
+                var ecMultiplier = 1.0
+                for (dose in doses) {
+                    if (dose.row == info.first && dose.day >= info.second) {
+                        val est = estimateEcEffect(
+                            dose.type, dose.hours, info.second.toDouble(), ovuMean, ovuSd,
+                        )
+                        ecMultiplier = minOf(ecMultiplier, est.conceptionMultiplier)
+                    }
+                }
+                incidentUpperBound += dayEvents.size *
+                    dayWeight.perActConceptionProbability *
+                    persistentResidual *
+                    ecMultiplier
+                embeddedPlanRisk += dayWeight.recommendedRiskProbability
+            }
+
+        return (incidentUpperBound - embeddedPlanRisk)
+            .coerceIn(0.0, settings.targetCumulativeFailure)
     }
 
     private fun buildLoggedActionLocks(
@@ -383,7 +589,8 @@ class PlannerRepository(
         val hasSignals = existing.mucus != null || existing.bbtCelsius != null ||
             existing.opk != null || existing.mittelschmerz || existing.breastTender
         val hasNotes = !existing.notes.isNullOrBlank()
-        if (hasSignals || hasNotes) {
+        val hasEvents = dayEventDao.countForDate(date.toEpochDay()) > 0
+        if (hasSignals || hasNotes || hasEvents) {
             dayLogDao.upsert(
                 existing.copy(actualAction = "", reconciled = false, updatedAt = System.currentTimeMillis())
             )
@@ -397,6 +604,55 @@ class PlannerRepository(
 
     suspend fun getDayLog(date: LocalDate): DayLog? {
         return dayLogDao.getForDate(date.toEpochDay())
+    }
+
+    suspend fun logDayEvent(
+        date: LocalDate,
+        kind: String,
+        ecType: String? = null,
+        hoursFromAct: Double? = null,
+        notes: String? = null,
+    ) {
+        require(kind in EVENT_KINDS) { "Unsupported event kind: $kind" }
+        if (kind == "plan_b_taken") {
+            require(ecType in EC_TYPES) { "Emergency contraception type is required" }
+        }
+        val now = System.currentTimeMillis()
+        val occurredAt = date.atTime(LocalTime.now())
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
+        dayEventDao.upsert(
+            DayEventEntity(
+                id = UUID.randomUUID().toString(),
+                date = date.toEpochDay(),
+                kind = kind,
+                ecType = ecType,
+                hoursFromAct = hoursFromAct?.coerceIn(0.0, 120.0),
+                occurredAt = occurredAt,
+                notes = notes,
+                updatedAt = now,
+            )
+        )
+        touchDayLog(date, now)
+        syncMetadataDao.delete(dayDeletionKey(date.toEpochDay()))
+    }
+
+    suspend fun deleteDayEvent(event: DayEventEntity) {
+        dayEventDao.delete(event)
+        touchDayLog(LocalDate.ofEpochDay(event.date), System.currentTimeMillis())
+    }
+
+    private suspend fun touchDayLog(date: LocalDate, updatedAt: Long) {
+        val existing = dayLogDao.getForDate(date.toEpochDay())
+        dayLogDao.upsert(
+            existing?.copy(updatedAt = updatedAt) ?: DayLog(
+                date = date.toEpochDay(),
+                actualAction = "",
+                reconciled = false,
+                updatedAt = updatedAt,
+            )
+        )
     }
 
     fun dayLogsForRange(start: LocalDate, end: LocalDate): Flow<List<DayLog>> {
@@ -451,5 +707,7 @@ class PlannerRepository(
          * enough that an idle/backgrounded app stops recomputing.
          */
         const val SHARE_KEEPALIVE_MS = 5_000L
+        val EVENT_KINDS = setOf("condom_broke", "unplanned_unprotected", "plan_b_taken")
+        val EC_TYPES = setOf("levonorgestrel", "ulipristal", "copper_iud")
     }
 }

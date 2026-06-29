@@ -715,6 +715,8 @@ internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -730,6 +732,8 @@ internal interface UniffiLib : Library {
         
     }
 
+    fun uniffi_planner_core_fn_func_ec_effect_estimate_json(`requestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_planner_core_fn_func_plan_fertility_risk_planner_json(`optsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_planner_core_fn_func_replan_preview_json(`requestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -846,6 +850,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_planner_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_planner_core_checksum_func_ec_effect_estimate_json(
+    ): Short
     fun uniffi_planner_core_checksum_func_plan_fertility_risk_planner_json(
     ): Short
     fun uniffi_planner_core_checksum_func_replan_preview_json(
@@ -867,6 +873,9 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
+    if (lib.uniffi_planner_core_checksum_func_ec_effect_estimate_json() != 25572.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_planner_core_checksum_func_plan_fertility_risk_planner_json() != 57042.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1018,6 +1027,16 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
     }
 
 }
+    @Throws(FfiException::class) fun `ecEffectEstimateJson`(`requestJson`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(FfiException) { _status ->
+    UniffiLib.INSTANCE.uniffi_planner_core_fn_func_ec_effect_estimate_json(
+        FfiConverterString.lower(`requestJson`),_status)
+}
+    )
+    }
+    
+
     @Throws(FfiException::class) fun `planFertilityRiskPlannerJson`(`optsJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCallWithError(FfiException) { _status ->

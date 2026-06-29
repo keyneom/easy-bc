@@ -5,10 +5,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.easybc.planner.EasyBCApp
 import com.easybc.planner.data.*
+import com.easybc.planner.data.db.DayEventEntity
 import com.easybc.planner.data.db.DayLog
 import com.easybc.planner.data.db.PeriodRecord
 import com.easybc.planner.data.db.UserSettingsEntity
 import com.easybc.planner.util.CycleCalculator
+import com.easybc.planner.util.EcModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -30,6 +32,7 @@ data class DayCellData(
     val riskScore: Int?,
     val overrideCost: OverrideCost?,
     val dayLog: DayLog?,
+    val events: List<DayEventEntity> = emptyList(),
     /**
      * Non-null when the cycle containing this date was flagged atypical by
      * the anovulatory heuristic. UI renders it as a small "atypical" chip;
@@ -57,6 +60,11 @@ data class DayCellData(
 )
 
 enum class CalendarViewMode { MONTH, WEEK }
+
+private data class CalendarLogs(
+    val dayLogs: List<DayLog>,
+    val events: List<DayEventEntity>,
+)
 
 /**
  * Compact per-cycle risk view. Anchored to the ORIGINAL plan: surfaces the
@@ -98,6 +106,9 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     private val app = application as EasyBCApp
     private val repo = app.repository
     private val cycleCalc = app.cycleCalculator
+    private val calendarLogsFlow = combine(repo.dayLogsFlow, repo.dayEventsFlow) { logs, events ->
+        CalendarLogs(logs, events)
+    }
 
     private val _currentMonth = MutableStateFlow(YearMonth.now())
     val currentMonth: StateFlow<YearMonth> = _currentMonth
@@ -189,8 +200,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
      * `coverageCycles[i]`, same as the calendar cell renderer.
      */
     val currentCycleLedger: StateFlow<CycleLedger?> = combine(
-        settings, plannerResult, baselinePlannerResult, periods, repo.dayLogsFlow,
-    ) { s, plan, baselinePlan, periodList, dayLogs ->
+        settings, plannerResult, baselinePlannerResult, periods, calendarLogsFlow,
+    ) { s, plan, baselinePlan, periodList, calendarLogs ->
         if (s == null || plan == null || baselinePlan == null || plan.years.isEmpty()) return@combine null
         val today = LocalDate.now()
         val cycles = cycleCalc.buildCoverageCycles(periodList, s)
@@ -203,11 +214,33 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         val cycleStartEpoch = cycle.startDate.toEpochDay()
         val cycleEndEpochExclusive = cycleStartEpoch + cycle.lengthDays
         val todayEpoch = today.toEpochDay()
-        val logsThisCycle = dayLogs.filter {
+        val logsThisCycle = calendarLogs.dayLogs.filter {
             it.date in cycleStartEpoch until cycleEndEpochExclusive && it.date <= todayEpoch
         }
+        val eventsByDate = calendarLogs.events
+            .filter {
+                it.date in cycleStartEpoch until cycleEndEpochExclusive && it.date <= todayEpoch
+            }
+            .groupBy { it.date }
 
         // Realized-so-far: chain (1 - r_i) survivals for logged days through today.
+        //
+        // Logged actions use the planner's frequency-spread probabilities.
+        // Explicit incidents are known acts and therefore replace that day's
+        // estimate with at least the per-act risk. A Plan B / EC dose taken on or
+        // after an incident this cycle reduces that incident per the EC model.
+        val persistentResidual = plan.validation.methodLibrary.persistentMethodResidual
+        val ovuMeanDay = year.signalSummary?.posteriorOvulationMeanDay
+            ?: (cycle.lengthDays - 14).toDouble()
+        val ovuSdDays = year.signalSummary?.posteriorOvulationSdDays ?: s.ovulationSdDays
+        // Plan B / EC doses this cycle: (cycle day, type, hours-from-act).
+        val planBDoses = eventsByDate.values.flatten()
+            .filter { it.kind == "plan_b_taken" }
+            .mapNotNull { ev ->
+                EcModel.EcType.fromWire(ev.ecType)?.let { type ->
+                    Triple((ev.date - cycleStartEpoch).toInt() + 1, type, ev.hoursFromAct)
+                }
+            }
         var survival = 1.0
         var baselineSurvival = 1.0
         for (log in logsThisCycle) {
@@ -215,20 +248,39 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             if (dayIdx < 1 || dayIdx > cycle.lengthDays) continue
             val dw = year.dayWeights.getOrNull(dayIdx - 1) ?: continue
             val baselineDw = baselineYear.dayWeights.getOrNull(dayIdx - 1) ?: continue
-            val r = when (log.actualAction) {
+            // Per-day-pattern risk of what actually happened.
+            val actualPdp = when (log.actualAction) {
                 "U", "CB" -> dw.rawRiskProbability
                 "W" -> dw.withdrawalRiskProbability
                 "C" -> dw.protectedRiskProbability
-                "A" -> 0.0
-                "NONE" -> 0.0
+                "A", "NONE" -> 0.0
                 else -> 0.0
             }
-            survival *= (1.0 - r).coerceIn(0.0, 1.0)
-            baselineSurvival *= (1.0 - baselineDw.recommendedRiskProbability).coerceIn(0.0, 1.0)
+            val plannedPdp = baselineDw.recommendedRiskProbability
+            val incidentCount = eventsByDate[log.date].orEmpty().count {
+                it.kind == "condom_broke" || it.kind == "unplanned_unprotected"
+            }
+            // Strongest EC dose covering an act on this day (dose on/after the act).
+            var ecMultiplier = 1.0
+            for ((doseDay, type, hours) in planBDoses) {
+                if (doseDay >= dayIdx) {
+                    val est = repo.estimateEcEffect(type, hours, dayIdx.toDouble(), ovuMeanDay, ovuSdDays)
+                    ecMultiplier = minOf(ecMultiplier, est.conceptionMultiplier)
+                }
+            }
+            val explicitIncidentRisk = (
+                incidentCount * dw.perActConceptionProbability * persistentResidual * ecMultiplier
+            ).coerceIn(0.0, 0.999)
+            val realizedDayR = maxOf(actualPdp, explicitIncidentRisk)
+            survival *= (1.0 - realizedDayR).coerceIn(0.0, 1.0)
+            baselineSurvival *= (1.0 - plannedPdp).coerceIn(0.0, 1.0)
         }
         val realized = (1.0 - survival).coerceIn(0.0, 1.0)
         val baselinePlannedForLoggedDays = (1.0 - baselineSurvival).coerceIn(0.0, 1.0)
         val deltaVsBaseline = realized - baselinePlannedForLoggedDays
+        val inFlightAdditional = plan.optionsUsed.realizedCumulativeRisk
+        val projectedHorizonRisk = 1.0 -
+            (1.0 - inFlightAdditional) * (1.0 - plan.achievedCumulativeRisk)
 
         CycleLedger(
             currentDayInCycle = dayInCycle,
@@ -241,34 +293,34 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             realizedSoFar = realized,
             savedRiskVsBaseline = (-deltaVsBaseline).coerceAtLeast(0.0),
             extraRiskVsBaseline = deltaVsBaseline.coerceAtLeast(0.0),
-            horizonRisk = plan.achievedCumulativeRisk,
+            horizonRisk = projectedHorizonRisk,
             horizonTarget = s.targetCumulativeFailure,
-            targetMet = plan.targetMet,
+            targetMet = projectedHorizonRisk <= s.targetCumulativeFailure + 1e-12,
         )
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
 
     /** Generate cell data for the current month view. */
     val monthCells: StateFlow<List<DayCellData>> = combine(
-        _currentMonth, plannerResult, periods, repo.dayLogsFlow,
-    ) { month, plan, periodList, dayLogs ->
-        buildMonthCells(month, plan, periodList, dayLogs)
+        _currentMonth, plannerResult, periods, calendarLogsFlow,
+    ) { month, plan, periodList, calendarLogs ->
+        buildMonthCells(month, plan, periodList, calendarLogs)
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     /** Generate cell data for the current week view. */
     val weekCells: StateFlow<List<DayCellData>> = combine(
-        _selectedDate, plannerResult, periods, repo.dayLogsFlow,
-    ) { selected, plan, periodList, dayLogs ->
-        buildWeekCells(selected, plan, periodList, dayLogs)
+        _selectedDate, plannerResult, periods, calendarLogsFlow,
+    ) { selected, plan, periodList, calendarLogs ->
+        buildWeekCells(selected, plan, periodList, calendarLogs)
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     /** Detail data for the selected day. */
     val selectedDayDetail: StateFlow<DayCellData?> = combine(
-        _selectedDate, plannerResult, periods, repo.dayLogsFlow,
-    ) { date, plan, periodList, dayLogs ->
-        val ctx = buildCalendarContext(periodList, dayLogs)
+        _selectedDate, plannerResult, periods, calendarLogsFlow,
+    ) { date, plan, periodList, calendarLogs ->
+        val ctx = buildCalendarContext(periodList, calendarLogs)
         buildCellForDate(date, plan, periodList, ctx, isCurrentMonth = true)
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
@@ -397,6 +449,23 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun logDayEvent(
+        date: LocalDate,
+        kind: String,
+        ecType: String? = null,
+        hoursFromAct: Double? = null,
+    ) {
+        viewModelScope.launch {
+            repo.logDayEvent(date, kind, ecType, hoursFromAct)
+        }
+    }
+
+    fun deleteDayEvent(event: DayEventEntity) {
+        viewModelScope.launch {
+            repo.deleteDayEvent(event)
+        }
+    }
+
     /**
      * True iff the user has ever filled in any body-signal field on any
      * day. Drives the "expand observations by default on the Day Detail
@@ -425,11 +494,12 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         val predictedBleedDays: Set<Long>,
         val cycleFlags: Map<LocalDate, CycleCalculator.CycleFlag>,
         val dayLogsByEpoch: Map<Long, DayLog>,
+        val dayEventsByEpoch: Map<Long, List<DayEventEntity>>,
     )
 
     private fun buildCalendarContext(
         periodList: List<PeriodRecord>,
-        dayLogs: List<DayLog>,
+        calendarLogs: CalendarLogs,
     ): CalendarContext {
         val today = LocalDate.now()
         val settingsNow = settings.value
@@ -443,7 +513,8 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             allCycles = allCycles,
             predictedBleedDays = cycleCalc.predictedFutureBleedDays(allCycles, periodList, today),
             cycleFlags = cycleCalc.flagObservedCycles(periodList),
-            dayLogsByEpoch = dayLogs.associateBy { it.date },
+            dayLogsByEpoch = calendarLogs.dayLogs.associateBy { it.date },
+            dayEventsByEpoch = calendarLogs.events.groupBy { it.date },
         )
     }
 
@@ -451,14 +522,14 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         month: YearMonth,
         plan: PlannerResult?,
         periodList: List<PeriodRecord>,
-        dayLogs: List<DayLog>,
+        calendarLogs: CalendarLogs,
     ): List<DayCellData> {
         val firstOfMonth = month.atDay(1)
         // Start grid on Monday
         val gridStart = firstOfMonth.with(DayOfWeek.MONDAY).let {
             if (it.isAfter(firstOfMonth)) it.minusWeeks(1) else it
         }
-        val ctx = buildCalendarContext(periodList, dayLogs)
+        val ctx = buildCalendarContext(periodList, calendarLogs)
         // 6 weeks of grid
         val cells = mutableListOf<DayCellData>()
         for (i in 0 until 42) {
@@ -472,10 +543,10 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         selectedDate: LocalDate,
         plan: PlannerResult?,
         periodList: List<PeriodRecord>,
-        dayLogs: List<DayLog>,
+        calendarLogs: CalendarLogs,
     ): List<DayCellData> {
         val weekStart = selectedDate.with(DayOfWeek.MONDAY)
-        val ctx = buildCalendarContext(periodList, dayLogs)
+        val ctx = buildCalendarContext(periodList, calendarLogs)
         return (0 until 7).map { i ->
             val date = weekStart.plusDays(i.toLong())
             buildCellForDate(date, plan, periodList, ctx, isCurrentMonth = true)
@@ -569,6 +640,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             riskScore = riskScore,
             overrideCost = overrideCost,
             dayLog = dayLog,
+            events = ctx.dayEventsByEpoch[date.toEpochDay()].orEmpty(),
             cycleFlag = cycleFlag,
             isPeriodPredicted = isPeriodPredicted,
             isPeriodEndDay = isPeriodEndDay,

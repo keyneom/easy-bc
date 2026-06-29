@@ -122,4 +122,21 @@ describe("sessionUtils horizon grid", () => {
     );
     expect(extra).toBeCloseTo(0.016, 10);
   });
+
+  it("estimateIncidentAdditionalRisk prices a discrete incident per-act when acts/week given", () => {
+    // Planned abstain (recommended risk 0), unprotected act on a peak fertile day.
+    // Per-day-pattern raw bakes in acts_per_week/7; the incident is ONE act, so
+    // the per-act figure should be ~ raw / (acts/7) = raw × 7/3, much larger.
+    const dw = {
+      recommendedAction: "A" as const,
+      rawRiskProbability: 0.1, // per-day-pattern at 3 acts/week
+      protectedRiskProbability: 0.02,
+      recommendedRiskProbability: 0, // planner said abstain
+    };
+    const perDayPattern = estimateIncidentAdditionalRisk(dw, "unprotected_on_abstinence");
+    const perAct = estimateIncidentAdditionalRisk(dw, "unprotected_on_abstinence", 3);
+    expect(perDayPattern).toBeCloseTo(0.1, 10);
+    expect(perAct).toBeCloseTo(0.1 / (3 / 7), 10); // ≈ 0.233
+    expect(perAct).toBeGreaterThan(perDayPattern * 2);
+  });
 });

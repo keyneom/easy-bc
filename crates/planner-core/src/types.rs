@@ -58,6 +58,20 @@ pub enum RecommendedAction {
     A,
 }
 
+/// Emergency-contraception type. Drives the EC effect model (see `ec.rs`). The
+/// Rust core does not store EC *events* (those live client-side); this enum
+/// exists only as an input to the EC effect estimator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EcType {
+    /// Levonorgestrel ("Plan B"). Acts before ovulation by delaying the LH surge.
+    Levonorgestrel,
+    /// Ulipristal acetate ("ella"). Works closer to ovulation; generally more effective.
+    Ulipristal,
+    /// Copper IUD as EC. Most effective; time-independent within the 5-day window.
+    CopperIud,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BodySignalInputs {
@@ -140,7 +154,11 @@ pub struct UserOptions {
     /// Optional body-signal observations for the current cycle. In legacy year mode these apply to year 0 only.
     #[serde(default)]
     pub body_signals: Option<BodySignalInputs>,
-    /// Cumulative pregnancy risk already attributed to logged exposures (reduces remaining budget).
+    /// Cumulative pregnancy risk already attributed to logged exposures that are
+    /// still *in play* (a cycle whose outcome isn't yet known). Reduces the
+    /// remaining budget so the planner tightens the rest of the horizon. Clients
+    /// are responsible for releasing a cycle's contribution once a confirmed
+    /// period resolves it at zero pregnancies — see docs/risk-accounting-and-ec.md.
     #[serde(default)]
     pub realized_cumulative_risk: f64,
     /// Lock these days to the given action before optimizing (1-based `day`, 0-based `year_index` row).
@@ -445,10 +463,24 @@ pub struct DayWeight {
     pub day: i32,
     pub recommended_action: RecommendedAction,
     pub raw_risk_score: i32,
+    /// Expected per-day conception probability for an *unprotected* day under
+    /// the user's typical frequency: `per_act × age_mult × (acts_per_week / 7)`.
+    /// This is the planner's currency — it spreads the weekly act count across
+    /// all seven days so a cycle-length product matches the SDM anchor.
     pub raw_risk_probability: f64,
     pub protected_risk_probability: f64,
     pub withdrawal_risk_probability: f64,
     pub recommended_risk_probability: f64,
+    /// Conception probability of a *single unprotected act* on this cycle day
+    /// (`per_act × age_mult`), before any method residual and WITHOUT the
+    /// `acts_per_week/7` frequency scaling baked into `raw_risk_probability`.
+    ///
+    /// Use this — not `raw_risk_probability` — to price a *discrete logged
+    /// incident* (a broken condom, an unprotected act on a planned-abstain
+    /// day). Charging `raw_risk_probability` for one real act understates the
+    /// risk by the frequency factor (e.g. ~0.43× at 3 acts/week). See
+    /// docs/risk-accounting-and-ec.md.
+    pub per_act_conception_probability: f64,
     pub override_cost: OverrideCost,
 }
 

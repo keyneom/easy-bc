@@ -114,6 +114,15 @@ class ReconcileViewModel(application: Application) : AndroidViewModel(applicatio
         reconcileOne(date, row.plannerAction.shortLabel)
     }
 
+    fun logCondomBreak(date: LocalDate) {
+        val row = currentRows.firstOrNull { it.date == date } ?: return
+        viewModelScope.launch {
+            repo.reconcileDay(date, row.plannerAction.shortLabel)
+            repo.logDayEvent(date, "condom_broke")
+            _selectedDates.update { it - date.toEpochDay() }
+        }
+    }
+
     /** Apply the same action to every currently selected date. */
     fun reconcileSelected(actualAction: String) {
         val selected = _selectedDates.value

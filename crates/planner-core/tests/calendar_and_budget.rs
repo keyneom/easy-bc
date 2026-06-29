@@ -103,7 +103,116 @@ fn full_long_horizon_plan_builds_quickly() {
 }
 
 #[test]
+fn per_act_probability_unwinds_frequency_scaling() {
+    // A single discrete act must be priced per-act, not per-day-pattern. The
+    // planner's raw_risk_probability spreads acts_per_week across 7 days; the
+    // per_act_conception_probability field undoes that so clients can price a
+    // broken condom / unplanned act correctly. See docs/risk-accounting-and-ec.md.
+    let acts_per_week = 3.0;
+    let plan = fertility_risk_planner(UserOptions {
+        age_years: 34,
+        horizon_years: 1,
+        acts_per_week,
+        persistent_method: planner_core::PersistentMethod::None,
+        ..Default::default()
+    })
+    .unwrap();
+    let year = &plan.years[0];
+    let _ = acts_per_week;
+    // Find the peak fertile day (max raw risk).
+    let peak = year
+        .day_weights
+        .iter()
+        .max_by(|a, b| {
+            a.raw_risk_probability
+                .partial_cmp(&b.raw_risk_probability)
+                .unwrap()
+        })
+        .unwrap();
+    // With no persistent method, raw_risk_probability == base == per_act × (acts/7),
+    // so per_act / raw must equal 7 / effective_acts_per_week exactly.
+    let expected_ratio = 7.0 / year.acts_per_week;
+    assert!(
+        (peak.per_act_conception_probability / peak.raw_risk_probability - expected_ratio).abs()
+            < 1e-6,
+        "per-act / per-day-pattern should equal 7/acts_per_week ({} vs {})",
+        peak.per_act_conception_probability / peak.raw_risk_probability,
+        expected_ratio
+    );
+    // The per-act figure is materially larger than the per-day-pattern figure —
+    // this is the under-reporting the field exists to fix. (The absolute is
+    // damped by ovulation-timing uncertainty without body signals; logging an LH
+    // surge narrows the posterior and pushes the peak day toward ~0.25.)
+    assert!(
+        peak.per_act_conception_probability > peak.raw_risk_probability * 2.0,
+        "per-act ({}) should be >2x per-day-pattern ({})",
+        peak.per_act_conception_probability,
+        peak.raw_risk_probability
+    );
+    assert!(
+        peak.per_act_conception_probability > 0.10,
+        "peak per-act conception should be a double-digit %, got {}",
+        peak.per_act_conception_probability
+    );
+}
+
+#[test]
+fn ovulation_uncertainty_lowers_peak_but_broadens_elevated_days() {
+    let cycle = |body_signals| CycleInstance {
+        cycle_length_days: 28,
+        cycle_sd_days: 3.0,
+        acts_per_week: 3.0,
+        age_years: 34,
+        body_signals,
+    };
+    let wide = fertility_risk_planner(UserOptions {
+        calendar_cycles: Some(vec![cycle(None)]),
+        persistent_method: planner_core::PersistentMethod::None,
+        ..Default::default()
+    })
+    .unwrap();
+    let narrow = fertility_risk_planner(UserOptions {
+        calendar_cycles: Some(vec![cycle(Some(BodySignalInputs {
+            lh_surge_day: Some(13),
+            cervical_mucus_peak_day: Some(13),
+            ..Default::default()
+        }))]),
+        persistent_method: planner_core::PersistentMethod::None,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let wide_risks: Vec<f64> = wide.years[0]
+        .day_weights
+        .iter()
+        .map(|d| d.per_act_conception_probability)
+        .collect();
+    let narrow_risks: Vec<f64> = narrow.years[0]
+        .day_weights
+        .iter()
+        .map(|d| d.per_act_conception_probability)
+        .collect();
+    let wide_peak = wide_risks.iter().copied().fold(0.0, f64::max);
+    let narrow_peak = narrow_risks.iter().copied().fold(0.0, f64::max);
+    let wide_elevated = wide_risks.iter().filter(|&&p| p >= 0.05).count();
+    let narrow_elevated = narrow_risks.iter().filter(|&&p| p >= 0.05).count();
+
+    assert!(wide_peak < narrow_peak);
+    assert!(wide_elevated > narrow_elevated);
+
+    // Convolution redistributes ovulation-relative fertility mass across
+    // calendar days; it should not materially erase it away from boundaries.
+    let wide_sum: f64 = wide_risks.iter().sum();
+    let narrow_sum: f64 = narrow_risks.iter().sum();
+    assert!((wide_sum - narrow_sum).abs() / narrow_sum < 0.03);
+}
+
+#[test]
 fn realized_cumulative_risk_tightens_effective_target() {
+    // In-flight realized exposure depletes the remaining budget so the planner
+    // tightens the rest of the horizon. (Releasing a resolved cycle's
+    // contribution on the next period start is a client concern — see
+    // docs/risk-accounting-and-ec.md — not the core's.)
     let base_opts = UserOptions {
         target_cumulative_failure: 0.05,
         horizon_years: 5,
@@ -118,19 +227,28 @@ fn realized_cumulative_risk_tightens_effective_target() {
     })
     .unwrap();
 
-    assert!(
-        (effective_cumulative_target(&UserOptions {
-            realized_cumulative_risk: 0.02,
-            target_cumulative_failure: 0.05,
-            ..Default::default()
-        }) - 0.03)
-            .abs()
-            < 1e-12
-    );
+    let remaining = effective_cumulative_target(&UserOptions {
+        realized_cumulative_risk: 0.02,
+        target_cumulative_failure: 0.05,
+        ..Default::default()
+    });
+    assert!((remaining - (0.03 / 0.98)).abs() < 1e-12);
     assert!(
         tight.achieved_cumulative_risk <= base.achieved_cumulative_risk + 1e-9,
         "tighter budget should not increase achieved risk vs looser baseline"
     );
+}
+
+#[test]
+fn realized_and_future_risk_compose_to_the_target() {
+    let opts = UserOptions {
+        target_cumulative_failure: 0.05,
+        realized_cumulative_risk: 0.02,
+        ..Default::default()
+    };
+    let future = effective_cumulative_target(&opts);
+    let combined = 1.0 - (1.0 - opts.realized_cumulative_risk) * (1.0 - future);
+    assert!((combined - opts.target_cumulative_failure).abs() < 1e-12);
 }
 
 #[test]

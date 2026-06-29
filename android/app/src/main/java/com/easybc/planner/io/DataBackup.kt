@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.room.withTransaction
 import com.easybc.planner.data.db.AppDatabase
 import com.easybc.planner.data.db.DayLog
+import com.easybc.planner.data.db.DayEventEntity
 import com.easybc.planner.data.db.PeriodRecord
 import com.easybc.planner.data.db.UserSettingsEntity
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,7 @@ object DataBackup {
         val settings: SettingsDto?,
         val periods: List<PeriodDto>,
         val dayLogs: List<DayLogDto>,
+        val dayEvents: List<DayEventDto> = emptyList(),
     )
 
     @Serializable
@@ -105,6 +107,18 @@ object DataBackup {
         val updatedAt: Long = 0L,
     )
 
+    @Serializable
+    data class DayEventDto(
+        val id: String,
+        val date: Long,
+        val kind: String,
+        val ecType: String? = null,
+        val hoursFromAct: Double? = null,
+        val occurredAt: Long,
+        val notes: String? = null,
+        val updatedAt: Long = 0L,
+    )
+
     // ── Export ───────────────────────────────────────────────────────────
 
     /**
@@ -116,11 +130,13 @@ object DataBackup {
             val settings = db.userSettingsDao().getSettings()?.toDto()
             val periods = db.periodRecordDao().getAllAsc().map { it.toDto() }
             val dayLogs = readAllDayLogs(db)
+            val dayEvents = db.dayEventDao().getAll().map { it.toDto() }
             val payload = Backup(
                 exportedAt = Instant.now().toString(),
                 settings = settings,
                 periods = periods,
                 dayLogs = dayLogs,
+                dayEvents = dayEvents,
             )
             val text = json.encodeToString(payload)
             context.contentResolver.openOutputStream(uri, "w")?.use { out ->
@@ -157,6 +173,7 @@ object DataBackup {
                 val importedAt = System.currentTimeMillis()
                 db.periodRecordDao().deleteAll()
                 db.dayLogDao().deleteAll()
+                db.dayEventDao().deleteAll()
                 db.syncMetadataDao().deleteByPrefix("period_deleted:")
                 db.syncMetadataDao().deleteByPrefix("day_deleted:")
 
@@ -185,6 +202,20 @@ object DataBackup {
                             breastTender = d.breastTender,
                             reconciled = d.reconciled,
                             updatedAt = if (d.updatedAt > 0) d.updatedAt else importedAt,
+                        )
+                    )
+                }
+                for (event in payload.dayEvents) {
+                    db.dayEventDao().upsert(
+                        DayEventEntity(
+                            id = event.id,
+                            date = event.date,
+                            kind = event.kind,
+                            ecType = event.ecType,
+                            hoursFromAct = event.hoursFromAct,
+                            occurredAt = event.occurredAt,
+                            notes = event.notes,
+                            updatedAt = if (event.updatedAt > 0) event.updatedAt else importedAt,
                         )
                     )
                 }
@@ -301,6 +332,17 @@ object DataBackup {
         note = note,
         excludeFromStats = excludeFromStats,
         createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
+
+    private fun DayEventEntity.toDto() = DayEventDto(
+        id = id,
+        date = date,
+        kind = kind,
+        ecType = ecType,
+        hoursFromAct = hoursFromAct,
+        occurredAt = occurredAt,
+        notes = notes,
         updatedAt = updatedAt,
     )
 

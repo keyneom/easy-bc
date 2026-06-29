@@ -3,6 +3,7 @@ package com.easybc.planner.sync
 import androidx.room.withTransaction
 import com.easybc.planner.data.db.AppDatabase
 import com.easybc.planner.data.db.DayLog
+import com.easybc.planner.data.db.DayEventEntity
 import com.easybc.planner.data.db.PeriodRecord
 import com.easybc.planner.data.db.SyncMetadataEntity
 import com.easybc.planner.data.db.UserSettingsEntity
@@ -22,6 +23,7 @@ class SyncPayloadStore(private val db: AppDatabase) {
         } ?: PreservedWebState()
 
         val localDayRows = db.dayLogDao().getAll()
+        val eventsByDate = db.dayEventDao().getAll().groupBy { it.date }
         val dayLogs = localDayRows.associate { row ->
             date(row.date) to SyncDayLog(
                 actualAction = row.actualAction.takeIf(String::isNotBlank),
@@ -32,9 +34,37 @@ class SyncPayloadStore(private val db: AppDatabase) {
                 mittelschmerz = row.mittelschmerz.takeIf { it },
                 breastTender = row.breastTender.takeIf { it },
                 reconciled = row.reconciled.takeIf { it },
+                events = eventsByDate[row.date].orEmpty().map { event ->
+                    SyncDayEvent(
+                        id = event.id,
+                        kind = event.kind,
+                        ecType = event.ecType,
+                        hoursFromAct = event.hoursFromAct,
+                        occurredAt = instant(event.occurredAt),
+                        notes = event.notes,
+                    )
+                },
                 updatedAt = instant(row.updatedAt),
             )
         }.toMutableMap()
+        eventsByDate.forEach { (epochDay, events) ->
+            val iso = date(epochDay)
+            if (dayLogs[iso] == null) {
+                dayLogs[iso] = SyncDayLog(
+                    events = events.map { event ->
+                        SyncDayEvent(
+                            id = event.id,
+                            kind = event.kind,
+                            ecType = event.ecType,
+                            hoursFromAct = event.hoursFromAct,
+                            occurredAt = instant(event.occurredAt),
+                            notes = event.notes,
+                        )
+                    },
+                    updatedAt = instant(events.maxOfOrNull { it.updatedAt } ?: 0L),
+                )
+            }
+        }
         metadata.entries.filter { it.key.startsWith(DAY_DELETED_PREFIX) }.forEach { (key, value) ->
             val epochDay = key.removePrefix(DAY_DELETED_PREFIX).toLongOrNull() ?: return@forEach
             val deletedAt = value.toLongOrNull() ?: 0L
@@ -187,6 +217,7 @@ class SyncPayloadStore(private val db: AppDatabase) {
 
         db.periodRecordDao().deleteAll()
         db.dayLogDao().deleteAll()
+        db.dayEventDao().deleteAll()
         db.syncMetadataDao().deleteByPrefix(PERIOD_DELETED_PREFIX)
         db.syncMetadataDao().deleteByPrefix(DAY_DELETED_PREFIX)
 
@@ -244,6 +275,20 @@ class SyncPayloadStore(private val db: AppDatabase) {
                         updatedAt = timestamp(row.updatedAt),
                     )
                 )
+                row.events.forEach { event ->
+                    db.dayEventDao().upsert(
+                        DayEventEntity(
+                            id = event.id,
+                            date = epochDay,
+                            kind = event.kind,
+                            ecType = event.ecType,
+                            hoursFromAct = event.hoursFromAct,
+                            occurredAt = timestamp(event.occurredAt),
+                            notes = event.notes,
+                            updatedAt = timestamp(row.updatedAt),
+                        )
+                    )
+                }
             } else {
                 putMetadata(DAY_DELETED_PREFIX + epochDay, timestamp(row.updatedAt).toString())
             }

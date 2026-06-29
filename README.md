@@ -442,7 +442,7 @@ the app should:
 4. re-optimize the rest of the current cycle and future horizon
 
 ### Current status in Rust
-- **`realized_cumulative_risk`** on [`UserOptions`](crates/planner-core/src/types.rs): lowers the effective cumulative budget before optimization (`target − realized`, floored at zero). Use when the user has already logged exposures against the horizon budget.
+- **`realized_cumulative_risk`** on [`UserOptions`](crates/planner-core/src/types.rs): lowers the future-risk budget while the active cycle is unresolved. The core composes realized and future probabilities through survival; clients derive the value from current-cycle events and release it on the next confirmed period.
 - **`initial_action_locks`**: list of [`DayOverride`](crates/planner-core/src/types.rs) applied before the greedy optimizer runs; those cells stay fixed (same skip semantics as replan locks).
 - **Incident → fields mapping** (v1 placeholders, not clinical): see [`docs/incidents.md`](docs/incidents.md).
 

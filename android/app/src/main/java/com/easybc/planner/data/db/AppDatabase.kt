@@ -93,6 +93,26 @@ data class DayLog(
     val updatedAt: Long = System.currentTimeMillis(),
 )
 
+@Entity(
+    tableName = "day_events",
+    indices = [Index(value = ["date"])],
+)
+data class DayEventEntity(
+    /** Stable UUID (or deterministic legacy-migration ID) used for sync deduplication. */
+    @PrimaryKey val id: String,
+    /** Epoch day of the calendar day that owns this event. */
+    val date: Long,
+    /** "condom_broke" | "unplanned_unprotected" | "plan_b_taken". */
+    val kind: String,
+    /** "levonorgestrel" | "ulipristal" | "copper_iud" for EC events. */
+    val ecType: String? = null,
+    val hoursFromAct: Double? = null,
+    /** Epoch milliseconds for event ordering/display. */
+    val occurredAt: Long,
+    val notes: String? = null,
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
 @Entity(tableName = "user_settings")
 data class UserSettingsEntity(
     @PrimaryKey val id: Int = 1,
@@ -237,6 +257,30 @@ interface DayLogDao {
 }
 
 @Dao
+interface DayEventDao {
+    @Query("SELECT * FROM day_events ORDER BY date ASC, occurredAt ASC")
+    fun getAllFlow(): Flow<List<DayEventEntity>>
+
+    @Query("SELECT * FROM day_events ORDER BY date ASC, occurredAt ASC")
+    suspend fun getAll(): List<DayEventEntity>
+
+    @Query("SELECT * FROM day_events WHERE date = :epochDay ORDER BY occurredAt ASC")
+    suspend fun getForDate(epochDay: Long): List<DayEventEntity>
+
+    @Query("SELECT COUNT(*) FROM day_events WHERE date = :epochDay")
+    suspend fun countForDate(epochDay: Long): Int
+
+    @Upsert
+    suspend fun upsert(event: DayEventEntity)
+
+    @Delete
+    suspend fun delete(event: DayEventEntity)
+
+    @Query("DELETE FROM day_events")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface UserSettingsDao {
     @Query("SELECT * FROM user_settings WHERE id = 1")
     fun getSettingsFlow(): Flow<UserSettingsEntity?>
@@ -269,13 +313,20 @@ interface SyncMetadataDao {
 // ── Database ──
 
 @Database(
-    entities = [PeriodRecord::class, DayLog::class, UserSettingsEntity::class, SyncMetadataEntity::class],
-    version = 8,
+    entities = [
+        PeriodRecord::class,
+        DayLog::class,
+        DayEventEntity::class,
+        UserSettingsEntity::class,
+        SyncMetadataEntity::class,
+    ],
+    version = 9,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun periodRecordDao(): PeriodRecordDao
     abstract fun dayLogDao(): DayLogDao
+    abstract fun dayEventDao(): DayEventDao
     abstract fun userSettingsDao(): UserSettingsDao
     abstract fun syncMetadataDao(): SyncMetadataDao
 
@@ -380,6 +431,38 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v8 -> v9: normalize out-of-band incidents into their own table.
+         * Legacy CB rows become a protected action plus a deterministic
+         * condom-broke event so web and Android share the same event model.
+         */
+        val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS day_events (" +
+                        "id TEXT NOT NULL, date INTEGER NOT NULL, kind TEXT NOT NULL, " +
+                        "ecType TEXT, hoursFromAct REAL, occurredAt INTEGER NOT NULL, " +
+                        "notes TEXT, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_day_events_date ON day_events(date)"
+                )
+                // Use an ISO-date-keyed id (`migrated:YYYY-MM-DD:condom_broke`)
+                // so it matches the web migration's deterministic id exactly —
+                // otherwise a synced legacy-CB day would dedup to two different
+                // ids and surface a duplicate condom-broke event. `date` is an
+                // epoch DAY, so *86400 converts it to unix seconds for date().
+                db.execSQL(
+                    "INSERT OR IGNORE INTO day_events " +
+                        "(id, date, kind, ecType, hoursFromAct, occurredAt, notes, updatedAt) " +
+                        "SELECT 'migrated:' || date(date * 86400, 'unixepoch') || ':condom_broke', " +
+                        "date, 'condom_broke', NULL, NULL, updatedAt, NULL, updatedAt " +
+                        "FROM day_logs WHERE actualAction = 'CB'"
+                )
+                db.execSQL("UPDATE day_logs SET actualAction = 'C' WHERE actualAction = 'CB'")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -389,7 +472,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                     .addMigrations(
                         MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7,
-                        MIGRATION_7_8,
+                        MIGRATION_7_8, MIGRATION_8_9,
                     )
                     // NOTE: no fallbackToDestructiveMigration — we never want
                     // to silently wipe user data. If a future schema bump

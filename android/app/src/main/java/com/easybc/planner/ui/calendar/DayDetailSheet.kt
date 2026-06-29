@@ -18,6 +18,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.easybc.planner.data.RecommendedAction
+import com.easybc.planner.data.db.DayEventEntity
 import com.easybc.planner.ui.theme.*
 import java.time.format.DateTimeFormatter
 
@@ -36,6 +37,8 @@ fun DayDetailSheet(
     onClearPeriodEnd: () -> Unit,
     onLogAction: (RecommendedAction) -> Unit,
     onClearAction: () -> Unit,
+    onLogEvent: (kind: String, ecType: String?, hoursFromAct: Double?) -> Unit,
+    onDeleteEvent: (DayEventEntity) -> Unit,
     onLogObservations: (
         mucus: String?,
         bbtCelsius: Double?,
@@ -258,6 +261,15 @@ fun DayDetailSheet(
                 )
             }
 
+            Text(
+                text = "This sets the day's overall pattern. For a one-off incident — " +
+                    "a broken condom, or unprotected sex on a planned-abstain day — add " +
+                    "an Event below instead. Incidents are counted per act, so they carry " +
+                    "more weight than a whole-day pattern.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
             if (showClearActionConfirm) {
                 AlertDialog(
                     onDismissRequest = { showClearActionConfirm = false },
@@ -279,6 +291,14 @@ fun DayDetailSheet(
                     },
                 )
             }
+
+            HorizontalDivider()
+
+            DayEventsSection(
+                events = cell.events,
+                onLogEvent = onLogEvent,
+                onDeleteEvent = onDeleteEvent,
+            )
 
             HorizontalDivider()
 
@@ -359,6 +379,133 @@ fun DayDetailSheet(
         }
     }
 }
+
+@Composable
+private fun DayEventsSection(
+    events: List<DayEventEntity>,
+    onLogEvent: (kind: String, ecType: String?, hoursFromAct: Double?) -> Unit,
+    onDeleteEvent: (DayEventEntity) -> Unit,
+) {
+    var addingKind by remember { mutableStateOf<String?>(null) }
+    var ecType by remember { mutableStateOf("levonorgestrel") }
+    var hoursText by remember { mutableStateOf("") }
+
+    Text("Events", style = MaterialTheme.typography.titleSmall)
+    Text(
+        "Log incidents independently of the planned action.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
+    events.forEach { event ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    when (event.kind) {
+                        "condom_broke" -> "Condom broke"
+                        "unplanned_unprotected" -> "Unplanned unprotected"
+                        "plan_b_taken" -> when (event.ecType) {
+                            "ulipristal" -> "ella (ulipristal)"
+                            "copper_iud" -> "Copper IUD as emergency contraception"
+                            else -> "Plan B (levonorgestrel)"
+                        }
+                        else -> event.kind
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+                event.hoursFromAct?.let {
+                    Text(
+                        "${it.toDisplayHours()} hours after the act",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            TextButton(onClick = { onDeleteEvent(event) }) { Text("Remove") }
+        }
+    }
+
+    if (addingKind == null) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { addingKind = "condom_broke" },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("+ Condom broke") }
+            OutlinedButton(
+                onClick = { addingKind = "unplanned_unprotected" },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("+ Unplanned unprotected") }
+            OutlinedButton(
+                onClick = { addingKind = "plan_b_taken" },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("+ Emergency contraception") }
+        }
+    } else {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                when (addingKind) {
+                    "condom_broke" -> "Condom broke"
+                    "unplanned_unprotected" -> "Unplanned unprotected"
+                    else -> "Emergency contraception"
+                },
+                fontWeight = FontWeight.SemiBold,
+            )
+            if (addingKind == "plan_b_taken") {
+                Text("Type", style = MaterialTheme.typography.labelMedium)
+                listOf(
+                    "levonorgestrel" to "Plan B",
+                    "ulipristal" to "ella",
+                    "copper_iud" to "Copper IUD",
+                ).forEach { (value, label) ->
+                    FilterChip(
+                        selected = ecType == value,
+                        onClick = { ecType = value },
+                        label = { Text(label) },
+                    )
+                }
+                OutlinedTextField(
+                    value = hoursText,
+                    onValueChange = { hoursText = it.filter { c -> c.isDigit() || c == '.' } },
+                    label = { Text("Hours since the act (optional)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = {
+                    val hours = hoursText.toDoubleOrNull()?.coerceIn(0.0, 120.0)
+                    onLogEvent(
+                        addingKind!!,
+                        ecType.takeIf { addingKind == "plan_b_taken" },
+                        hours,
+                    )
+                    addingKind = null
+                    hoursText = ""
+                }) { Text("Save event") }
+                TextButton(onClick = {
+                    addingKind = null
+                    hoursText = ""
+                }) { Text("Cancel") }
+            }
+            if (addingKind == "plan_b_taken") {
+                Text(
+                    "EC is kept in cycle history, but EasyBC does not assign it a numeric " +
+                        "efficacy credit. Effectiveness depends on timing and clinical factors.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private fun Double.toDisplayHours(): String =
+    if (this % 1.0 == 0.0) toInt().toString() else toString()
 
 /**
  * Confirmed-period row with an inline Undo. Used for both the recorded

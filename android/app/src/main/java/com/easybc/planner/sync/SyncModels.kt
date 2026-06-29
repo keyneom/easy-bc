@@ -95,12 +95,23 @@ data class SyncDayLog(
     val mittelschmerz: Boolean? = null,
     val breastTender: Boolean? = null,
     val reconciled: Boolean? = null,
+    val events: List<SyncDayEvent> = emptyList(),
     val updatedAt: String? = null,
 ) {
     fun hasUserData(): Boolean = actualAction != null || notes != null || mucus != null ||
         bbtCelsius != null || opk != null || mittelschmerz == true || breastTender == true ||
-        reconciled == true
+        reconciled == true || events.isNotEmpty()
 }
+
+@Serializable
+data class SyncDayEvent(
+    val id: String,
+    val kind: String,
+    val ecType: String? = null,
+    val hoursFromAct: Double? = null,
+    val occurredAt: String,
+    val notes: String? = null,
+)
 
 @Serializable
 data class TimestampedBoolean(
