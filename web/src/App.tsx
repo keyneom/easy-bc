@@ -772,6 +772,7 @@ export default function App() {
       const probe = JSON.parse(probeJson) as PlannerResult;
 
       let realizedCumulativeRisk = 0;
+      let finalLocks = initialLocks ? [...initialLocks] : [];
       const persistentResidual =
         probe.validation?.methodLibrary?.persistentMethodResidual;
       if (
@@ -793,6 +794,22 @@ export default function App() {
             dayWeight,
             log,
           });
+          const hasIncident = log.events.some(
+            (event) => event.kind === "condom_broke" || event.kind === "unplanned_unprotected",
+          );
+          if (
+            hasIncident &&
+            !finalLocks.some((lock) => lock.yearIndex === currentRow && lock.day === cycleDay)
+          ) {
+            // The realized-risk increment replaces this exact probe risk. Keep
+            // the incident day's probe action fixed in the final optimization
+            // so the amount subtracted by the aggregator cannot disappear.
+            finalLocks.push({
+              yearIndex: currentRow,
+              day: cycleDay,
+              action: dayWeight.recommendedAction,
+            });
+          }
         }
         // EC estimator backed by the canonical Rust model (via wasm). Uses the
         // current cycle's ovulation posterior so Plan B timing is meaningful.
@@ -815,10 +832,13 @@ export default function App() {
             );
             const r = JSON.parse(json) as {
               conceptionMultiplier: number;
+              conceptionMultiplierHigh: number;
               ovulationDelayDays: number;
             };
             return {
-              conceptionMultiplier: r.conceptionMultiplier,
+              // Budget against the least-effective modeled scenario. The
+              // central and optimistic scenarios remain diagnostic outputs.
+              conceptionMultiplier: r.conceptionMultiplierHigh,
               ovulationDelayDays: r.ovulationDelayDays,
             };
           } catch {
@@ -830,17 +850,20 @@ export default function App() {
           { persistentMethodResidual: persistentResidual as number },
           ecEffect,
         );
-        realizedCumulativeRisk = Math.min(
-          opts.targetCumulativeFailure,
-          aggregate.realized,
-        );
+        realizedCumulativeRisk = aggregate.realized;
       }
 
       const finalOptions = { ...probeOptions, realizedCumulativeRisk };
       const finalPlan = realizedCumulativeRisk > 0
         ? JSON.parse(
             planFertilityRiskJson(
-              JSON.stringify(optionsForWasm(finalOptions, initialLocks, currentRow)),
+              JSON.stringify(
+                optionsForWasm(
+                  finalOptions,
+                  finalLocks.length > 0 ? finalLocks : undefined,
+                  currentRow,
+                ),
+              ),
             ),
           ) as PlannerResult
         : probe;
@@ -1451,13 +1474,14 @@ export default function App() {
                   />
                 </label>
                 <div className="derived-field">
-                  In-flight realized risk
+                  In-flight incident adjustment
                   <strong>{formatPercent(opts.realizedCumulativeRisk)}</strong>
                   <span className="field-hint">
-                    Derived from explicit risk events since the latest period start.
-                    It tightens the remaining plan automatically and releases when a
-                    new period starts. EC is logged but is not assigned an invented
-                    numeric efficacy credit.
+                    Conditional additional risk not already represented by retained
+                    incident-day plan entries. It tightens the remaining plan and
+                    releases with a new period. Timed EC uses the model’s
+                    least-effective scenario; missing or contradictory timing
+                    receives no credit.
                   </span>
                 </div>
                 <label>

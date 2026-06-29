@@ -154,11 +154,11 @@ pub struct UserOptions {
     /// Optional body-signal observations for the current cycle. In legacy year mode these apply to year 0 only.
     #[serde(default)]
     pub body_signals: Option<BodySignalInputs>,
-    /// Cumulative pregnancy risk already attributed to logged exposures that are
-    /// still *in play* (a cycle whose outcome isn't yet known). Reduces the
-    /// remaining budget so the planner tightens the rest of the horizon. Clients
-    /// are responsible for releasing a cycle's contribution once a confirmed
-    /// period resolves it at zero pregnancies — see docs/risk-accounting-and-ec.md.
+    /// Conditional additional pregnancy risk from logged exposures still *in
+    /// play* (a cycle whose outcome isn't known), after removing risk already
+    /// represented by retained incident-day plan entries. It composes with the
+    /// plan through survival. Clients release it once a confirmed period resolves
+    /// the cycle at zero pregnancies — see docs/risk-accounting-and-ec.md.
     #[serde(default)]
     pub realized_cumulative_risk: f64,
     /// Lock these days to the given action before optimizing (1-based `day`, 0-based `year_index` row).
@@ -302,9 +302,7 @@ impl UserOptions {
         if self.target_cumulative_failure < 0.0 || self.target_cumulative_failure > 0.5 {
             return Err(crate::PlannerError::TargetOutOfRange);
         }
-        if self.realized_cumulative_risk < 0.0
-            || self.realized_cumulative_risk > self.target_cumulative_failure + 1e-15
-        {
+        if self.realized_cumulative_risk < 0.0 || self.realized_cumulative_risk >= 1.0 {
             return Err(crate::PlannerError::RealizedRiskOutOfRange);
         }
         if !(0.0..=1.0).contains(&self.custom_condom_residual) {
@@ -416,6 +414,11 @@ pub enum PlannerWarning {
         message: String,
         /// Years where abstain days exceeded 50% of cycle length.
         affected_year_indices: Vec<i32>,
+    },
+    RealizedRiskExceedsTarget {
+        realized_cumulative_risk: f64,
+        target_cumulative_failure: f64,
+        message: String,
     },
 }
 

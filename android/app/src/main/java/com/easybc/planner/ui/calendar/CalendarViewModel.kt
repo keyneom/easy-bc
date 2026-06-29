@@ -233,14 +233,33 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         val ovuMeanDay = year.signalSummary?.posteriorOvulationMeanDay
             ?: (cycle.lengthDays - 14).toDouble()
         val ovuSdDays = year.signalSummary?.posteriorOvulationSdDays ?: s.ovulationSdDays
-        // Plan B / EC doses this cycle: (cycle day, type, hours-from-act).
-        val planBDoses = eventsByDate.values.flatten()
+        val allEvents = eventsByDate.values.flatten()
+        val timedIncidents = allEvents
+            .filter { it.kind == "condom_broke" || it.kind == "unplanned_unprotected" }
+            .map {
+                EcModel.TimedIncident(
+                    it.id,
+                    cycleIdx,
+                    (it.date - cycleStartEpoch).toInt() + 1,
+                    it.occurredAt,
+                )
+            }
+        val planBDoses = allEvents
             .filter { it.kind == "plan_b_taken" }
             .mapNotNull { ev ->
                 EcModel.EcType.fromWire(ev.ecType)?.let { type ->
-                    Triple((ev.date - cycleStartEpoch).toInt() + 1, type, ev.hoursFromAct)
+                    EcModel.TimedDose(
+                        ev.id,
+                        cycleIdx,
+                        (ev.date - cycleStartEpoch).toInt() + 1,
+                        type,
+                        ev.hoursFromAct,
+                    )
                 }
             }
+        val doseMatches = planBDoses.associateWith {
+            EcModel.matchedIncidentId(it, timedIncidents)
+        }
         var survival = 1.0
         var baselineSurvival = 1.0
         for (log in logsThisCycle) {
@@ -257,20 +276,28 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
                 else -> 0.0
             }
             val plannedPdp = baselineDw.recommendedRiskProbability
-            val incidentCount = eventsByDate[log.date].orEmpty().count {
+            val incidents = eventsByDate[log.date].orEmpty().filter {
                 it.kind == "condom_broke" || it.kind == "unplanned_unprotected"
             }
-            // Strongest EC dose covering an act on this day (dose on/after the act).
-            var ecMultiplier = 1.0
-            for ((doseDay, type, hours) in planBDoses) {
-                if (doseDay >= dayIdx) {
-                    val est = repo.estimateEcEffect(type, hours, dayIdx.toDouble(), ovuMeanDay, ovuSdDays)
-                    ecMultiplier = minOf(ecMultiplier, est.conceptionMultiplier)
+            var explicitIncidentRisk = 0.0
+            for (incident in incidents) {
+                var ecMultiplier = 1.0
+                for ((dose, incidentId) in doseMatches) {
+                    if (incidentId == incident.id) {
+                        val est = repo.estimateEcEffect(
+                            dose.type,
+                            dose.hoursFromAct,
+                            dayIdx.toDouble(),
+                            ovuMeanDay,
+                            ovuSdDays,
+                        )
+                        ecMultiplier = minOf(ecMultiplier, est.conceptionMultiplierHigh)
+                    }
                 }
+                explicitIncidentRisk +=
+                    dw.perActConceptionProbability * persistentResidual * ecMultiplier
             }
-            val explicitIncidentRisk = (
-                incidentCount * dw.perActConceptionProbability * persistentResidual * ecMultiplier
-            ).coerceIn(0.0, 0.999)
+            explicitIncidentRisk = explicitIncidentRisk.coerceIn(0.0, 0.999)
             val realizedDayR = maxOf(actualPdp, explicitIncidentRisk)
             survival *= (1.0 - realizedDayR).coerceIn(0.0, 1.0)
             baselineSurvival *= (1.0 - plannedPdp).coerceIn(0.0, 1.0)

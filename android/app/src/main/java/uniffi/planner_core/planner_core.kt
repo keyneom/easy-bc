@@ -732,7 +732,7 @@ internal interface UniffiLib : Library {
         
     }
 
-    fun uniffi_planner_core_fn_func_ec_effect_estimate_json(`requestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_planner_core_fn_func_ec_effect_estimate_json(`requestJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     fun uniffi_planner_core_fn_func_plan_fertility_risk_planner_json(`optsJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -858,7 +858,7 @@ internal interface UniffiLib : Library {
     ): Short
     fun ffi_planner_core_uniffi_contract_version(
     ): Int
-    
+
 }
 
 private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
@@ -1035,7 +1035,7 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
 }
     )
     }
-    
+
 
     @Throws(FfiException::class) fun `planFertilityRiskPlannerJson`(`optsJson`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
@@ -1056,5 +1056,3 @@ public object FfiConverterTypeFfiError : FfiConverterRustBuffer<FfiException> {
     )
     }
     
-
-

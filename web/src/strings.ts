@@ -6,7 +6,7 @@ export const EC_COPY = {
   title: "Emergency contraception (education only)",
   body: [
     "Emergency contraception has time windows that depend on the product and when unprotected sex occurred. A pharmacist or clinician can help you choose an appropriate option quickly.",
-    "When you log a Plan B / ella / copper-IUD event with its type and timing on a day with an incident, the planner makes a rough, clearly-bounded estimate of how much it lowers that cycle's risk — sooner-before-ovulation doses count for more. This is a planning estimate, not clinical efficacy or medical advice.",
+    "When a timed Plan B / ella / copper-IUD event can be matched to a logged incident, the planner uses the model's least-effective scenario to estimate its effect. Missing or contradictory timing receives no numeric credit. This is a planning estimate, not clinical efficacy or medical advice.",
     "If you may be pregnant or have urgent symptoms, seek in-person care.",
   ],
   journalLabel: "Journal only: I used emergency contraception (optional)",

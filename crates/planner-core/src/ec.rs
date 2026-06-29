@@ -23,14 +23,14 @@
 //! - **Ulipristal (UPA)** can postpone ovulation even after the surge has begun,
 //!   so it works with less lead time and remains useful closer to ovulation.
 //!   Generally more effective than LNG (ACOG).
-//! - **Copper IUD** acts post-fertilization (spermicidal copper + blocks
-//!   implantation), so it is effective essentially regardless of cycle timing
-//!   within the 5-day window — the most effective EC option (ACOG; Cleland review).
+//! - **Copper IUD** primarily impairs sperm function and fertilization, so it is
+//!   effective essentially regardless of cycle timing within the 5-day window —
+//!   the most effective EC option (ACOG; Cleland review).
 //!
 //! Because the dose timing enters only through `t = a + hours/24`, the
 //! "sooner is better" behavior emerges from the lead-time integral instead of a
-//! hand-tuned timeliness table. Three potency presets bracket parameter
-//! uncertainty so callers can show an honest range, not a false point estimate.
+//! hand-tuned timeliness table. Three explicit potency scenarios expose model
+//! sensitivity; they are not statistical confidence or credible intervals.
 //!
 //! This is a planning estimate, not clinical efficacy. Body-weight/BMI effects
 //! and drug interactions are not modeled. See docs/risk-accounting-and-ec.md.
@@ -44,12 +44,23 @@ pub struct EcEstimate {
     /// Multiply the at-risk act's conception probability by this. `efficacy =
     /// 1 − multiplier`. Central estimate.
     pub conception_multiplier: f64,
-    /// Optimistic bound (most efficacy / lowest residual risk).
+    /// Optimistic scenario (most efficacy / lowest residual risk).
     pub conception_multiplier_low: f64,
-    /// Conservative bound (least efficacy / highest residual risk).
+    /// Conservative scenario (least efficacy / highest residual risk).
     pub conception_multiplier_high: f64,
     /// Expected forward shift of ovulation, in days (drives next-period timing).
     pub ovulation_delay_days: f64,
+}
+
+impl EcEstimate {
+    fn no_credit() -> Self {
+        Self {
+            conception_multiplier: 1.0,
+            conception_multiplier_low: 1.0,
+            conception_multiplier_high: 1.0,
+            ovulation_delay_days: 0.0,
+        }
+    }
 }
 
 #[inline]
@@ -204,17 +215,42 @@ fn ovulation_delay(ec_type: EcType, t: f64, ovu: &OvulationPosterior, p: Potency
 
 /// Estimate an EC dose's effect on an at-risk act on `act_cycle_day` (1-based;
 /// may be fractional), given the cycle's `ovulation` posterior. `hours_from_act`
-/// is the delay between the act and the dose; `None` assumes a typical ~24h.
+/// is the delay between the act and the dose. Missing, invalid, or out-of-window
+/// timing receives no numeric credit.
 pub fn ec_effect(
     ec_type: EcType,
     hours_from_act: Option<f64>,
     act_cycle_day: f64,
     ovulation: &OvulationPosterior,
 ) -> EcEstimate {
-    let t = act_cycle_day + hours_from_act.unwrap_or(24.0) / 24.0;
+    let Some(hours) = hours_from_act else {
+        return EcEstimate::no_credit();
+    };
+    let max_hours = match ec_type {
+        EcType::Levonorgestrel => 72.0,
+        EcType::Ulipristal | EcType::CopperIud => 120.0,
+    };
+    if !hours.is_finite()
+        || !(0.0..=max_hours).contains(&hours)
+        || !act_cycle_day.is_finite()
+        || act_cycle_day < 1.0
+        || !ovulation.mean_day.is_finite()
+        || ovulation.mean_day < 1.0
+        || !ovulation.sd_days.is_finite()
+        || ovulation.sd_days <= 0.0
+    {
+        return EcEstimate::no_credit();
+    }
+    let t = act_cycle_day + hours / 24.0;
     let central = survival_multiplier(ec_type, act_cycle_day, t, ovulation, Potency::central());
     let low = survival_multiplier(ec_type, act_cycle_day, t, ovulation, Potency::optimistic());
-    let high = survival_multiplier(ec_type, act_cycle_day, t, ovulation, Potency::conservative());
+    let high = survival_multiplier(
+        ec_type,
+        act_cycle_day,
+        t,
+        ovulation,
+        Potency::conservative(),
+    );
     EcEstimate {
         conception_multiplier: central,
         conception_multiplier_low: low,
@@ -265,7 +301,11 @@ mod tests {
         // is insensitive to dose timing within the window.
         let prompt = ec_effect(EcType::CopperIud, Some(12.0), 12.0, &ovu(14.0, 2.0));
         let late = ec_effect(EcType::CopperIud, Some(110.0), 12.0, &ovu(14.0, 2.0));
-        assert!(efficacy(prompt) > 0.97, "copper efficacy {}", efficacy(prompt));
+        assert!(
+            efficacy(prompt) > 0.97,
+            "copper efficacy {}",
+            efficacy(prompt)
+        );
         assert_eq!(prompt.conception_multiplier, late.conception_multiplier);
         assert_eq!(prompt.ovulation_delay_days, 0.0);
     }
@@ -336,5 +376,18 @@ mod tests {
         let wide = ec_effect(EcType::Levonorgestrel, Some(24.0), 11.0, &ovu(14.0, 3.0));
         let narrow = ec_effect(EcType::Levonorgestrel, Some(24.0), 11.0, &ovu(14.0, 1.0));
         assert!((wide.conception_multiplier - narrow.conception_multiplier).abs() > 1e-3);
+    }
+
+    #[test]
+    fn missing_or_out_of_window_timing_receives_no_credit() {
+        let posterior = ovu(14.0, 2.0);
+        for estimate in [
+            ec_effect(EcType::Levonorgestrel, None, 11.0, &posterior),
+            ec_effect(EcType::Levonorgestrel, Some(73.0), 11.0, &posterior),
+            ec_effect(EcType::Ulipristal, Some(121.0), 11.0, &posterior),
+            ec_effect(EcType::CopperIud, Some(121.0), 11.0, &posterior),
+        ] {
+            assert_eq!(estimate, EcEstimate::no_credit());
+        }
     }
 }

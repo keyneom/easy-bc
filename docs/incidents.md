@@ -6,8 +6,9 @@
 >    a cycle is in flight, then releases on the next confirmed period (no
 >    pregnancy). Cumulative risk composes through survival rather than direct
 >    subtraction.
-> 2. **EC is a dated event, not a numeric credit.** Type and timing are stored,
->    but the planner does not invent an efficacy multiplier.
+> 2. **EC is a dated, timed event.** A compatible dose uses the canonical Rust
+>    model's least-effective scenario; missing or contradictory timing receives
+>    no numeric credit.
 > 3. **Discrete incidents are priced per-act**, not per-day-pattern — use
 >    `per_act_conception_probability`, not `raw_risk_probability`.
 
@@ -25,7 +26,7 @@ The Rust core does not encode “incident types.” The **web (or mobile) shell*
 | Ordinary as-lived `U` / `W` / `C` / `A` / `NONE` | Past-day action lock; no separate incident charge |
 | `condom_broke` event | One known unprotected act at that day's per-act conception probability |
 | `unplanned_unprotected` event | One known unprotected act at that day's per-act conception probability |
-| `plan_b_taken` event | Dated journal event with EC type and optional hours-from-act; no numeric efficacy credit |
+| `plan_b_taken` event | Dated EC event; valid type/timing may reduce the most recent compatible incident using the conservative model scenario |
 
 The incident aggregator subtracts the plan probability already embedded on an
 incident day once. This makes the known act replace the prospective
@@ -33,9 +34,12 @@ frequency-spread assumption instead of counting both.
 
 ## Emergency contraception
 
-Logging EC does not auto-compute efficacy. The event remains in the day history
-and encrypted sync payload; the legacy `ecJournalFlag` remains only for backward
-compatibility.
+Logging EC with compatible hours-from-act invokes the canonical Rust estimator.
+One dose is assigned only to the most recent compatible incident instead of
+reusing its delay for every earlier act. Missing timing, contradictory
+date/timing combinations, LNG after 72 hours, and ella/copper-IUD after 120
+hours receive no numeric credit. The event remains in day history and encrypted
+sync; the legacy `ecJournalFlag` remains only for backward compatibility.
 
 ## Related types
 

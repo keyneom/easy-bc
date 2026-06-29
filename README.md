@@ -559,7 +559,7 @@ Spot-check 3–5 plan outputs against the research data — e.g., peak-fertility
 The web client is a **local-first shell**: **IndexedDB** for period records, **session storage** for planner session, **tabs** (**Calendar** | **Planner** | **History**), and WASM for all numeric plans.
 
 - **Calendar** — Month grid with bleeding and fertile **estimates**; with calendar mode + a computed plan, per-day **optimizer action** and **raw risk score** (density toggle); **Export planner (.ics)** for the mapped date range; **day panel** for period boundaries, phase copy, **optimizer fields**, and voluntary-abstinence **credits** (journal).
-- **Planner** — Full `UserOptions` surface, **cycle-length variance card** (sample SD, SD widen, effective `cycleSdDays` on predicted rows), horizon strip with locks and as-lived logs, **preview replan**, realized cumulative risk, EC education / journal flag (no PK workflow in core).
+- **Planner** — Full `UserOptions` surface, **cycle-length variance card** (sample SD, SD widen, effective `cycleSdDays` on predicted rows), horizon strip with locks and as-lived logs, **preview replan**, realized cumulative risk, and conservative timed-EC modeling in the Rust core.
 - **History** — Table of logged period episodes.
 
 UX roadmap and interaction principles: [`docs/ux-product-plan.md`](docs/ux-product-plan.md). Incident → risk fields (v1): [`docs/incidents.md`](docs/incidents.md).

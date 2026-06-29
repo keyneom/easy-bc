@@ -17,9 +17,9 @@ pub use ec::{ec_effect, EcEstimate};
 pub use error::PlannerError;
 pub use optimizer::{effective_cumulative_target, fertility_risk_planner, replan_preview};
 pub use types::{
-    BodySignalInputs, CondomMode, CycleInstance, DayOverride, EcType, PersistentMethod, PlanDayDiff,
-    PlannerResult, ProtectedDayMethod, RecommendedAction, ReplanPreview, ReplanPreviewRequest,
-    UserOptions, WithdrawalMode,
+    BodySignalInputs, CondomMode, CycleInstance, DayOverride, EcType, PersistentMethod,
+    PlanDayDiff, PlannerResult, PlannerWarning, ProtectedDayMethod, RecommendedAction,
+    ReplanPreview, ReplanPreviewRequest, UserOptions, WithdrawalMode,
 };
 
 /// JSON API for FFI/WASM hosts.
@@ -67,7 +67,12 @@ pub fn ec_effect_from_json(json: &str) -> Result<String, String> {
         mean_day: req.ovulation_mean_day,
         sd_days: req.ovulation_sd_days,
     };
-    let e = ec_effect(req.ec_type, req.hours_from_act, req.act_cycle_day, &posterior);
+    let e = ec_effect(
+        req.ec_type,
+        req.hours_from_act,
+        req.act_cycle_day,
+        &posterior,
+    );
     let resp = EcEffectResponse {
         conception_multiplier: e.conception_multiplier,
         conception_multiplier_low: e.conception_multiplier_low,
@@ -118,9 +123,8 @@ pub fn replan_preview_json(request_json: String) -> Result<String, FfiError> {
     replan_preview_from_json(&request_json).map_err(|msg| FfiError::PlannerError { msg })
 }
 
-// NOTE: Android currently mirrors the EC model in Kotlin (no native rebuild in
-// this environment), but the FFI entry exists so a future binding regen can use
-// the canonical Rust implementation instead.
+// Android calls this canonical implementation through the generated uniFFI
+// binding and the release-built native library.
 #[cfg(feature = "ffi")]
 #[uniffi::export]
 pub fn ec_effect_estimate_json(request_json: String) -> Result<String, FfiError> {

@@ -471,7 +471,7 @@ private fun DayEventsSection(
                 OutlinedTextField(
                     value = hoursText,
                     onValueChange = { hoursText = it.filter { c -> c.isDigit() || c == '.' } },
-                    label = { Text("Hours since the act (optional)") },
+                    label = { Text("Hours since the act — needed for the dose to affect the estimate") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -494,8 +494,9 @@ private fun DayEventsSection(
             }
             if (addingKind == "plan_b_taken") {
                 Text(
-                    "EC is kept in cycle history, but EasyBC does not assign it a numeric " +
-                        "efficacy credit. Effectiveness depends on timing and clinical factors.",
+                    "Timed EC can reduce the incident estimate using the model's " +
+                        "least-effective scenario. Missing or contradictory timing receives " +
+                        "no numeric credit. Effectiveness also depends on clinical factors.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

@@ -407,6 +407,12 @@ fn action_successors(
             if allow_withdrawal && withdrawal_r + 1e-15 < 1.0 {
                 v.push(Act::W);
             }
+            // NFP-only mode still has abstinence available. Without an
+            // intermediate protected/withdrawal action, U must be able to
+            // upgrade directly to A or the optimizer cannot reduce risk.
+            if v.is_empty() {
+                v.push(Act::A);
+            }
             v
         }
         Act::W => {
@@ -845,6 +851,14 @@ fn build_planner_result(
     target_met: bool,
 ) -> PlannerResult {
     append_heavy_abstinence(&cal.years, plans, &mut warnings);
+    if opts.realized_cumulative_risk > opts.target_cumulative_failure {
+        warnings.push(PlannerWarning::RealizedRiskExceedsTarget {
+            realized_cumulative_risk: opts.realized_cumulative_risk,
+            target_cumulative_failure: opts.target_cumulative_failure,
+            message: "Logged in-flight exposure already exceeds the selected cumulative-risk target. The remaining plan has been tightened as far as possible, but it cannot undo risk already taken."
+                .to_string(),
+        });
+    }
     let year_outputs: Vec<YearOutput> = cal
         .years
         .iter()
@@ -1079,7 +1093,7 @@ pub fn replan_preview(
     );
     let (plans, _, cr, asurv, skip_initial) =
         optimize_with_initial_locks(&cal, &opts, planning_eff, recovery_eff)?;
-    let baseline_target_met = cumulative_target_met(total_cumulative_risk(&asurv), eff);
+    let baseline_target_met = overall_target_met(&opts, total_cumulative_risk(&asurv));
     let baseline = build_planner_result(
         opts.clone(),
         &cal,
@@ -1131,7 +1145,7 @@ pub fn replan_preview(
         |y, d| locked.contains(&(y, d)),
         false,
     );
-    let preview_target_met = cumulative_target_met(total_cumulative_risk(&as_p), eff);
+    let preview_target_met = overall_target_met(&opts, total_cumulative_risk(&as_p));
     let feasible = preview_target_met;
     let message = if !feasible {
         Some(
@@ -1178,7 +1192,7 @@ pub fn fertility_risk_planner(opts: UserOptions) -> Result<PlannerResult, crate:
     );
     let (plans, _, cr, asurv, _) =
         optimize_with_initial_locks(&cal, &opts, planning_eff, recovery_eff)?;
-    let target_met = cumulative_target_met(total_cumulative_risk(&asurv), eff);
+    let target_met = overall_target_met(&opts, total_cumulative_risk(&asurv));
     Ok(build_planner_result(
         opts, &cal, &plans, &cr, &asurv, warnings, target_met,
     ))
@@ -1201,6 +1215,13 @@ fn cumulative_target_met(achieved: f64, target: f64) -> bool {
     } else {
         achieved <= target
     }
+}
+
+fn overall_target_met(opts: &UserOptions, future_risk: f64) -> bool {
+    let realized = opts.realized_cumulative_risk.clamp(0.0, 1.0);
+    let future = future_risk.clamp(0.0, 1.0);
+    let combined = 1.0 - (1.0 - realized) * (1.0 - future);
+    cumulative_target_met(combined, opts.target_cumulative_failure)
 }
 
 fn cycle_risk_for_year(
@@ -1284,6 +1305,11 @@ fn marginal_upgrade_cost(
         }
         (Act::W, Act::A) => {
             let mut c = (ux.abstain_cost - ux.condom_cost * U_TO_WITHDRAWAL_COST_FRAC) * tw * cw;
+            c += local_abstain_streak_delta(y, d, plans, ux) * tw;
+            c
+        }
+        (Act::U, Act::A) => {
+            let mut c = ux.abstain_cost * tw * cw;
             c += local_abstain_streak_delta(y, d, plans, ux) * tw;
             c
         }
@@ -1402,6 +1428,9 @@ fn action_predecessors(
             }
             if allow_withdrawal && withdrawal_r > 1e-15 {
                 v.push(Act::W);
+            }
+            if v.is_empty() {
+                v.push(Act::U);
             }
             v
         }

@@ -15,12 +15,18 @@ import java.time.LocalTime
 import java.time.ZoneId
 import java.util.UUID
 
-/** A logged Plan B / EC dose, located within the planner's cycle grid. */
-private data class EcDose(
+private data class IncidentExposure(
+    val event: DayEventEntity,
     val row: Int,
     val day: Int,
-    val type: EcModel.EcType,
-    val hours: Double?,
+    val dayWeight: DayWeight,
+    val ovulationMeanDay: Double,
+    val ovulationSdDays: Double,
+)
+
+private data class InFlightAggregation(
+    val realizedRisk: Double = 0.0,
+    val incidentLocks: List<DayOverride> = emptyList(),
 )
 
 /** Mirrors the Rust `EcEffectRequest` / `EcEffectResponse` JSON boundary. */
@@ -220,7 +226,7 @@ class PlannerRepository(
         val probe = bridge.planFromJson(probeJson).getOrNull()?.let {
             runCatching { PlannerJson.decodeFromString<PlannerResult>(it) }.getOrNull()
         }
-        val realized = if (
+        val inFlight = if (
             useCalendarCycles &&
             probe != null &&
             calendarCycles != null &&
@@ -234,10 +240,16 @@ class PlannerRepository(
                 plan = probe,
             )
         } else {
-            0.0
+            InFlightAggregation()
         }
-        val options = baseOptions.copy(realizedCumulativeRisk = realized)
-        val resultJson = if (realized > 0.0) {
+        val retainedLocks = (
+            baseOptions.initialActionLocks + inFlight.incidentLocks
+        ).distinctBy { it.yearIndex to it.day }
+        val options = baseOptions.copy(
+            realizedCumulativeRisk = inFlight.realizedRisk,
+            initialActionLocks = retainedLocks,
+        )
+        val resultJson = if (inFlight.realizedRisk > 0.0) {
             bridge.planFromJson(
                 PlannerJson.encodeToString(UserOptions.serializer(), options)
             ).getOrNull()
@@ -342,60 +354,86 @@ class PlannerRepository(
         events: List<DayEventEntity>,
         coverageCycles: List<CycleCalculator.DerivedCycle>,
         plan: PlannerResult,
-    ): Double {
-        val currentStart = periods.maxOfOrNull { it.startDate } ?: return 0.0
+    ): InFlightAggregation {
+        val currentStart = periods.maxOfOrNull { it.startDate } ?: return InFlightAggregation()
         val today = LocalDate.now().toEpochDay()
         val persistentResidual = plan.validation.methodLibrary.persistentMethodResidual
-        if (!persistentResidual.isFinite()) return 0.0
+        if (!persistentResidual.isFinite()) return InFlightAggregation()
 
-        // Plan B / EC doses in the active window, mapped to (row, dayInCycle).
         val doses = events.asSequence()
             .filter { it.date in currentStart..today && it.kind == "plan_b_taken" }
             .mapNotNull { ev ->
                 val info = cycleCalc.dateToCycleDay(LocalDate.ofEpochDay(ev.date), coverageCycles)
                     ?: return@mapNotNull null
                 EcModel.EcType.fromWire(ev.ecType)?.let { type ->
-                    EcDose(info.first, info.second, type, ev.hoursFromAct)
+                    EcModel.TimedDose(ev.id, info.first, info.second, type, ev.hoursFromAct)
                 }
             }
             .toList()
 
-        var incidentUpperBound = 0.0
-        var embeddedPlanRisk = 0.0
-        events
+        val incidents = events
             .asSequence()
             .filter {
                 it.date in currentStart..today &&
                     (it.kind == "condom_broke" || it.kind == "unplanned_unprotected")
             }
-            .groupBy { it.date }
-            .forEach { (epochDay, dayEvents) ->
-                val info = cycleCalc.dateToCycleDay(LocalDate.ofEpochDay(epochDay), coverageCycles)
-                    ?: return@forEach
-                val year = plan.years.getOrNull(info.first) ?: return@forEach
-                val dayWeight = year.dayWeights.getOrNull(info.second - 1) ?: return@forEach
-                // Strongest EC dose covering an act on this day (dose on/after it).
+            .mapNotNull { event ->
+                val info = cycleCalc.dateToCycleDay(
+                    LocalDate.ofEpochDay(event.date),
+                    coverageCycles,
+                ) ?: return@mapNotNull null
+                val year = plan.years.getOrNull(info.first) ?: return@mapNotNull null
+                val dayWeight = year.dayWeights.getOrNull(info.second - 1) ?: return@mapNotNull null
                 val ovuMean = year.signalSummary?.posteriorOvulationMeanDay
                     ?: (year.cycleLengthDays - 14).toDouble()
                 val ovuSd = year.signalSummary?.posteriorOvulationSdDays ?: settings.ovulationSdDays
-                var ecMultiplier = 1.0
-                for (dose in doses) {
-                    if (dose.row == info.first && dose.day >= info.second) {
-                        val est = estimateEcEffect(
-                            dose.type, dose.hours, info.second.toDouble(), ovuMean, ovuSd,
-                        )
-                        ecMultiplier = minOf(ecMultiplier, est.conceptionMultiplier)
-                    }
-                }
-                incidentUpperBound += dayEvents.size *
-                    dayWeight.perActConceptionProbability *
-                    persistentResidual *
-                    ecMultiplier
-                embeddedPlanRisk += dayWeight.recommendedRiskProbability
+                IncidentExposure(event, info.first, info.second, dayWeight, ovuMean, ovuSd)
             }
+            .toList()
+        if (incidents.isEmpty()) return InFlightAggregation()
 
-        return (incidentUpperBound - embeddedPlanRisk)
-            .coerceIn(0.0, settings.targetCumulativeFailure)
+        val timedIncidents = incidents.map {
+            EcModel.TimedIncident(it.event.id, it.row, it.day, it.event.occurredAt)
+        }
+        val doseMatches = doses.associateWith { EcModel.matchedIncidentId(it, timedIncidents) }
+
+        var incidentUpperBound = 0.0
+        for (incident in incidents) {
+            var ecMultiplier = 1.0
+            for ((dose, incidentId) in doseMatches) {
+                if (incidentId == incident.event.id) {
+                    val est = estimateEcEffect(
+                        dose.type,
+                        dose.hoursFromAct,
+                        incident.day.toDouble(),
+                        incident.ovulationMeanDay,
+                        incident.ovulationSdDays,
+                    )
+                    // Budget against the least-effective modeled scenario.
+                    ecMultiplier = minOf(ecMultiplier, est.conceptionMultiplierHigh)
+                }
+            }
+            incidentUpperBound += incident.dayWeight.perActConceptionProbability *
+                persistentResidual * ecMultiplier
+        }
+
+        val incidentDays = incidents.distinctBy { it.row to it.day }
+        val embeddedPlanSurvival = incidentDays.fold(1.0) { survival, incident ->
+            survival * (1.0 - incident.dayWeight.recommendedRiskProbability)
+        }
+        val incidentRisk = incidentUpperBound.coerceIn(0.0, 0.999)
+        val embeddedPlanRisk = (1.0 - embeddedPlanSurvival).coerceIn(0.0, 0.999)
+        val conditionalIncrement = if (incidentRisk > embeddedPlanRisk) {
+            ((incidentRisk - embeddedPlanRisk) / (1.0 - embeddedPlanRisk)).coerceIn(0.0, 0.999)
+        } else {
+            0.0
+        }
+        return InFlightAggregation(
+            realizedRisk = conditionalIncrement,
+            incidentLocks = incidentDays.map {
+                DayOverride(it.row, it.day, it.dayWeight.recommendedAction)
+            },
+        )
     }
 
     private fun buildLoggedActionLocks(

@@ -60,7 +60,7 @@ describe("computeInFlightRealizedRisk", () => {
     ];
     const { realized } = computeInFlightRealizedRisk(days, NO_METHOD);
     // Replace the protected per-day contribution (0.008) with one full failed act (0.23).
-    expect(realized).toBeCloseTo(0.23 - 0.008, 6);
+    expect(realized).toBeCloseTo((0.23 - 0.008) / (1 - 0.008), 6);
   });
 
   it("does not apply an EC credit when no EC estimator is supplied", () => {
@@ -143,6 +143,63 @@ describe("computeInFlightRealizedRisk", () => {
     ];
     const { realized } = computeInFlightRealizedRisk(days, NO_METHOD, ecEffect);
     expect(realized).toBeCloseTo(0.23, 6); // day-14 act uncovered → full per-act
+  });
+
+  it("does not invent EC timing when hours-from-act is missing", () => {
+    const ecEffect: EcEffectFn = () => ({ conceptionMultiplier: 0.1, ovulationDelayDays: 2 });
+    const days: InFlightDay[] = [
+      {
+        cycleDay: 12,
+        dayWeight: peakDay(),
+        log: {
+          events: [
+            { id: "act", kind: "unplanned_unprotected", occurredAt: "2026-06-12T10:00:00Z" },
+            {
+              id: "dose",
+              kind: "plan_b_taken",
+              ecType: "levonorgestrel",
+              occurredAt: "2026-06-12T22:00:00Z",
+            },
+          ],
+        },
+      },
+    ];
+
+    expect(computeInFlightRealizedRisk(days, NO_METHOD, ecEffect).realized).toBeCloseTo(0.23, 6);
+  });
+
+  it("does not reuse one dose's delay for an incompatible earlier act", () => {
+    const ecEffect: EcEffectFn = () => ({ conceptionMultiplier: 0.1, ovulationDelayDays: 2 });
+    const days: InFlightDay[] = [
+      {
+        cycleDay: 10,
+        dayWeight: peakDay(),
+        log: {
+          events: [
+            { id: "old-act", kind: "unplanned_unprotected", occurredAt: "2026-06-10T10:00:00Z" },
+          ],
+        },
+      },
+      {
+        cycleDay: 14,
+        dayWeight: peakDay(),
+        log: {
+          events: [
+            { id: "recent-act", kind: "unplanned_unprotected", occurredAt: "2026-06-14T09:00:00Z" },
+            {
+              id: "dose",
+              kind: "plan_b_taken",
+              ecType: "levonorgestrel",
+              hoursFromAct: 12,
+              occurredAt: "2026-06-14T21:00:00Z",
+            },
+          ],
+        },
+      },
+    ];
+
+    const { realized } = computeInFlightRealizedRisk(days, NO_METHOD, ecEffect);
+    expect(realized).toBeCloseTo(0.23 + 0.23 * 0.1, 6);
   });
 
   it("sums multiple incidents conservatively instead of assuming independence", () => {

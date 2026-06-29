@@ -70,23 +70,67 @@ export type InFlightRealizedResult = {
   ovulationDelayDays: number;
 };
 
+type IncidentExposure = {
+  id: string;
+  cycleDay: number;
+  occurredAt: string;
+  dayWeight: RealizedDayWeight;
+};
+
+type EcDose = {
+  cycleDay: number;
+  ecType: EcType;
+  hoursFromAct?: number;
+};
+
+function ecWindowHours(ecType: EcType): number {
+  return ecType === "levonorgestrel" ? 72 : 120;
+}
+
+/**
+ * With calendar dates but no authoritative act time, an N-day date gap can
+ * represent between (N−1)*24 and (N+1)*24 elapsed hours. Reject combinations
+ * that cannot be true; this prevents a dose logged days later with "12 hours"
+ * from being credited to every earlier act.
+ */
+function timingFitsCalendarDays(actDay: number, doseDay: number, hours: number): boolean {
+  const dayGap = doseDay - actDay;
+  if (dayGap < 0 || !Number.isFinite(hours) || hours < 0) return false;
+  const minHours = Math.max(0, (dayGap - 1) * 24);
+  const maxHours = (dayGap + 1) * 24;
+  return hours >= minHours && hours <= maxHours;
+}
+
+function matchedIncidentId(dose: EcDose, incidents: IncidentExposure[]): string | undefined {
+  const hours = dose.hoursFromAct;
+  if (hours == null || hours > ecWindowHours(dose.ecType)) return undefined;
+  return incidents
+    .filter((incident) => timingFitsCalendarDays(incident.cycleDay, dose.cycleDay, hours))
+    .sort((left, right) => {
+      if (left.cycleDay !== right.cycleDay) return left.cycleDay - right.cycleDay;
+      return Date.parse(left.occurredAt) - Date.parse(right.occurredAt);
+    })
+    .at(-1)?.id;
+}
+
 /**
  * Aggregate in-flight realized risk across the cycle's days.
  *
  * Each explicit incident is one known act, priced with the per-act probability.
- * If a Plan B / EC dose was taken *on or after* the incident's day this cycle,
- * the incident's risk is multiplied by the EC conception multiplier (hormonal EC
- * cannot undo an act that happened after the dose). The strongest covering dose
- * is applied. Incident marginals are summed (union bound), and each incident
- * day's already-embedded plan risk is subtracted once to avoid double-counting
- * the planner's frequency-spread contribution.
+ * A timed EC dose is assigned only to the most recent incident compatible with
+ * its calendar date and hours-from-act; one dose is never reused with the same
+ * delay for every earlier act. Missing or contradictory timing receives no
+ * numeric credit. Incident marginals are summed (union bound), then converted
+ * to the conditional increment that replaces the risk already embedded in the
+ * retained plan.
  */
 export function computeInFlightRealizedRisk(
   days: InFlightDay[],
   residuals: MethodResiduals,
   ecEffect?: EcEffectFn,
 ): InFlightRealizedResult {
-  const planBEvents: { cycleDay: number; ecType: EcType; hoursFromAct?: number }[] = [];
+  const planBEvents: EcDose[] = [];
+  const incidents: IncidentExposure[] = [];
   for (const day of days) {
     for (const event of day.log?.events ?? []) {
       if (event.kind === "plan_b_taken") {
@@ -95,37 +139,52 @@ export function computeInFlightRealizedRisk(
           ecType: event.ecType,
           hoursFromAct: event.hoursFromAct,
         });
+      } else if (event.kind === "condom_broke" || event.kind === "unplanned_unprotected") {
+        incidents.push({
+          id: event.id,
+          cycleDay: day.cycleDay,
+          occurredAt: event.occurredAt,
+          dayWeight: day.dayWeight,
+        });
       }
     }
   }
   const hadEc = planBEvents.length > 0;
+  const doseMatches = planBEvents.map((dose) => ({
+    dose,
+    incidentId: matchedIncidentId(dose, incidents),
+  }));
 
   let incidentUpperBound = 0;
-  let embeddedPlanRisk = 0;
+  let embeddedPlanSurvival = 1;
   let ovulationDelayDays = 0;
 
   for (const day of days) {
-    const incidentCount = (day.log?.events ?? []).filter(
+    const dayIncidents = (day.log?.events ?? []).filter(
       (e) => e.kind === "condom_broke" || e.kind === "unplanned_unprotected",
-    ).length;
-    if (incidentCount === 0) continue;
+    );
+    if (dayIncidents.length === 0) continue;
 
-    // Strongest EC dose covering an act on this day (dose taken on/after the act).
-    let ecMultiplier = 1;
-    if (ecEffect) {
-      for (const pb of planBEvents) {
-        if (pb.cycleDay + 1e-9 >= day.cycleDay) {
-          const eff = ecEffect(pb.ecType, pb.hoursFromAct, day.cycleDay);
-          ecMultiplier = Math.min(ecMultiplier, eff.conceptionMultiplier);
-          ovulationDelayDays = Math.max(ovulationDelayDays, eff.ovulationDelayDays);
+    for (const incident of dayIncidents) {
+      let ecMultiplier = 1;
+      if (ecEffect) {
+        for (const { dose, incidentId } of doseMatches) {
+          if (incidentId === incident.id) {
+            const eff = ecEffect(dose.ecType, dose.hoursFromAct, day.cycleDay);
+            ecMultiplier = Math.min(ecMultiplier, eff.conceptionMultiplier);
+            ovulationDelayDays = Math.max(ovulationDelayDays, eff.ovulationDelayDays);
+          }
         }
       }
+      incidentUpperBound += perActUnprotected(day.dayWeight, residuals) * ecMultiplier;
     }
-
-    incidentUpperBound += incidentCount * perActUnprotected(day.dayWeight, residuals) * ecMultiplier;
-    embeddedPlanRisk += day.dayWeight.recommendedRiskProbability;
+    embeddedPlanSurvival *= 1 - day.dayWeight.recommendedRiskProbability;
   }
 
-  const realized = Math.min(0.999, Math.max(0, incidentUpperBound - embeddedPlanRisk));
+  const incidentRisk = Math.min(0.999, Math.max(0, incidentUpperBound));
+  const embeddedPlanRisk = Math.min(0.999, Math.max(0, 1 - embeddedPlanSurvival));
+  const realized = incidentRisk > embeddedPlanRisk
+    ? Math.min(0.999, (incidentRisk - embeddedPlanRisk) / (1 - embeddedPlanRisk))
+    : 0;
   return { realized, hadEc, ovulationDelayDays };
 }

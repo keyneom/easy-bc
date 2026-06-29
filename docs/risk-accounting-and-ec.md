@@ -54,10 +54,12 @@ The web and Android aggregators:
 1. consider only `condom_broke` and `unplanned_unprotected` events in the
    active cycle;
 2. price each as a known act;
-3. subtract the plan probability already embedded on each incident day once,
-   avoiding double-counting; and
-4. sum event marginals as a conservative union bound, capped by the user's
-   target.
+3. retain the probe plan's action on each incident day;
+4. compose the embedded day probabilities through survival and convert the
+   difference into a conditional increment, so recomposition with the retained
+   plan exactly replaces the embedded risk in the one-incident case; and
+5. sum event marginals as a conservative union bound without hiding exposure
+   that exceeds the user's target.
 
 The union bound is deliberate. Incidents in one cycle share the same unknown
 ovulation day, so multiplying marginal survival probabilities would falsely
@@ -66,9 +68,10 @@ the latent ovulation day.
 
 ## In-flight depletion and release
 
-While the cycle outcome is unknown, incident risk reduces the future-risk
-budget. Independent cumulative probabilities compose through survival, so the
-core solves:
+While the cycle outcome is unknown, the incident aggregator supplies the
+conditional additional risk not already represented by retained incident-day
+plan entries. That adjustment reduces the future-risk budget. Independent
+cumulative probabilities compose through survival, so the core solves:
 
 ```text
 1 - (1 - realized) × (1 - future) <= target
@@ -125,20 +128,28 @@ fertility share one latent ovulation day. `P(EC fails | o, t, type)` is computed
   floor) — the most effective option.
 
 Dose timing enters only through `t`, so "sooner is better" emerges from the
-integral rather than a hand-tuned timeliness table. Three potency presets
-(central / optimistic / conservative) bracket parameter uncertainty, so the
-estimate is reported as a range, not a false point value. The model also returns
-an expected ovulation-delay (the share of ovulation mass still ahead of the dose
-× a method maximum), which informs the next-period guidance.
+integral rather than a hand-tuned timeliness table. Three potency scenarios
+(central / optimistic / conservative) expose sensitivity to model assumptions;
+they are not statistical confidence or credible intervals. Both clients budget
+against the conservative scenario (the highest residual-risk multiplier).
+
+A dose is assigned only to the most recent incident compatible with its
+calendar date and entered hours-from-act. It is not reused with the same delay
+for every earlier act. Missing or contradictory timing receives no numeric
+credit. LNG is credited only through 72 hours; ulipristal and copper IUD through
+120 hours. The model also returns an informational expected ovulation delay, but
+the current risk budget does not use that secondary output.
 
 ### Calibration and limits
 
-The failure floors and lead-time windows are chosen so a representative dose
-lands in published real-world efficacy ranges (levonorgestrel ≈ 50–85%,
-ulipristal higher, copper IUD > 99%); `ec.rs` tests assert the central estimate
-stays in a defensible band rather than a precise number. **Not modeled:**
-body-weight/BMI effects on levonorgestrel, drug interactions, pharmacokinetics.
-This is a planning estimate, not clinical efficacy or medical advice.
+The failure floors and lead-time windows are explicit modeling assumptions
+chosen so representative scenarios remain compatible with published outcome
+and pharmacodynamic evidence. They are not fitted patient-level efficacy
+curves. Tests enforce monotonicity, method ordering, window handling, scenario
+ordering, and stable reference outputs rather than claiming clinical
+validation. **Not modeled:** body-weight/BMI effects on levonorgestrel, drug
+interactions, or pharmacokinetics. This is a conservative planning estimate,
+not clinical efficacy or medical advice.
 
 Sources:
 

@@ -28,6 +28,6 @@ pub enum PlannerError {
     InvalidDayOverride,
     #[error("calendar_cycles invalid or horizon length out of range")]
     CalendarCyclesOutOfRange,
-    #[error("realized_cumulative_risk must be >= 0 and <= target_cumulative_failure")]
+    #[error("realized_cumulative_risk must be >= 0 and < 1")]
     RealizedRiskOutOfRange,
 }

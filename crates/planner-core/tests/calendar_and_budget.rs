@@ -252,6 +252,24 @@ fn realized_and_future_risk_compose_to_the_target() {
 }
 
 #[test]
+fn realized_risk_above_target_is_preserved_and_reported() {
+    let out = fertility_risk_planner(UserOptions {
+        target_cumulative_failure: 0.05,
+        realized_cumulative_risk: 0.23,
+        horizon_years: 1,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_eq!(out.options_used.realized_cumulative_risk, 0.23);
+    assert!(!out.target_met);
+    assert!(out.warnings.iter().any(|warning| matches!(
+        warning,
+        planner_core::PlannerWarning::RealizedRiskExceedsTarget { .. }
+    )));
+}
+
+#[test]
 fn locked_actuals_can_spend_reserve_without_forcing_full_recovery() {
     let calendar_cycles = (0..40)
         .map(|_| CycleInstance {
@@ -550,6 +568,15 @@ fn nfp_only_mode_does_not_emit_protected_or_withdrawal_actions() {
         .day_weights
         .iter()
         .all(|day| day.recommended_action != RecommendedAction::W));
+    assert!(
+        out.target_met,
+        "NFP-only mode must still use abstinence to meet the target: risk={}, counts={:?}",
+        out.achieved_cumulative_risk, out.years[0].counts,
+    );
+    assert!(
+        out.years[0].counts.abstain > 0,
+        "a strict NFP-only plan should contain abstinent days"
+    );
 }
 
 #[test]

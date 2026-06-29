@@ -142,6 +142,9 @@ class MockPlannerBridge : PlannerBridge {
             )
         }
 
+        val futureRisk = (1.0 - cumulativeSurv).coerceIn(0.0, 1.0)
+        val projectedRisk = 1.0 -
+            (1.0 - opts.realizedCumulativeRisk) * (1.0 - futureRisk)
         return PlannerResult(
             optionsUsed = opts,
             derivedUxWeights = DerivedUxWeights(
@@ -160,9 +163,18 @@ class MockPlannerBridge : PlannerBridge {
                     CondomMode.Custom -> opts.customCondomResidual
                 },
             ),
-            achievedCumulativeRisk = (1.0 - cumulativeSurv).coerceIn(0.0, 1.0),
-            targetMet = (1.0 - cumulativeSurv) <= opts.targetCumulativeFailure,
-            warnings = emptyList(),
+            achievedCumulativeRisk = futureRisk,
+            targetMet = projectedRisk <= opts.targetCumulativeFailure,
+            warnings = if (opts.realizedCumulativeRisk > opts.targetCumulativeFailure) {
+                listOf(
+                    PlannerWarning(
+                        kind = "realized_risk_exceeds_target",
+                        message = "Logged in-flight exposure already exceeds the selected target.",
+                    )
+                )
+            } else {
+                emptyList()
+            },
             years = years,
         )
     }

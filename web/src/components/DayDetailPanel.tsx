@@ -271,7 +271,7 @@ export function DayDetailPanel({
                     </select>
                   </label>
                   <label>
-                    Hours since the act (optional)
+                    Hours since the act — needed for the dose to affect the estimate
                     <input
                       type="number"
                       min={0}
