@@ -12,8 +12,8 @@ import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
 
-class GoogleDriveSyncClient {
-    suspend fun findSnapshot(accessToken: String): DriveSnapshot? = withContext(Dispatchers.IO) {
+open class GoogleDriveSyncClient {
+    open suspend fun findSnapshot(accessToken: String): DriveSnapshot? = withContext(Dispatchers.IO) {
         val query = URLEncoder.encode("name = '$SYNC_FILE_NAME' and trashed = false", Charsets.UTF_8.name())
         val url = "https://www.googleapis.com/drive/v3/files" +
             "?spaces=appDataFolder&q=$query&fields=files(id,name,modifiedTime)&pageSize=1"
@@ -28,7 +28,7 @@ class GoogleDriveSyncClient {
         DriveSnapshot(fileId, SyncCrypto.parseEnvelope(body))
     }
 
-    suspend fun writeSnapshot(
+    open suspend fun writeSnapshot(
         accessToken: String,
         envelope: SyncEnvelopeV1,
         fileId: String? = null,
@@ -72,7 +72,7 @@ class GoogleDriveSyncClient {
             ?: error("Google Drive did not return a file id.")
     }
 
-    suspend fun deleteSnapshot(accessToken: String, fileId: String) = withContext(Dispatchers.IO) {
+    open suspend fun deleteSnapshot(accessToken: String, fileId: String) = withContext(Dispatchers.IO) {
         request(
             "https://www.googleapis.com/drive/v3/files/${encode(fileId)}",
             accessToken,

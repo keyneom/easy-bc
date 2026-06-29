@@ -87,6 +87,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        cloudAutoSyncSession.onBackground()
         (application as EasyBCApp).cloudSyncActivityStopped()
         super.onStop()
     }

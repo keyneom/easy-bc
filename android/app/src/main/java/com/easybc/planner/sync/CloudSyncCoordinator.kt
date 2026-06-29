@@ -5,7 +5,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 class CloudSyncCoordinator(
-    private val store: SyncPayloadStore,
+    private val store: SyncPayloadGateway,
     private val drive: GoogleDriveSyncClient = GoogleDriveSyncClient(),
     private val passkeys: PasskeyPrfClient = PasskeyPrfClient(),
     private val keySession: CloudSyncKeySession = CloudSyncKeySession,
@@ -114,17 +114,24 @@ class CloudSyncCoordinator(
             }
             keySession.remember(existing.envelope, contentKey)
             val merged = SyncMerge.merge(remote, local)
-            val envelope = SyncCrypto.encryptWithContentKey(
-                merged,
-                contentKey,
-                existing.envelope.credentialId,
-                existing.envelope.rpId,
-                SyncCrypto.decodeBase64Url(existing.envelope.prfInput),
-                SyncCrypto.decodeBase64Url(existing.envelope.kdfSalt),
-            )
-            drive.writeSnapshot(accessToken, envelope, existing.fileId)
+            val cloudChanged = SyncCrypto.stableFingerprint(merged) !=
+                SyncCrypto.stableFingerprint(remote)
+            val syncedAt = if (cloudChanged) {
+                val envelope = SyncCrypto.encryptWithContentKey(
+                    merged,
+                    contentKey,
+                    existing.envelope.credentialId,
+                    existing.envelope.rpId,
+                    SyncCrypto.decodeBase64Url(existing.envelope.prfInput),
+                    SyncCrypto.decodeBase64Url(existing.envelope.kdfSalt),
+                )
+                drive.writeSnapshot(accessToken, envelope, existing.fileId)
+                envelope.updatedAt
+            } else {
+                existing.envelope.updatedAt
+            }
             store.apply(merged)
-            store.rememberSync(existing.fileId, envelope.updatedAt)
+            store.rememberSync(existing.fileId, syncedAt)
             return if (operation == CloudSyncOperation.ENABLE) {
                 "Encrypted cloud sync is enabled on this device and the latest records were merged."
             } else {

@@ -18,8 +18,8 @@ import kotlinx.serialization.json.put
  * Evaluates the WebAuthn PRF extension through Android Credential Manager.
  * The request/response JSON is the same WebAuthn JSON used by the web app.
  */
-class PasskeyPrfClient {
-    suspend fun create(activity: Activity): PasskeyMaterial {
+open class PasskeyPrfClient {
+    open suspend fun create(activity: Activity): PasskeyMaterial {
         val prfInput = SyncCrypto.randomBytes(32)
         val kdfSalt = SyncCrypto.randomBytes(32)
         val request = createRequest(prfInput)
@@ -35,7 +35,7 @@ class PasskeyPrfClient {
         return PasskeyMaterial(credentialId, prfInput, kdfSalt, secret)
     }
 
-    suspend fun unlock(activity: Activity, credentialId: String, prfInput: String): ByteArray {
+    open suspend fun unlock(activity: Activity, credentialId: String, prfInput: String): ByteArray {
         val option = GetPublicKeyCredentialOption(getRequest(credentialId, prfInput).toString())
         val response = CredentialManager.create(activity).getCredential(
             context = activity,

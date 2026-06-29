@@ -12,10 +12,17 @@ import kotlinx.serialization.encodeToString
 import java.time.Instant
 import java.time.LocalDate
 
-class SyncPayloadStore(private val db: AppDatabase) {
+interface SyncPayloadGateway {
+    suspend fun localPayload(): SyncPayloadV1
+    suspend fun apply(payload: SyncPayloadV1)
+    suspend fun rememberSync(fileId: String, syncedAt: String)
+    suspend fun forgetSync()
+}
+
+class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
     private val json get() = SyncCrypto.json
 
-    suspend fun localPayload(): SyncPayloadV1 {
+    override suspend fun localPayload(): SyncPayloadV1 {
         val settings = db.userSettingsDao().getSettings() ?: UserSettingsEntity()
         val metadata = db.syncMetadataDao().getAll().associate { it.key to it.value }
         val preserved = metadata[META_PRESERVED_WEB]?.let {
@@ -173,7 +180,7 @@ class SyncPayloadStore(private val db: AppDatabase) {
         )
     }
 
-    suspend fun apply(payload: SyncPayloadV1) = db.withTransaction {
+    override suspend fun apply(payload: SyncPayloadV1) = db.withTransaction {
         val current = db.userSettingsDao().getSettings() ?: UserSettingsEntity()
         val planner = payload.planner.value
         val prefs = payload.androidPreferences?.value
@@ -312,12 +319,12 @@ class SyncPayloadStore(private val db: AppDatabase) {
 
     suspend fun lastSyncedAt(): String? = db.syncMetadataDao().get(META_LAST_SYNCED)?.value
 
-    suspend fun rememberSync(fileId: String, syncedAt: String) {
+    override suspend fun rememberSync(fileId: String, syncedAt: String) {
         putMetadata(META_FILE_ID, fileId)
         putMetadata(META_LAST_SYNCED, syncedAt)
     }
 
-    suspend fun forgetSync() {
+    override suspend fun forgetSync() {
         db.syncMetadataDao().delete(META_FILE_ID)
         db.syncMetadataDao().delete(META_LAST_SYNCED)
     }

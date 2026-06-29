@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.encodeToString
 
 /**
  * Session-scoped encrypted cloud autosync.
@@ -36,6 +35,7 @@ class CloudAutoSyncSession(
 ) {
     private var started = false
     private var hasForegrounded = false
+    private var hiddenAt: Long? = null
     private var lastSyncedFingerprint: String? = null
     private var sessionScope: CoroutineScope? = null
     private val syncMutex = Mutex()
@@ -66,8 +66,14 @@ class CloudAutoSyncSession(
     fun onForeground() {
         if (!hasForegrounded) {
             hasForegrounded = true
+            hiddenAt = null
             return
         }
+        val wentDarkAt = hiddenAt
+        hiddenAt = null
+        if (wentDarkAt == null) return
+        if (System.currentTimeMillis() - wentDarkAt < FOREGROUND_SYNC_MIN_HIDDEN_MS) return
+        if (syncMutex.isLocked) return
         sessionScope?.launch {
             if (store.fileId() == null) return@launch
             runCatching { syncIfChanged(force = true) }
@@ -75,6 +81,10 @@ class CloudAutoSyncSession(
                     if (BuildConfig.DEBUG) Log.w(TAG, "Encrypted foreground sync failed", error)
                 }
         }
+    }
+
+    fun onBackground() {
+        hiddenAt = System.currentTimeMillis()
     }
 
     private suspend fun syncIfChanged(force: Boolean = false) = syncMutex.withLock {
@@ -101,9 +111,10 @@ class CloudAutoSyncSession(
         }
 
     private fun fingerprint(payload: SyncPayloadV1): String =
-        SyncCrypto.json.encodeToString(payload.copy(exportedAt = SYNC_EPOCH))
+        SyncCrypto.stableFingerprint(payload)
 
     companion object {
         private const val TAG = "CloudAutoSync"
+        internal const val FOREGROUND_SYNC_MIN_HIDDEN_MS = 30_000L
     }
 }

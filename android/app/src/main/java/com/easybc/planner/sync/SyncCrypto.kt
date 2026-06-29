@@ -144,6 +144,14 @@ object SyncCrypto {
             throw IllegalArgumentException("The Drive file is not a supported EasyBC encrypted snapshot.", error)
         }
 
+    /**
+     * Stable fingerprint for "did anything user-authored change?" comparisons.
+     * Volatile metadata such as [SyncPayloadV1.exportedAt] is normalized so an
+     * untouched payload always serializes to the same string.
+     */
+    internal fun stableFingerprint(payload: SyncPayloadV1): String =
+        json.encodeToString(payload.copy(exportedAt = SYNC_EPOCH))
+
     private fun validateEnvelope(envelope: SyncEnvelopeV1) {
         require(envelope.schemaVersion == 1)
         require(envelope.algorithm == "AES-256-GCM+HKDF-SHA-256")
