@@ -7,11 +7,17 @@ import com.easybc.planner.calendar.CalendarAutoSync
 import com.easybc.planner.calendar.EasyBCCalendarSync
 import com.easybc.planner.data.PlannerRepository
 import com.easybc.planner.data.db.AppDatabase
+import com.easybc.planner.sync.CloudSyncKeySession
 import com.easybc.planner.util.CycleCalculator
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class EasyBCApp : Application() {
+    private var foregroundActivityCount = 0
+    private var cloudKeyExpiryJob: Job? = null
 
     /**
      * Application-scoped coroutine scope for long-running collectors (e.g.
@@ -42,5 +48,32 @@ class EasyBCApp : Application() {
         // flips `calendarSyncEnabled` on in Settings, at which point it
         // begins debounced resyncs on every data change.
         calendarAutoSync.start()
+    }
+
+    @Synchronized
+    fun cloudSyncActivityStarted() {
+        foregroundActivityCount += 1
+        cloudKeyExpiryJob?.cancel()
+        cloudKeyExpiryJob = null
+    }
+
+    @Synchronized
+    fun cloudSyncActivityStopped() {
+        foregroundActivityCount = (foregroundActivityCount - 1).coerceAtLeast(0)
+        if (foregroundActivityCount != 0) return
+        cloudKeyExpiryJob?.cancel()
+        cloudKeyExpiryJob = appScope.launch {
+            delay(CLOUD_KEY_BACKGROUND_GRACE_MS)
+            synchronized(this@EasyBCApp) {
+                if (foregroundActivityCount == 0) {
+                    CloudSyncKeySession.clear()
+                    cloudKeyExpiryJob = null
+                }
+            }
+        }
+    }
+
+    companion object {
+        internal const val CLOUD_KEY_BACKGROUND_GRACE_MS = 15 * 60 * 1_000L
     }
 }

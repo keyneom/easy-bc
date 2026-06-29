@@ -23,7 +23,10 @@ export function randomBytes(length: number): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(length));
 }
 
-async function deriveContentKey(prfSecret: Uint8Array, salt: Uint8Array): Promise<CryptoKey> {
+export async function deriveContentKey(
+  prfSecret: Uint8Array,
+  salt: Uint8Array,
+): Promise<CryptoKey> {
   const material = await crypto.subtle.importKey("raw", prfSecret, "HKDF", false, ["deriveKey"]);
   return crypto.subtle.deriveKey(
     { name: "HKDF", hash: "SHA-256", salt, info: HKDF_INFO },
@@ -58,8 +61,26 @@ export async function encryptSyncPayload(
   prfInput: Uint8Array,
   kdfSalt: Uint8Array,
 ): Promise<SyncEnvelopeV1> {
-  const nonce = randomBytes(12);
   const key = await deriveContentKey(prfSecret, kdfSalt);
+  return encryptSyncPayloadWithKey(
+    payload,
+    key,
+    credentialId,
+    rpId,
+    prfInput,
+    kdfSalt,
+  );
+}
+
+export async function encryptSyncPayloadWithKey(
+  payload: SyncPayloadV1,
+  key: CryptoKey,
+  credentialId: string,
+  rpId: string,
+  prfInput: Uint8Array,
+  kdfSalt: Uint8Array,
+): Promise<SyncEnvelopeV1> {
+  const nonce = randomBytes(12);
   const plaintext = encoder.encode(JSON.stringify(payload));
   const compressed = await gzip(plaintext);
   const useCompression = compressed.length < plaintext.length;
@@ -87,6 +108,13 @@ export async function decryptSyncPayload(
   prfSecret: Uint8Array,
 ): Promise<SyncPayloadV1> {
   const key = await deriveContentKey(prfSecret, base64UrlToBytes(envelope.kdfSalt));
+  return decryptSyncPayloadWithKey(envelope, key);
+}
+
+export async function decryptSyncPayloadWithKey(
+  envelope: SyncEnvelopeV1,
+  key: CryptoKey,
+): Promise<SyncPayloadV1> {
   try {
     const decrypted = new Uint8Array(await crypto.subtle.decrypt(
       {

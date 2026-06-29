@@ -66,6 +66,24 @@ class SyncCryptoTest {
     }
 
     @Test
+    fun roundTripsWithOnlyTheDerivedSessionKey() {
+        val payload = payload(age = 39, updatedAt = "2026-06-29T13:00:00Z")
+        val secret = ByteArray(32) { it.toByte() }
+        val salt = ByteArray(32) { (it + 32).toByte() }
+        val contentKey = SyncCrypto.deriveContentKey(secret, salt)
+        val envelope = SyncCrypto.encryptWithContentKey(
+            payload,
+            contentKey,
+            "credential",
+            SYNC_RP_ID,
+            ByteArray(32) { 7 },
+            salt,
+        )
+
+        assertEquals(payload, SyncCrypto.decryptWithContentKey(envelope, contentKey))
+    }
+
+    @Test
     fun compressesRepetitivePayloadBeforeEncryption() {
         val payload = payload(age = 41, updatedAt = "2026-06-21T13:00:00Z").copy(
             calendarDayLogs = mapOf(

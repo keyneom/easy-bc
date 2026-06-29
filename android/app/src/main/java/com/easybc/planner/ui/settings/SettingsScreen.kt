@@ -366,7 +366,8 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
 
     Text(
         "Merge planner settings, period records, and day logs through an encrypted Google Drive snapshot. " +
-            "EasyBC encrypts the snapshot before upload and only requests access to its own hidden app-data file.",
+            "EasyBC encrypts the snapshot before upload and only requests access to its own hidden app-data file. " +
+            "After passkey unlock, the encryption key stays only in app memory for automatic sync.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -435,6 +436,11 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         ) { Text("Enable encrypted cloud sync on this device") }
     }
     StatusRow(status = status, onDismiss = vm::dismissCloudStatus)
+    Text(
+        "Encrypted sync locks after EasyBC has been in the background for 15 minutes or its process ends.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 
     confirming?.let { operation ->
         AlertDialog(

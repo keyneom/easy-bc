@@ -11,6 +11,8 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 
 /**
@@ -18,9 +20,9 @@ import kotlinx.serialization.encodeToString
  *
  * This deliberately lives at the Activity layer, not Application scope, because
  * both Google authorization and Credential Manager passkey PRF prompts need a
- * foreground Activity. No cloud encryption key is cached; every sync evaluates
- * the passkey PRF, merges, writes, and then clears the secret in
- * [CloudSyncCoordinator].
+ * foreground Activity. [CloudSyncCoordinator] retains only the derived content
+ * key in process memory after the first passkey unlock, so subsequent changes
+ * in the same foreground session sync without another passkey prompt.
  */
 @OptIn(FlowPreview::class)
 class CloudAutoSyncSession(
@@ -33,11 +35,15 @@ class CloudAutoSyncSession(
     private val debounceMs: Long = 1_800L,
 ) {
     private var started = false
+    private var hasForegrounded = false
     private var lastSyncedFingerprint: String? = null
+    private var sessionScope: CoroutineScope? = null
+    private val syncMutex = Mutex()
 
     fun start(scope: CoroutineScope) {
         if (started) return
         started = true
+        sessionScope = scope
 
         scope.launch {
             combine(
@@ -57,10 +63,24 @@ class CloudAutoSyncSession(
         }
     }
 
-    private suspend fun syncIfChanged() {
+    fun onForeground() {
+        if (!hasForegrounded) {
+            hasForegrounded = true
+            return
+        }
+        sessionScope?.launch {
+            if (store.fileId() == null) return@launch
+            runCatching { syncIfChanged(force = true) }
+                .onFailure { error ->
+                    if (BuildConfig.DEBUG) Log.w(TAG, "Encrypted foreground sync failed", error)
+                }
+        }
+    }
+
+    private suspend fun syncIfChanged(force: Boolean = false) = syncMutex.withLock {
         val local = store.localPayload()
         val fingerprint = fingerprint(local)
-        if (fingerprint == lastSyncedFingerprint) return
+        if (!force && fingerprint == lastSyncedFingerprint) return@withLock
 
         // Do not repeatedly prompt for the same unchanged snapshot if the user
         // cancels Google/passkey auth. The next local data change will retry.

@@ -53,16 +53,48 @@ object SyncCrypto {
         kdfSalt: ByteArray,
         nonce: ByteArray,
     ): SyncEnvelopeV1 {
-        require(nonce.size == 12) { "AES-GCM nonce must be 12 bytes." }
         val key = deriveContentKey(secret, kdfSalt)
+        return try {
+            encryptWithContentKeyAndNonce(
+                payload, key, credentialId, rpId, prfInput, kdfSalt, nonce
+            )
+        } finally {
+            key.fill(0)
+        }
+    }
+
+    fun encryptWithContentKey(
+        payload: SyncPayloadV1,
+        contentKey: ByteArray,
+        credentialId: String,
+        rpId: String,
+        prfInput: ByteArray,
+        kdfSalt: ByteArray,
+    ): SyncEnvelopeV1 = encryptWithContentKeyAndNonce(
+        payload, contentKey, credentialId, rpId, prfInput, kdfSalt, randomBytes(12)
+    )
+
+    private fun encryptWithContentKeyAndNonce(
+        payload: SyncPayloadV1,
+        contentKey: ByteArray,
+        credentialId: String,
+        rpId: String,
+        prfInput: ByteArray,
+        kdfSalt: ByteArray,
+        nonce: ByteArray,
+    ): SyncEnvelopeV1 {
+        require(nonce.size == 12) { "AES-GCM nonce must be 12 bytes." }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            SecretKeySpec(contentKey, "AES"),
+            GCMParameterSpec(128, nonce),
+        )
         cipher.updateAAD(aad)
         val plaintext = json.encodeToString(payload).toByteArray(Charsets.UTF_8)
         val compressed = gzip(plaintext)
         val useCompression = compressed.size < plaintext.size
         val ciphertext = cipher.doFinal(if (useCompression) compressed else plaintext)
-        key.fill(0)
         return SyncEnvelopeV1(
             compression = if (useCompression) "gzip" else null,
             credentialId = credentialId,
@@ -76,13 +108,24 @@ object SyncCrypto {
     }
 
     fun decrypt(envelope: SyncEnvelopeV1, secret: ByteArray): SyncPayloadV1 {
-        validateEnvelope(envelope)
         val key = deriveContentKey(secret, decodeBase64Url(envelope.kdfSalt))
+        return try {
+            decryptWithContentKey(envelope, key)
+        } finally {
+            key.fill(0)
+        }
+    }
+
+    fun decryptWithContentKey(
+        envelope: SyncEnvelopeV1,
+        contentKey: ByteArray,
+    ): SyncPayloadV1 {
+        validateEnvelope(envelope)
         return try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(
                 Cipher.DECRYPT_MODE,
-                SecretKeySpec(key, "AES"),
+                SecretKeySpec(contentKey, "AES"),
                 GCMParameterSpec(128, decodeBase64Url(envelope.nonce)),
             )
             cipher.updateAAD(aad)
@@ -91,8 +134,6 @@ object SyncCrypto {
             json.decodeFromString(plaintext.toString(Charsets.UTF_8))
         } catch (error: Exception) {
             throw IllegalArgumentException("This passkey could not decrypt the EasyBC snapshot.", error)
-        } finally {
-            key.fill(0)
         }
     }
 
@@ -125,7 +166,7 @@ object SyncCrypto {
         GZIPInputStream(ByteArrayInputStream(input)).use { it.readBytes() }
 
     /** RFC 5869 HKDF-SHA-256, matching WebCrypto's HKDF deriveKey. */
-    private fun deriveContentKey(inputKeyMaterial: ByteArray, salt: ByteArray): ByteArray {
+    internal fun deriveContentKey(inputKeyMaterial: ByteArray, salt: ByteArray): ByteArray {
         val extract = Mac.getInstance("HmacSHA256")
         extract.init(SecretKeySpec(salt, "HmacSHA256"))
         val pseudoRandomKey = extract.doFinal(inputKeyMaterial)

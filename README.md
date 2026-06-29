@@ -12,7 +12,7 @@ All Android application data stays on the device unless you explicitly export a 
 
 ## Use on the web
 
-The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyneom.github.io/easy-bc/). It uses the same planner core and Android-inspired interface, with data stored in the browser on the current device. Optional encrypted sync stores only ciphertext in Google Drive's app-data folder and derives its cloud key from a passkey when the user explicitly syncs. All project paths under `keyneom.github.io` share one browser origin and must be treated as equally trusted; see the [hosting and passkey notes](docs/github-pages-passkeys.md).
+The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyneom.github.io/easy-bc/). It uses the same planner core and Android-inspired interface, with data stored in the browser on the current device. Optional encrypted sync stores only ciphertext in Google Drive's app-data folder. After passkey unlock, EasyBC retains only the derived content key in tab or Android-process memory so local changes can sync automatically without repeated prompts. The key is cleared when the tab/process ends or after the app remains backgrounded for 15 minutes. All project paths under `keyneom.github.io` share one browser origin and must be treated as equally trusted; see the [hosting and passkey notes](docs/github-pages-passkeys.md).
 
 For a local web build, install Rust and `wasm-bindgen-cli` 0.2.117, run `npm run build:wasm` from [`web/`](web/), then use the normal npm development or build command. Generated native and WebAssembly binaries are intentionally not committed; publication workflows rebuild them from source.
 

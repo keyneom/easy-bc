@@ -80,6 +80,17 @@ class MainActivity : ComponentActivity() {
         cloudAutoSyncSession.start(cloudAutoSyncScope)
     }
 
+    override fun onStart() {
+        super.onStart()
+        (application as EasyBCApp).cloudSyncActivityStarted()
+        cloudAutoSyncSession.onForeground()
+    }
+
+    override fun onStop() {
+        (application as EasyBCApp).cloudSyncActivityStopped()
+        super.onStop()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (shouldRouteToReconcile(intent)) {

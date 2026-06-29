@@ -2,7 +2,12 @@ import type { WasmOptions } from "../App";
 import { idbDelete, idbSet, KV_SYNC_STATE } from "../idbStore";
 import type { PersistedSession } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
-import { base64UrlToBytes, decryptSyncPayload, encryptSyncPayload } from "./crypto";
+import {
+  base64UrlToBytes,
+  decryptSyncPayloadWithKey,
+  deriveContentKey,
+  encryptSyncPayloadWithKey,
+} from "./crypto";
 import {
   deleteDriveSnapshot,
   findDriveSnapshot,
@@ -10,6 +15,7 @@ import {
   writeDriveSnapshot,
 } from "./googleDrive";
 import { createSyncPasskey, unlockSyncPasskey } from "./passkey";
+import { syncKeySession } from "./keySession";
 import {
   mergeSyncPayloads,
   portablePlannerOptions,
@@ -34,6 +40,8 @@ export type SyncRunResult =
       payload: null;
       message: string;
     };
+
+let syncOperationTail: Promise<void> = Promise.resolve();
 
 export function buildLocalSyncPayload(
   options: WasmOptions,
@@ -75,6 +83,7 @@ export async function rememberSyncState(
 }
 
 export async function forgetSyncState(): Promise<void> {
+  syncKeySession.clear();
   await idbDelete(KV_SYNC_STATE);
 }
 
@@ -83,7 +92,36 @@ export function formatLastSync(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+async function deriveSessionKey(secret: Uint8Array, salt: Uint8Array): Promise<CryptoKey> {
+  try {
+    return await deriveContentKey(secret, salt);
+  } finally {
+    secret.fill(0);
+  }
+}
+
 export async function runEncryptedSyncOperation({
+  operation,
+  clientId,
+  rpId,
+  local,
+}: {
+  operation: SyncOperation;
+  clientId: string;
+  rpId: string;
+  local: SyncPayloadV1;
+}): Promise<SyncRunResult> {
+  const result = syncOperationTail.then(() => runEncryptedSyncOperationNow({
+    operation,
+    clientId,
+    rpId,
+    local,
+  }));
+  syncOperationTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function runEncryptedSyncOperationNow({
   operation,
   clientId,
   rpId,
@@ -105,32 +143,31 @@ export async function runEncryptedSyncOperation({
       );
     }
     const passkey = await createSyncPasskey();
-    try {
-      const envelope = await encryptSyncPayload(
-        local,
-        passkey.secret,
-        passkey.credentialId,
-        passkey.rpId,
-        passkey.prfInput,
-        passkey.kdfSalt,
-      );
-      const fileId = await writeDriveSnapshot(token, envelope);
-      return {
-        operation,
-        fileId,
-        syncedAt: envelope.updatedAt,
-        payload: local,
-        message: "Encrypted cloud sync is set up. The cloud key was discarded after upload.",
-      };
-    } finally {
-      passkey.secret.fill(0);
-    }
+    const key = await deriveSessionKey(passkey.secret, passkey.kdfSalt);
+    const envelope = await encryptSyncPayloadWithKey(
+      local,
+      key,
+      passkey.credentialId,
+      passkey.rpId,
+      passkey.prfInput,
+      passkey.kdfSalt,
+    );
+    const fileId = await writeDriveSnapshot(token, envelope);
+    syncKeySession.remember(envelope, key);
+    return {
+      operation,
+      fileId,
+      syncedAt: envelope.updatedAt,
+      payload: local,
+      message: "Encrypted cloud sync is set up and unlocked for this app session.",
+    };
   }
 
   if (!existing) throw new Error("No EasyBC encrypted cloud snapshot was found in this Google Drive.");
 
   if (operation === "delete") {
     await deleteDriveSnapshot(token, existing.fileId);
+    syncKeySession.clear();
     return {
       operation,
       fileId: null,
@@ -141,27 +178,26 @@ export async function runEncryptedSyncOperation({
   }
 
   if (operation === "reset") {
+    syncKeySession.clear();
     const passkey = await createSyncPasskey();
-    try {
-      const envelope = await encryptSyncPayload(
-        local,
-        passkey.secret,
-        passkey.credentialId,
-        passkey.rpId,
-        passkey.prfInput,
-        passkey.kdfSalt,
-      );
-      await writeDriveSnapshot(token, envelope, existing.fileId);
-      return {
-        operation,
-        fileId: existing.fileId,
-        syncedAt: envelope.updatedAt,
-        payload: local,
-        message: "The encrypted cloud snapshot now uses the new passkey and this device's local data.",
-      };
-    } finally {
-      passkey.secret.fill(0);
-    }
+    const key = await deriveSessionKey(passkey.secret, passkey.kdfSalt);
+    const envelope = await encryptSyncPayloadWithKey(
+      local,
+      key,
+      passkey.credentialId,
+      passkey.rpId,
+      passkey.prfInput,
+      passkey.kdfSalt,
+    );
+    await writeDriveSnapshot(token, envelope, existing.fileId);
+    syncKeySession.remember(envelope, key);
+    return {
+      operation,
+      fileId: existing.fileId,
+      syncedAt: envelope.updatedAt,
+      payload: local,
+      message: "The encrypted cloud snapshot now uses the new passkey and this device's local data.",
+    };
   }
 
   if (existing.envelope.rpId !== rpId) {
@@ -170,34 +206,39 @@ export async function runEncryptedSyncOperation({
     );
   }
 
-  const secret = await unlockSyncPasskey(
-    existing.envelope.credentialId,
-    existing.envelope.prfInput,
-    existing.envelope.rpId,
-  );
-  try {
-    const remote = await decryptSyncPayload(existing.envelope, secret);
-    const merged = mergeSyncPayloads(remote, local);
-    const envelope = await encryptSyncPayload(
-      merged,
-      secret,
+  const key = await syncKeySession.getOrUnlock(existing.envelope, async () => {
+    const secret = await unlockSyncPasskey(
       existing.envelope.credentialId,
+      existing.envelope.prfInput,
       existing.envelope.rpId,
-      base64UrlToBytes(existing.envelope.prfInput),
-      base64UrlToBytes(existing.envelope.kdfSalt),
     );
-    await writeDriveSnapshot(token, envelope, existing.fileId);
-    return {
-      operation,
-      fileId: existing.fileId,
-      syncedAt: envelope.updatedAt,
-      payload: merged,
-      message:
-        operation === "enable"
-          ? "Encrypted cloud sync is enabled on this device and the latest records were merged."
-          : "Encrypted cloud data, records, and settings are up to date.",
-    };
-  } finally {
-    secret.fill(0);
+    return deriveSessionKey(secret, base64UrlToBytes(existing.envelope.kdfSalt));
+  });
+  let remote: SyncPayloadV1;
+  try {
+    remote = await decryptSyncPayloadWithKey(existing.envelope, key);
+  } catch (error) {
+    syncKeySession.clear();
+    throw error;
   }
+  const merged = mergeSyncPayloads(remote, local);
+  const envelope = await encryptSyncPayloadWithKey(
+    merged,
+    key,
+    existing.envelope.credentialId,
+    existing.envelope.rpId,
+    base64UrlToBytes(existing.envelope.prfInput),
+    base64UrlToBytes(existing.envelope.kdfSalt),
+  );
+  await writeDriveSnapshot(token, envelope, existing.fileId);
+  return {
+    operation,
+    fileId: existing.fileId,
+    syncedAt: envelope.updatedAt,
+    payload: merged,
+    message:
+      operation === "enable"
+        ? "Encrypted cloud sync is enabled on this device and the latest records were merged."
+        : "Encrypted cloud data, records, and settings are up to date.",
+  };
 }

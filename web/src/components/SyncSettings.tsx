@@ -103,7 +103,8 @@ export function SyncSettings({
           <h3 id="encrypted-sync-title">Encrypted cloud sync</h3>
           <p>
             Keep period records, day logs, and planner settings in Google Drive. EasyBC encrypts them
-            before upload; Drive receives ciphertext and the app never stores the cloud key.
+            before upload; Drive receives ciphertext. After you unlock with your passkey, the
+            encryption key stays only in this tab's memory for automatic sync.
           </p>
         </div>
       </div>
@@ -183,8 +184,9 @@ export function SyncSettings({
         )}
       </div>
       <p className="field-hint sync-footnote">
-        The encrypted-cloud passkey must be available on each device. If it is lost, a device with local EasyBC data
-        can create a new encrypted snapshot without losing that local copy.
+        Reloading or closing this tab locks encrypted sync again. The passkey must be available on
+        each device. If it is lost, a device with local EasyBC data can create a new encrypted
+        snapshot without losing that local copy.
       </p>
     </section>
   );

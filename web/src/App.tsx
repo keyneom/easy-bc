@@ -885,7 +885,7 @@ export default function App() {
   }, []);
 
   const runAutoSync = useCallback(
-    async (reason: "startup" | "change") => {
+    async (reason: "startup" | "foreground" | "change") => {
       if (!syncState) return;
       if (!syncClientId) {
       setAutoSyncNotice({
@@ -913,9 +913,11 @@ export default function App() {
       setAutoSyncNotice({
         kind: "info",
         message:
-          reason === "startup"
+          reason === "change"
+            ? "Merging encrypted cloud changes…"
+            : reason === "startup"
             ? "Checking encrypted cloud sync…"
-            : "Merging encrypted cloud changes…",
+            : "Checking encrypted cloud changes…",
       });
 
       try {
@@ -971,6 +973,15 @@ export default function App() {
     const h = window.setTimeout(() => void runAutoSync("change"), 1_800);
     return () => window.clearTimeout(h);
   }, [localSyncFingerprint, runAutoSync, storageReady, syncState, wasmReady]);
+
+  useEffect(() => {
+    if (!storageReady || !wasmReady || !syncState) return;
+    const syncWhenVisible = () => {
+      if (document.visibilityState === "visible") void runAutoSync("foreground");
+    };
+    document.addEventListener("visibilitychange", syncWhenVisible);
+    return () => document.removeEventListener("visibilitychange", syncWhenVisible);
+  }, [runAutoSync, storageReady, syncState, wasmReady]);
 
   const runPlan = useCallback(() => {
     if (!wasmReady) return;
