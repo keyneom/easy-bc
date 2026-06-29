@@ -4,7 +4,12 @@ import { parseSyncEnvelope } from "./crypto";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
 const DRIVE_FILE_NAME = "easybc-sync-v1.json";
 
-type TokenResponse = { access_token?: string; error?: string; error_description?: string };
+type TokenResponse = {
+  access_token?: string;
+  expires_in?: number;
+  error?: string;
+  error_description?: string;
+};
 type TokenClient = {
   requestAccessToken: (options?: { prompt?: string }) => void;
 };
@@ -33,6 +38,11 @@ export type DriveSnapshot = {
 };
 
 let scriptPromise: Promise<void> | null = null;
+let cachedToken: { clientId: string; accessToken: string; expiresAt: number } | null = null;
+let pendingTokenRequest: { clientId: string; promise: Promise<string> } | null = null;
+let tokenGeneration = 0;
+
+const TOKEN_EXPIRY_SKEW_MS = 60_000;
 
 function loadGoogleIdentity(): Promise<void> {
   if (window.google?.accounts.oauth2) return Promise.resolve();
@@ -49,7 +59,10 @@ function loadGoogleIdentity(): Promise<void> {
   return scriptPromise;
 }
 
-export async function requestDriveAccessToken(clientId: string): Promise<string> {
+async function requestFreshDriveAccessToken(
+  clientId: string,
+  generation: number,
+): Promise<string> {
   await loadGoogleIdentity();
   const google = window.google;
   if (!google) throw new Error("Google sign-in is unavailable.");
@@ -58,13 +71,51 @@ export async function requestDriveAccessToken(clientId: string): Promise<string>
       client_id: clientId,
       scope: DRIVE_SCOPE,
       callback: (response) => {
-        if (response.access_token) resolve(response.access_token);
-        else reject(new Error(response.error_description ?? response.error ?? "Google authorization failed."));
+        if (!response.access_token) {
+          reject(new Error(
+            response.error_description ?? response.error ?? "Google authorization failed.",
+          ));
+          return;
+        }
+        const expiresInMs = Math.max(0, (response.expires_in ?? 0) * 1_000);
+        if (generation === tokenGeneration && expiresInMs > TOKEN_EXPIRY_SKEW_MS) {
+          cachedToken = {
+            clientId,
+            accessToken: response.access_token,
+            expiresAt: Date.now() + expiresInMs - TOKEN_EXPIRY_SKEW_MS,
+          };
+        }
+        resolve(response.access_token);
       },
       error_callback: (error) => reject(new Error(error.type ?? "Google authorization was cancelled.")),
     });
     client.requestAccessToken({ prompt: "" });
   });
+}
+
+export async function requestDriveAccessToken(clientId: string): Promise<string> {
+  if (
+    cachedToken?.clientId === clientId &&
+    cachedToken.expiresAt > Date.now()
+  ) {
+    return cachedToken.accessToken;
+  }
+  if (pendingTokenRequest?.clientId === clientId) return pendingTokenRequest.promise;
+
+  const generation = tokenGeneration;
+  const promise = requestFreshDriveAccessToken(clientId, generation);
+  pendingTokenRequest = { clientId, promise };
+  try {
+    return await promise;
+  } finally {
+    if (pendingTokenRequest?.promise === promise) pendingTokenRequest = null;
+  }
+}
+
+export function clearDriveAccessToken(): void {
+  cachedToken = null;
+  pendingTokenRequest = null;
+  tokenGeneration += 1;
 }
 
 async function driveFetch(url: string, token: string, init?: RequestInit): Promise<Response> {
@@ -76,6 +127,7 @@ async function driveFetch(url: string, token: string, init?: RequestInit): Promi
     },
   });
   if (!response.ok) {
+    if (response.status === 401) clearDriveAccessToken();
     const detail = (await response.text()).slice(0, 400);
     throw new Error(`Google Drive request failed (${response.status}). ${detail}`);
   }

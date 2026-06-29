@@ -12,7 +12,7 @@ Period records, day logs, body-signal observations, planner settings, and genera
 
 When a user explicitly enables sync in the web or Android app, EasyBC requests the `https://www.googleapis.com/auth/drive.appdata` scope and creates an application-specific file in Google Drive's hidden app-data folder. User-authored EasyBC data is encrypted on the device before upload using a key derived through the user's passkey. Google receives the encrypted envelope, not the plaintext EasyBC records.
 
-OAuth access tokens and raw passkey PRF output are kept only in memory for the active operation. To support automatic sync without repeated passkey prompts, the derived content-encryption key may remain in browser-tab or Android-process memory for the active app session. It is never intentionally written to browser storage, the Android database, preferences, or backup, and is cleared when the tab/process ends or after 15 minutes in the background. EasyBC uses Google user data only to provide the sync feature requested by the user and does not transfer it to third parties.
+Raw passkey PRF output is kept only in memory for the active operation. To support automatic sync without repeated authorization prompts, the short-lived Google access token and derived content-encryption key may remain in browser-tab memory, while Android may retain the derived key in app-process memory. They are never intentionally written to browser storage, the Android database, preferences, or backup, and are cleared when the tab/process ends or after 15 minutes in the background. EasyBC uses Google user data only to provide the sync feature requested by the user and does not transfer it to third parties.
 
 ## User-directed exports
 

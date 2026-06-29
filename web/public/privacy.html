@@ -29,7 +29,7 @@
     <h2>Data stored locally</h2>
     <p>Period records, day logs, body-signal observations, planner settings, and generated plans stay in application or browser storage. Android platform backup is disabled.</p>
     <h2>Optional encrypted cloud sync</h2>
-    <p>When explicitly enabled in the web or Android app, EasyBC requests only the Google Drive app-data scope. It encrypts user-authored records on the device before placing one encrypted file in Drive's hidden application-data folder. OAuth access tokens and raw passkey output are kept only in memory for the active operation. The derived content-encryption key may remain in tab or Android-process memory for automatic sync, but is never intentionally written to browser or app storage and is cleared when the tab/process ends or after 15 minutes in the background.</p>
+    <p>When explicitly enabled in the web or Android app, EasyBC requests only the Google Drive app-data scope. It encrypts user-authored records on the device before placing one encrypted file in Drive's hidden application-data folder. Raw passkey output is kept only in memory for the active operation. A short-lived Google access token and the derived content-encryption key may remain in tab or Android-process memory for automatic sync, but are never intentionally written to browser or app storage and are cleared when the tab/process ends or after 15 minutes in the background.</p>
     <p>EasyBC uses Google user data only to provide encrypted cloud sync requested by the user and does not sell or transfer that data to third parties.</p>
     <h2>User-directed exports</h2>
     <p>Manual JSON backups, iCalendar exports, and entries written to a device calendar are not encrypted by EasyBC. Treat them as sensitive files.</p>

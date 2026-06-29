@@ -12,4 +12,4 @@ Security fixes are applied to the latest published web build and Android release
 
 ## Data-handling boundary
 
-EasyBC is local-first. The app has no analytics or advertising SDK. Manual JSON and calendar exports are user-controlled plaintext files. Optional web and Android Google Drive sync encrypts its payload before upload and requests only the Drive app-data scope. Access tokens and raw passkey output are operation-scoped; the derived content key may remain only in tab or app-process memory for automatic sync and is cleared when that session ends or after 15 minutes in the background.
+EasyBC is local-first. The app has no analytics or advertising SDK. Manual JSON and calendar exports are user-controlled plaintext files. Optional web and Android Google Drive sync encrypts its payload before upload and requests only the Drive app-data scope. Raw passkey output is operation-scoped; a short-lived Google access token and the derived content key may remain only in tab or app-process memory for automatic sync and are cleared when that session ends or after 15 minutes in the background.

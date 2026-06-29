@@ -74,4 +74,14 @@ describe("in-memory sync key session", () => {
 
     expect(session.get(envelope())).toBe(stored);
   });
+
+  it("clears associated in-memory authorization when the key session locks", () => {
+    const onClear = vi.fn();
+    const session = new SyncKeySession(onClear);
+    session.remember(envelope(), key("stored"));
+
+    session.clear();
+
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
 });

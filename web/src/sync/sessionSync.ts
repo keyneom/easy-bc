@@ -42,6 +42,11 @@ export type SyncRunResult =
     };
 
 let syncOperationTail: Promise<void> = Promise.resolve();
+let syncOperationCount = 0;
+
+export function encryptedSyncOperationInProgress(): boolean {
+  return syncOperationCount > 0;
+}
 
 export function buildLocalSyncPayload(
   options: WasmOptions,
@@ -111,6 +116,7 @@ export async function runEncryptedSyncOperation({
   rpId: string;
   local: SyncPayloadV1;
 }): Promise<SyncRunResult> {
+  syncOperationCount += 1;
   const result = syncOperationTail.then(() => runEncryptedSyncOperationNow({
     operation,
     clientId,
@@ -118,7 +124,11 @@ export async function runEncryptedSyncOperation({
     local,
   }));
   syncOperationTail = result.then(() => undefined, () => undefined);
-  return result;
+  try {
+    return await result;
+  } finally {
+    syncOperationCount -= 1;
+  }
 }
 
 async function runEncryptedSyncOperationNow({
@@ -222,19 +232,24 @@ async function runEncryptedSyncOperationNow({
     throw error;
   }
   const merged = mergeSyncPayloads(remote, local);
-  const envelope = await encryptSyncPayloadWithKey(
-    merged,
-    key,
-    existing.envelope.credentialId,
-    existing.envelope.rpId,
-    base64UrlToBytes(existing.envelope.prfInput),
-    base64UrlToBytes(existing.envelope.kdfSalt),
-  );
-  await writeDriveSnapshot(token, envelope, existing.fileId);
+  const cloudChanged = syncPayloadFingerprint(merged) !== syncPayloadFingerprint(remote);
+  let syncedAt = existing.envelope.updatedAt;
+  if (cloudChanged) {
+    const envelope = await encryptSyncPayloadWithKey(
+      merged,
+      key,
+      existing.envelope.credentialId,
+      existing.envelope.rpId,
+      base64UrlToBytes(existing.envelope.prfInput),
+      base64UrlToBytes(existing.envelope.kdfSalt),
+    );
+    await writeDriveSnapshot(token, envelope, existing.fileId);
+    syncedAt = envelope.updatedAt;
+  }
   return {
     operation,
     fileId: existing.fileId,
-    syncedAt: envelope.updatedAt,
+    syncedAt,
     payload: merged,
     message:
       operation === "enable"

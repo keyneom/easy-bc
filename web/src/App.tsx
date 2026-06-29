@@ -67,9 +67,15 @@ import { EC_COPY } from "./strings";
 import { DayDetailPanel, type MethodRiskRow } from "./components/DayDetailPanel";
 import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components/MonthCalendar";
 import { SyncSettings } from "./components/SyncSettings";
+import {
+  AutoSyncTriggerState,
+  shouldSyncAfterForeground,
+  type AutoSyncReason,
+} from "./sync/autoSyncState";
 import { currentRpId, passkeysSupported } from "./sync/passkey";
 import {
   buildLocalSyncPayload,
+  encryptedSyncOperationInProgress,
   formatLastSync,
   rememberSyncState,
   runEncryptedSyncOperation,
@@ -727,8 +733,8 @@ export default function App() {
   const resultRef = useRef<HTMLElement | null>(null);
   const optionsFingerprintRef = useRef("");
   const autoSyncFingerprintRef = useRef("");
-  const autoSyncRunningRef = useRef(false);
-  const autoSyncQueuedRef = useRef(false);
+  const autoSyncTriggerRef = useRef(new AutoSyncTriggerState());
+  const autoSyncHiddenAtRef = useRef<number | null>(null);
   const riskInputFingerprintRef = useRef("");
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState<string | null>(null);
@@ -885,28 +891,24 @@ export default function App() {
   }, []);
 
   const runAutoSync = useCallback(
-    async (reason: "startup" | "foreground" | "change") => {
+    async (reason: AutoSyncReason) => {
       if (!syncState) return;
       if (!syncClientId) {
-      setAutoSyncNotice({
-        kind: "error",
-        message: "Encrypted cloud sync is enabled, but this build is missing its Google web client ID.",
-      });
+        setAutoSyncNotice({
+          kind: "error",
+          message: "Encrypted cloud sync is enabled, but this build is missing its Google web client ID.",
+        });
         return;
       }
       if (!passkeysSupported()) {
-      setAutoSyncNotice({
-        kind: "error",
-        message: "Encrypted cloud sync is enabled, but this browser cannot use passkeys here.",
-      });
+        setAutoSyncNotice({
+          kind: "error",
+          message: "Encrypted cloud sync is enabled, but this browser cannot use passkeys here.",
+        });
         return;
       }
-      if (autoSyncRunningRef.current) {
-        autoSyncQueuedRef.current = true;
-        return;
-      }
+      if (!autoSyncTriggerRef.current.request(reason)) return;
 
-      autoSyncRunningRef.current = true;
       const { options, periodRecords: records, session: currentSession, fingerprint } =
         latestSyncInputsRef.current;
       autoSyncFingerprintRef.current = fingerprint;
@@ -945,9 +947,7 @@ export default function App() {
           }`,
         });
       } finally {
-        autoSyncRunningRef.current = false;
-        if (autoSyncQueuedRef.current) {
-          autoSyncQueuedRef.current = false;
+        if (autoSyncTriggerRef.current.finish()) {
           window.setTimeout(() => void runAutoSync("change"), 250);
         }
       }
@@ -958,7 +958,7 @@ export default function App() {
   useEffect(() => {
     if (syncState) return;
     autoSyncFingerprintRef.current = "";
-    autoSyncQueuedRef.current = false;
+    autoSyncTriggerRef.current.reset();
     setAutoSyncNotice(null);
   }, [syncState]);
 
@@ -977,7 +977,19 @@ export default function App() {
   useEffect(() => {
     if (!storageReady || !wasmReady || !syncState) return;
     const syncWhenVisible = () => {
-      if (document.visibilityState === "visible") void runAutoSync("foreground");
+      if (document.visibilityState === "hidden") {
+        autoSyncHiddenAtRef.current = Date.now();
+        return;
+      }
+      const hiddenAt = autoSyncHiddenAtRef.current;
+      autoSyncHiddenAtRef.current = null;
+      if (shouldSyncAfterForeground({
+        hiddenAt,
+        now: Date.now(),
+        operationInProgress: encryptedSyncOperationInProgress(),
+      })) {
+        void runAutoSync("foreground");
+      }
     };
     document.addEventListener("visibilitychange", syncWhenVisible);
     return () => document.removeEventListener("visibilitychange", syncWhenVisible);

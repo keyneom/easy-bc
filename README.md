@@ -16,6 +16,10 @@ The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyne
 
 For a local web build, install Rust and `wasm-bindgen-cli` 0.2.117, run `npm run build:wasm` from [`web/`](web/), then use the normal npm development or build command. Generated native and WebAssembly binaries are intentionally not committed; publication workflows rebuild them from source.
 
+The provider-neutral npm extraction plan, compatibility constraints, and
+consumer migration sequence are documented in
+[`docs/sync-kit-extraction-handoff.md`](docs/sync-kit-extraction-handoff.md).
+
 ## Functional Requirements: Personal-Use Fertility Risk Planner
 
 ## Product Overview

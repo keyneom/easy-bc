@@ -1,4 +1,5 @@
 import type { SyncEnvelopeV1 } from "./types";
+import { clearDriveAccessToken } from "./googleDrive";
 
 export const SYNC_KEY_BACKGROUND_GRACE_MS = 15 * 60 * 1_000;
 
@@ -24,6 +25,8 @@ export class SyncKeySession {
   private entry: SessionEntry | null = null;
   private pending: { identity: string; key: Promise<CryptoKey> } | null = null;
   private backgroundTimer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly onClear: () => void = () => undefined) {}
 
   get(envelope: SyncEnvelopeV1): CryptoKey | null {
     const identity = envelopeIdentity(envelope);
@@ -62,6 +65,7 @@ export class SyncKeySession {
     this.entry = null;
     this.pending = null;
     this.cancelBackgroundTimer();
+    this.onClear();
   }
 
   pageHidden(): void {
@@ -84,7 +88,7 @@ export class SyncKeySession {
   }
 }
 
-export const syncKeySession = new SyncKeySession();
+export const syncKeySession = new SyncKeySession(clearDriveAccessToken);
 
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
