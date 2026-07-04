@@ -1,77 +1,91 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { SyncEnvelopeV1, SyncPayloadV1 } from "./types";
+import type { SyncPayloadV1 } from "./types";
 
-const mocks = vi.hoisted(() => ({
-  clearKey: vi.fn(),
-  clearToken: vi.fn(),
-  deleteSnapshot: vi.fn(),
-  decrypt: vi.fn(),
-  deriveKey: vi.fn(),
-  encrypt: vi.fn(),
-  findSnapshot: vi.fn(),
-  forgetState: vi.fn(),
-  getOrUnlock: vi.fn(),
-  rememberKey: vi.fn(),
-  requestToken: vi.fn(),
-  unlockPasskey: vi.fn(),
-  writeSnapshot: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  const controller = {
+    setup: vi.fn(),
+    enable: vi.fn(),
+    sync: vi.fn(),
+    reset: vi.fn(),
+    delete: vi.fn(),
+    lock: vi.fn(),
+    operationInProgress: vi.fn(() => false),
+  };
+  return {
+    authorizationClear: vi.fn(),
+    bindLifecycle: vi.fn(() => vi.fn()),
+    controller,
+    createSnapshotSync: vi.fn(() => controller),
+    idbDelete: vi.fn(),
+    idbSet: vi.fn(),
+  };
+});
 
 vi.mock("../idbStore", () => ({
-  idbDelete: mocks.forgetState,
-  idbSet: vi.fn(),
+  idbDelete: mocks.idbDelete,
+  idbSet: mocks.idbSet,
   KV_SYNC_STATE: "sync-state",
 }));
 
-vi.mock("./googleDrive", () => ({
-  clearDriveAccessToken: mocks.clearToken,
-  deleteDriveSnapshot: mocks.deleteSnapshot,
-  findDriveSnapshot: mocks.findSnapshot,
-  requestDriveAccessToken: mocks.requestToken,
-  writeDriveSnapshot: mocks.writeSnapshot,
+vi.mock("./codec", () => ({
+  easyBcSyncCodec: {
+    serialize: (value: unknown) => value,
+    parse: (value: unknown) => value,
+    merge: (local: unknown) => local,
+    fingerprint: () => "fingerprint",
+  },
+  syncPayloadFingerprint: () => "fingerprint",
 }));
 
 vi.mock("./crypto", () => ({
-  base64UrlToBytes: () => new Uint8Array(32),
-  decryptSyncPayloadWithKey: mocks.decrypt,
-  deriveContentKey: mocks.deriveKey,
-  encryptSyncPayloadWithKey: mocks.encrypt,
+  easyBcCryptoBackend: {},
+  easyBcEnvelopeCrypto: {},
 }));
 
-vi.mock("./passkey", () => ({
-  createSyncPasskey: vi.fn(),
-  unlockSyncPasskey: mocks.unlockPasskey,
-}));
-
-vi.mock("./keySession", () => ({
-  syncKeySession: {
-    clear: mocks.clearKey,
-    getOrUnlock: mocks.getOrUnlock,
-    remember: mocks.rememberKey,
+vi.mock("./profile", () => ({
+  easyBcV1Profile: {
+    appId: "easy-bc",
+    filename: "easybc-sync-v1.json",
   },
+}));
+
+vi.mock("@keyneom/sync-kit/crypto", () => ({
+  parseSyncEnvelopeV1: vi.fn(),
+}));
+
+vi.mock("@keyneom/sync-kit/keys/web-passkey", () => ({
+  createWebPasskeyProvider: vi.fn(() => ({ clear: vi.fn() })),
+}));
+
+vi.mock("@keyneom/sync-kit/auth/google-web", () => ({
+  GoogleWebAuthorizationProvider: class {
+    clear = mocks.authorizationClear;
+  },
+}));
+
+vi.mock("@keyneom/sync-kit/stores/google-drive", () => ({
+  GoogleDriveAppDataStore: class {},
+  GoogleDriveSnapshotStore: class {},
+}));
+
+vi.mock("@keyneom/sync-kit/snapshot", () => ({
+  createSnapshotSync: mocks.createSnapshotSync,
+}));
+
+vi.mock("@keyneom/sync-kit/snapshot/lifecycle", () => ({
+  bindWebLifecycle: mocks.bindLifecycle,
 }));
 
 import {
   encryptedSyncOperationInProgress,
+  forgetSyncState,
   runEncryptedSyncOperation,
 } from "./sessionSync";
 
-const envelope: SyncEnvelopeV1 = {
-  schemaVersion: 1,
-  algorithm: "AES-256-GCM+HKDF-SHA-256",
-  credentialId: "credential",
-  rpId: "keyneom.github.io",
-  prfInput: "input",
-  kdfSalt: "salt",
-  nonce: "nonce",
-  ciphertext: "ciphertext",
-  updatedAt: "2026-06-29T12:00:00.000Z",
-};
-
-function payload(overrides: Partial<SyncPayloadV1> = {}): SyncPayloadV1 {
+function payload(): SyncPayloadV1 {
   return {
     schemaVersion: 1,
-    exportedAt: "2026-06-29T12:00:00.000Z",
+    exportedAt: "2026-06-30T12:00:00.000Z",
     planner: {
       value: {
         ageYears: 34,
@@ -92,7 +106,7 @@ function payload(overrides: Partial<SyncPayloadV1> = {}): SyncPayloadV1 {
         combinedMethodIndependence: 0.35,
         ovulationSdDays: 3,
       },
-      updatedAt: "2026-06-29T12:00:00.000Z",
+      updatedAt: "2026-06-30T12:00:00.000Z",
       configured: true,
     },
     periodRecords: [],
@@ -101,92 +115,103 @@ function payload(overrides: Partial<SyncPayloadV1> = {}): SyncPayloadV1 {
     voluntaryAbstinenceDates: {},
     voluntaryAbstinenceUpdatedAt: {},
     deletedVoluntaryAbstinenceDates: {},
-    ecJournal: { value: false, updatedAt: "2026-06-29T12:00:00.000Z" },
-    ...overrides,
+    ecJournal: { value: false, updatedAt: "2026-06-30T12:00:00.000Z" },
   };
 }
 
-describe("encrypted sync operation wiring", () => {
-  beforeEach(() => {
+describe("sync-kit EasyBC facade", () => {
+  beforeEach(async () => {
+    await forgetSyncState();
     vi.clearAllMocks();
-    mocks.requestToken.mockResolvedValue("token");
-    mocks.findSnapshot.mockResolvedValue({ fileId: "file", envelope });
-    mocks.getOrUnlock.mockResolvedValue({} as CryptoKey);
-    mocks.decrypt.mockResolvedValue(payload());
-    mocks.encrypt.mockResolvedValue({
-      ...envelope,
-      updatedAt: "2026-06-29T13:00:00.000Z",
-    });
-    mocks.writeSnapshot.mockResolvedValue("file");
+    mocks.controller.operationInProgress.mockReturnValue(false);
   });
 
-  it("uses the cached key and skips a no-op cloud upload", async () => {
-    const local = payload({ exportedAt: "2026-06-29T12:30:00.000Z" });
+  it("configures one package controller and forwards the automatic-sync reason", async () => {
+    const local = payload();
+    mocks.controller.sync.mockResolvedValue({
+      operation: "sync",
+      outcome: "unchanged",
+      fileId: "file",
+      syncedAt: "2026-06-30T12:00:00.000Z",
+      value: local,
+    });
 
     const result = await runEncryptedSyncOperation({
       operation: "sync",
       clientId: "client",
       rpId: "keyneom.github.io",
       local,
+      reason: "change",
     });
 
-    expect(mocks.getOrUnlock).toHaveBeenCalledTimes(1);
-    expect(mocks.unlockPasskey).not.toHaveBeenCalled();
-    expect(mocks.encrypt).not.toHaveBeenCalled();
-    expect(mocks.writeSnapshot).not.toHaveBeenCalled();
-    expect(result.syncedAt).toBe(envelope.updatedAt);
+    expect(mocks.createSnapshotSync).toHaveBeenCalledTimes(1);
+    expect(mocks.bindLifecycle).toHaveBeenCalledTimes(1);
+    expect(mocks.controller.sync).toHaveBeenCalledWith("change");
+    expect(result.payload).toBe(local);
+    expect(result.fileId).toBe("file");
   });
 
-  it("uploads when the merged user data changed", async () => {
-    const local = payload({
-      planner: {
-        ...payload().planner,
-        value: { ...payload().planner.value, ageYears: 35 },
-        updatedAt: "2026-06-29T13:00:00.000Z",
-      },
+  it("delegates operation state so foreground signals can avoid auth feedback", async () => {
+    mocks.controller.setup.mockResolvedValue({
+      operation: "setup",
+      outcome: "created",
+      fileId: "file",
+      syncedAt: "2026-06-30T12:00:00.000Z",
+      value: payload(),
+    });
+    await runEncryptedSyncOperation({
+      operation: "setup",
+      clientId: "client",
+      rpId: "keyneom.github.io",
+      local: payload(),
+    });
+    mocks.controller.operationInProgress.mockReturnValue(true);
+
+    expect(encryptedSyncOperationInProgress()).toBe(true);
+  });
+
+  it("uses the package delete path and preserves the existing facade result", async () => {
+    mocks.controller.delete.mockResolvedValue(undefined);
+
+    const result = await runEncryptedSyncOperation({
+      operation: "delete",
+      clientId: "client",
+      rpId: "keyneom.github.io",
+      local: payload(),
+    });
+
+    expect(mocks.controller.delete).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      operation: "delete",
+      fileId: null,
+      syncedAt: null,
+      payload: null,
+    });
+  });
+
+  it("locks and replaces the runtime when OAuth or RP configuration changes", async () => {
+    mocks.controller.setup.mockResolvedValue({
+      operation: "setup",
+      outcome: "created",
+      fileId: "file",
+      syncedAt: "2026-06-30T12:00:00.000Z",
+      value: payload(),
     });
 
     await runEncryptedSyncOperation({
-      operation: "sync",
-      clientId: "client",
-      rpId: "keyneom.github.io",
-      local,
-    });
-
-    expect(mocks.encrypt).toHaveBeenCalledTimes(1);
-    expect(mocks.writeSnapshot).toHaveBeenCalledTimes(1);
-  });
-
-  it("clears the cached key when decryption fails", async () => {
-    mocks.decrypt.mockRejectedValue(new Error("could not decrypt"));
-
-    await expect(runEncryptedSyncOperation({
-      operation: "sync",
-      clientId: "client",
-      rpId: "keyneom.github.io",
-      local: payload(),
-    })).rejects.toThrow("could not decrypt");
-
-    expect(mocks.clearKey).toHaveBeenCalledTimes(1);
-    expect(mocks.writeSnapshot).not.toHaveBeenCalled();
-  });
-
-  it("reports authorization work as in progress so foreground events can ignore it", async () => {
-    let resolveToken!: (token: string) => void;
-    mocks.requestToken.mockReturnValue(new Promise<string>((resolve) => {
-      resolveToken = resolve;
-    }));
-
-    const operation = runEncryptedSyncOperation({
-      operation: "sync",
-      clientId: "client",
+      operation: "setup",
+      clientId: "client-a",
       rpId: "keyneom.github.io",
       local: payload(),
     });
-    expect(encryptedSyncOperationInProgress()).toBe(true);
+    await runEncryptedSyncOperation({
+      operation: "setup",
+      clientId: "client-b",
+      rpId: "keyneom.github.io",
+      local: payload(),
+    });
 
-    resolveToken("token");
-    await operation;
-    expect(encryptedSyncOperationInProgress()).toBe(false);
+    expect(mocks.controller.lock).toHaveBeenCalledTimes(1);
+    expect(mocks.createSnapshotSync).toHaveBeenCalledTimes(2);
   });
 });

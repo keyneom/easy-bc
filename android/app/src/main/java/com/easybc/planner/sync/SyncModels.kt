@@ -2,26 +2,6 @@ package com.easybc.planner.sync
 
 import kotlinx.serialization.Serializable
 
-internal const val SYNC_RP_ID = "keyneom.github.io"
-internal const val SYNC_FILE_NAME = "easybc-sync-v1.json"
-internal const val DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
-internal const val SYNC_EPOCH = "1970-01-01T00:00:00.000Z"
-
-@Serializable
-data class SyncEnvelopeV1(
-    val schemaVersion: Int = 1,
-    val algorithm: String = "AES-256-GCM+HKDF-SHA-256",
-    /** Null means uncompressed, preserving compatibility with original v1 snapshots. */
-    val compression: String? = null,
-    val credentialId: String,
-    val rpId: String,
-    val prfInput: String,
-    val kdfSalt: String,
-    val nonce: String,
-    val ciphertext: String,
-    val updatedAt: String,
-)
-
 @Serializable
 data class SyncPayloadV1(
     val schemaVersion: Int = 1,
@@ -146,15 +126,3 @@ internal data class PreservedWebState(
     val deletedVoluntaryAbstinenceDates: Map<String, String> = emptyMap(),
     val ecJournal: TimestampedBoolean = TimestampedBoolean(),
 )
-
-data class DriveSnapshot(val fileId: String, val envelope: SyncEnvelopeV1)
-
-data class PasskeyMaterial(
-    val credentialId: String,
-    val prfInput: ByteArray,
-    val kdfSalt: ByteArray,
-    val secret: ByteArray,
-    val rpId: String = SYNC_RP_ID,
-)
-
-enum class CloudSyncOperation { SETUP, ENABLE, SYNC, RESET, DELETE }

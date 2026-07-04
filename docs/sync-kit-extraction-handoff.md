@@ -107,7 +107,8 @@ The package owns:
 - AES-256-GCM encryption.
 - HKDF-SHA-256 key derivation.
 - Optional gzip-before-encryption when it reduces payload size.
-- Versioned encrypted envelopes and compatibility profiles.
+- Versioned encrypted-envelope machinery plus compatibility-profile types and
+  validation. Concrete application profiles stay in their consumer repos.
 - Base64url encoding.
 - WebAuthn PRF passkey creation/unlocking.
 - Google Identity Services authorization.
@@ -131,6 +132,8 @@ Each application owns:
 - Local persistence.
 - UI and status presentation.
 - OAuth client configuration.
+- Its exact compatibility-profile values: app ID, Drive filename, AAD, HKDF
+  info, compression policy, passkey display identity, and writer version.
 - Applying merged state.
 - Choosing startup, foreground, debounce, and background-grace policies.
 - Platform lifecycle integration.
@@ -173,7 +176,10 @@ Do not change the current v1 behavior:
 Changing any of these can make existing snapshots undecryptable. Represent
 each application as an explicit compatibility profile containing its exact
 filename, AAD, HKDF info, accepted envelope versions, compression behavior,
-and app identity.
+and app identity. Define that profile in the application repository and pass
+it to the package. The reusable package must not publish named EasyBC or Family
+Chores profile presets; even first-party package releases should not own
+consumer-specific persisted configuration.
 
 Create deterministic, user-data-free compatibility fixtures from both current
 implementations before moving code.
@@ -265,7 +271,8 @@ the current providers and one desktop design first.
    Android, and Family Chores.
 3. Scaffold one package with subpath exports and no root/browser side effects.
 4. Extract provider-neutral crypto, envelope, compression, and error code.
-5. Implement explicit EasyBC-v1 and Family-Chores-v1 compatibility profiles.
+5. Define explicit EasyBC-v1 and Family-Chores-v1 profiles in their consumer
+   repositories and validate them through the package's generic profile API.
 6. Extract WebAuthn, Google web authorization, and Drive adapters.
 7. Implement `createSnapshotSync<T>()` with serialized operations, unlock/token
    coalescing, session locking, no-op suppression, and reentrancy protection.

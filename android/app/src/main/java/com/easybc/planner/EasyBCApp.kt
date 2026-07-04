@@ -7,7 +7,7 @@ import com.easybc.planner.calendar.CalendarAutoSync
 import com.easybc.planner.calendar.EasyBCCalendarSync
 import com.easybc.planner.data.PlannerRepository
 import com.easybc.planner.data.db.AppDatabase
-import com.easybc.planner.sync.CloudSyncKeySession
+import com.easybc.planner.sync.EasyBcSyncRuntime
 import com.easybc.planner.util.CycleCalculator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -66,7 +66,7 @@ class EasyBCApp : Application() {
             delay(CLOUD_KEY_BACKGROUND_GRACE_MS)
             synchronized(this@EasyBCApp) {
                 if (foregroundActivityCount == 0) {
-                    CloudSyncKeySession.clear()
+                    EasyBcSyncRuntime.lock()
                     cloudKeyExpiryJob = null
                 }
             }

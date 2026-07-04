@@ -82,9 +82,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
 
-    // Passkeys via Android Credential Manager / Google Password Manager.
-    implementation("androidx.credentials:credentials:1.6.0")
-    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    // Encrypted snapshot sync (crypto, Drive appData store, passkey PRF, controller).
+    implementation("com.keyneom:sync-kit-android:0.2.0-rc.0")
 
     // User-consented OAuth access to Drive's app-private data folder.
     implementation("com.google.android.gms:play-services-auth:21.6.0")

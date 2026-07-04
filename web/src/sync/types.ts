@@ -2,6 +2,7 @@ import type { WasmOptions } from "../App";
 import type { CalendarDayLog } from "../sessionUtils";
 import { SYNC_EPOCH } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
+export type { SyncEnvelopeV1 } from "@keyneom/sync-kit/crypto";
 
 export type PortablePlannerOptions = Omit<WasmOptions, "calendarCycles">;
 
@@ -40,20 +41,6 @@ export type AndroidPreferences = {
   calendarLabelActionW: string;
   reminderHour: number;
   reminderMinute: number;
-};
-
-export type SyncEnvelopeV1 = {
-  schemaVersion: 1;
-  algorithm: "AES-256-GCM+HKDF-SHA-256";
-  /** Missing means uncompressed, preserving compatibility with original v1 snapshots. */
-  compression?: "gzip";
-  credentialId: string;
-  rpId: string;
-  prfInput: string;
-  kdfSalt: string;
-  nonce: string;
-  ciphertext: string;
-  updatedAt: string;
 };
 
 export type LocalSyncState = {
@@ -189,8 +176,10 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
   return merged;
 }
 
-export function parseSyncPayload(value: string): SyncPayloadV1 {
-  const parsed = JSON.parse(value) as Partial<SyncPayloadV1>;
+export function parseSyncPayload(value: unknown): SyncPayloadV1 {
+  const parsed = (
+    typeof value === "string" ? JSON.parse(value) : value
+  ) as Partial<SyncPayloadV1>;
   if (
     parsed.schemaVersion !== 1 ||
     !parsed.planner ||

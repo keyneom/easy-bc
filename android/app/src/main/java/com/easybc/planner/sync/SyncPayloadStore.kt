@@ -20,7 +20,7 @@ interface SyncPayloadGateway {
 }
 
 class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
-    private val json get() = SyncCrypto.json
+    private val json get() = com.keyneom.synckit.crypto.SyncKitJson.instance
 
     override suspend fun localPayload(): SyncPayloadV1 {
         val settings = db.userSettingsDao().getSettings() ?: UserSettingsEntity()

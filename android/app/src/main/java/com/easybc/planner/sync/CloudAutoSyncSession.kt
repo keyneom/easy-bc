@@ -111,7 +111,7 @@ class CloudAutoSyncSession(
         }
 
     private fun fingerprint(payload: SyncPayloadV1): String =
-        SyncCrypto.stableFingerprint(payload)
+        EasyBcSyncCodec.fingerprint(payload)
 
     companion object {
         private const val TAG = "CloudAutoSync"

@@ -929,6 +929,7 @@ export default function App() {
           clientId: syncClientId,
           rpId: syncRpId,
           local,
+          reason,
         });
         if (result.operation !== "sync") return;
         autoSyncFingerprintRef.current = syncPayloadFingerprint(result.payload);
