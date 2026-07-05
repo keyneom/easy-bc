@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
   security-events: write
 
 jobs:
@@ -67,5 +68,8 @@ jobs:
           ./scripts/android-build-native.sh
       - name: Build Android app
         working-directory: android
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./gradlew --no-daemon assembleDebug
       - uses: github/codeql-action/analyze@v4

@@ -48,6 +48,9 @@ jobs:
 
   android-assemble:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_ACTOR: ${{ github.actor }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
       - name: Verify Gradle wrapper integrity

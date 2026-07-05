@@ -13,15 +13,27 @@ dependencyResolutionManagement {
         maven {
             url = uri("https://maven.pkg.github.com/keyneom/sync-kit")
             credentials {
-                username = providers.gradleProperty("gpr.user")
-                    .orElse(providers.environmentVariable("GITHUB_ACTOR"))
-                    .get()
-                password = providers.gradleProperty("gpr.key")
-                    .orElse(providers.environmentVariable("GITHUB_TOKEN"))
-                    .get()
+                username = githubPackagesUsername()
+                password = githubPackagesPassword()
             }
         }
     }
 }
 rootProject.name = "EasyBCPlanner"
 include(":app")
+
+private fun githubPackagesUsername(): String =
+    providers.gradleProperty("gpr.user").orNull
+        ?: System.getenv("GITHUB_ACTOR")?.takeIf { it.isNotBlank() }
+        ?: error(
+            "GitHub Packages username required: set gpr.user in ~/.gradle/gradle.properties " +
+                "or export GITHUB_ACTOR (CI sets this automatically).",
+        )
+
+private fun githubPackagesPassword(): String =
+    providers.gradleProperty("gpr.key").orNull
+        ?: System.getenv("GITHUB_TOKEN")?.takeIf { it.isNotBlank() }
+        ?: error(
+            "GitHub Packages token required: set gpr.key in ~/.gradle/gradle.properties " +
+                "or export GITHUB_TOKEN (CI sets this automatically).",
+        )
