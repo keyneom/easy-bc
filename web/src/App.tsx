@@ -26,7 +26,6 @@ import {
   idbSet,
   KV_OPTIONS,
   KV_SESSION,
-  KV_SYNC_STATE,
 } from "./idbStore";
 import {
   addPeriodStartDate,
@@ -69,22 +68,29 @@ import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components
 import { SyncSettings } from "./components/SyncSettings";
 import {
   AutoSyncTriggerState,
-  shouldSyncAfterForeground,
   type AutoSyncReason,
 } from "./sync/autoSyncState";
 import { currentRpId, passkeysSupported } from "./sync/passkey";
+import { formatLastSync } from "./sync/sessionSync";
 import {
-  buildLocalSyncPayload,
-  encryptedSyncOperationInProgress,
-  formatLastSync,
-  rememberSyncState,
-  runEncryptedSyncOperation,
-  syncPayloadFingerprint,
-} from "./sync/sessionSync";
+  buildSharedSyncPayload,
+  canPublishRole,
+  extractSharedPayload,
+  findProfile,
+  sharedPayloadFingerprint,
+  sharedPayloadToSyncPayload,
+  type SharedSyncState,
+} from "./sync/sharedTypes";
+import {
+  listPendingKeyResponses,
+  loadSharedSyncState,
+  sharedSyncConfigFromEnv,
+  syncActiveDataset,
+} from "./sync/sharedSync";
+import { bindEasyBcSharingPoll } from "./sync/sharedSyncLifecycle";
 import {
   plannerConfiguredFromPayload,
   portablePlannerOptions,
-  type LocalSyncState,
   type SyncPayloadV1,
 } from "./sync/types";
 import {
@@ -734,7 +740,6 @@ export default function App() {
   const optionsFingerprintRef = useRef("");
   const autoSyncFingerprintRef = useRef("");
   const autoSyncTriggerRef = useRef(new AutoSyncTriggerState());
-  const autoSyncHiddenAtRef = useRef<number | null>(null);
   const riskInputFingerprintRef = useRef("");
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState<string | null>(null);
@@ -760,13 +765,18 @@ export default function App() {
   const [incidentDay, setIncidentDay] = useState(1);
   const [calendarDensity, setCalendarDensity] = useState<CalendarDensity>("comfortable");
   const [planRegenerationPending, setPlanRegenerationPending] = useState(false);
-  const [syncState, setSyncState] = useState<LocalSyncState | null>(null);
+  const [sharedSyncState, setSharedSyncState] = useState<SharedSyncState | null>(null);
   const [autoSyncNotice, setAutoSyncNotice] = useState<{
     kind: "info" | "success" | "error";
     message: string;
   } | null>(null);
-  const syncClientId = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID?.trim() ?? "";
   const syncRpId = useMemo(currentRpId, []);
+  const sharedSyncConfig = useMemo(() => sharedSyncConfigFromEnv(syncRpId), [syncRpId]);
+  const syncReadOnly = useMemo(() => {
+    if (!sharedSyncState) return false;
+    const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+    return profile ? !canPublishRole(profile.role) : false;
+  }, [sharedSyncState]);
 
   const sortedStarts = useMemo(() => periodStartsFromRecords(periodRecords), [periodRecords]);
   const sortedRecords = useMemo(
@@ -787,11 +797,11 @@ export default function App() {
       setPeriodRecords(pr);
       const raw = await idbGet<PersistedSession>(KV_SESSION);
       const savedOptions = await idbGet<Partial<WasmOptions>>(KV_OPTIONS);
-      const savedSync = await idbGet<LocalSyncState>(KV_SYNC_STATE);
+      const savedSync = await loadSharedSyncState();
       const s = hydratePersistedSession(raw, pr.length);
       setSession(s);
       setLocks(s.locks);
-      setSyncState(savedSync ?? null);
+      setSharedSyncState(savedSync ?? null);
       const loadedOptions: WasmOptions = {
         ...defaultOptions(),
         ...savedOptions,
@@ -866,7 +876,7 @@ export default function App() {
   }, [session]);
 
   const localSyncFingerprint = useMemo(
-    () => syncPayloadFingerprint(buildLocalSyncPayload(opts, periodRecords, session)),
+    () => sharedPayloadFingerprint(buildSharedSyncPayload(opts, periodRecords, session)),
     [opts, periodRecords, session],
   );
 
@@ -887,23 +897,19 @@ export default function App() {
   }, [localSyncFingerprint, opts, periodRecords, session]);
 
   const markSyncComplete = useCallback((payload: SyncPayloadV1 | null) => {
-    autoSyncFingerprintRef.current = payload ? syncPayloadFingerprint(payload) : "";
+    autoSyncFingerprintRef.current = payload
+      ? sharedPayloadFingerprint(extractSharedPayload(payload))
+      : "";
   }, []);
 
   const runAutoSync = useCallback(
     async (reason: AutoSyncReason) => {
-      if (!syncState) return;
-      if (!syncClientId) {
-        setAutoSyncNotice({
-          kind: "error",
-          message: "Encrypted cloud sync is enabled, but this build is missing its Google web client ID.",
-        });
-        return;
-      }
+      if (!sharedSyncState || !sharedSyncConfig) return;
+      if (syncReadOnly && reason === "change") return;
       if (!passkeysSupported()) {
         setAutoSyncNotice({
           kind: "error",
-          message: "Encrypted cloud sync is enabled, but this browser cannot use passkeys here.",
+          message: "Encrypted sync is enabled, but this browser cannot use passkeys here.",
         });
         return;
       }
@@ -916,34 +922,38 @@ export default function App() {
         kind: "info",
         message:
           reason === "change"
-            ? "Merging encrypted cloud changes…"
+            ? "Merging encrypted changes…"
             : reason === "startup"
-            ? "Checking encrypted cloud sync…"
-            : "Checking encrypted cloud changes…",
+            ? "Checking encrypted sync…"
+            : reason === "remote-change"
+            ? "Applying remote encrypted changes…"
+            : "Checking encrypted changes…",
       });
 
       try {
-        const local = buildLocalSyncPayload(options, records, currentSession);
-        const result = await runEncryptedSyncOperation({
-          operation: "sync",
-          clientId: syncClientId,
-          rpId: syncRpId,
-          local,
-          reason,
-        });
-        if (result.operation !== "sync") return;
-        autoSyncFingerprintRef.current = syncPayloadFingerprint(result.payload);
-        await applySyncedPayload(result.payload);
-        const nextState = await rememberSyncState(result.fileId, syncRpId, result.syncedAt);
-        setSyncState(nextState);
+        const local = buildSharedSyncPayload(options, records, currentSession);
+        const result = await syncActiveDataset(sharedSyncConfig, local);
+        autoSyncFingerprintRef.current = sharedPayloadFingerprint(result.payload);
+        await applySyncedPayload(
+          sharedPayloadToSyncPayload(result.payload, currentSession.androidPreferences),
+        );
+        const refreshed = await loadSharedSyncState();
+        if (refreshed) setSharedSyncState(refreshed);
         setAutoSyncNotice({
           kind: "success",
-          message: `Encrypted cloud sync updated ${formatLastSync(result.syncedAt)}.`,
+          message: `Encrypted sync updated ${formatLastSync(result.syncedAt)}.`,
         });
+        if (
+          reason === "foreground" &&
+          findProfile(refreshed ?? sharedSyncState, sharedSyncState.activeProfileKey)?.role ===
+            "owner"
+        ) {
+          await listPendingKeyResponses(sharedSyncConfig);
+        }
       } catch (error) {
         setAutoSyncNotice({
           kind: "error",
-          message: `Encrypted cloud sync needs attention: ${
+          message: `Encrypted sync needs attention: ${
             error instanceof Error ? error.message : String(error)
           }`,
         });
@@ -953,18 +963,18 @@ export default function App() {
         }
       }
     },
-    [applySyncedPayload, syncClientId, syncRpId, syncState],
+    [applySyncedPayload, sharedSyncConfig, sharedSyncState, syncReadOnly],
   );
 
   useEffect(() => {
-    if (syncState) return;
+    if (sharedSyncState) return;
     autoSyncFingerprintRef.current = "";
     autoSyncTriggerRef.current.reset();
     setAutoSyncNotice(null);
-  }, [syncState]);
+  }, [sharedSyncState]);
 
   useEffect(() => {
-    if (!storageReady || !wasmReady || !syncState) return;
+    if (!storageReady || !wasmReady || !sharedSyncState || syncReadOnly) return;
     if (autoSyncFingerprintRef.current === "") {
       autoSyncFingerprintRef.current = localSyncFingerprint;
       const h = window.setTimeout(() => void runAutoSync("startup"), 1_500);
@@ -973,28 +983,60 @@ export default function App() {
     if (autoSyncFingerprintRef.current === localSyncFingerprint) return;
     const h = window.setTimeout(() => void runAutoSync("change"), 1_800);
     return () => window.clearTimeout(h);
-  }, [localSyncFingerprint, runAutoSync, storageReady, syncState, wasmReady]);
+  }, [localSyncFingerprint, runAutoSync, sharedSyncState, storageReady, syncReadOnly, wasmReady]);
 
   useEffect(() => {
-    if (!storageReady || !wasmReady || !syncState) return;
-    const syncWhenVisible = () => {
-      if (document.visibilityState === "hidden") {
-        autoSyncHiddenAtRef.current = Date.now();
+    if (!storageReady || !wasmReady || !sharedSyncState || !sharedSyncConfig) return;
+    let cancelled = false;
+    let pollController: { stop(): void } | null = null;
+
+    void bindEasyBcSharingPoll({
+      config: sharedSyncConfig,
+      onEvents: async (events) => {
+        if (cancelled) return;
+        for (const event of events) {
+          if (event.kind === "shared-dataset-changed") {
+            void runAutoSync("remote-change");
+            continue;
+          }
+          if (event.kind === "pending-key-response") {
+            const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+            if (profile?.role === "owner" || profile?.role === "admin") {
+              setAutoSyncNotice({
+                kind: "info",
+                message: "Someone submitted an encrypted sync join request.",
+              });
+            }
+            continue;
+          }
+          if (event.kind === "token-expiring-soon") {
+            setAutoSyncNotice({
+              kind: "info",
+              message: "Google Drive access for encrypted sync expires soon. Open Settings to refresh.",
+            });
+            continue;
+          }
+          if (event.kind === "token-expired") {
+            setAutoSyncNotice({
+              kind: "error",
+              message: "Google Drive access for encrypted sync expired. Open Settings to reconnect.",
+            });
+          }
+        }
+      },
+    }).then((controller) => {
+      if (cancelled) {
+        controller?.stop();
         return;
       }
-      const hiddenAt = autoSyncHiddenAtRef.current;
-      autoSyncHiddenAtRef.current = null;
-      if (shouldSyncAfterForeground({
-        hiddenAt,
-        now: Date.now(),
-        operationInProgress: encryptedSyncOperationInProgress(),
-      })) {
-        void runAutoSync("foreground");
-      }
+      pollController = controller;
+    });
+
+    return () => {
+      cancelled = true;
+      pollController?.stop();
     };
-    document.addEventListener("visibilitychange", syncWhenVisible);
-    return () => document.removeEventListener("visibilitychange", syncWhenVisible);
-  }, [runAutoSync, storageReady, syncState, wasmReady]);
+  }, [runAutoSync, sharedSyncConfig, sharedSyncState, storageReady, wasmReady]);
 
   const runPlan = useCallback(() => {
     if (!wasmReady) return;
@@ -1559,7 +1601,13 @@ export default function App() {
       <main className="app-content">
       {!wasmReady && !wasmError && <p className="loading-state">Loading planner…</p>}
       {wasmError && <p className="warn">Planner failed to load: {wasmError}</p>}
-      {syncState && autoSyncNotice && (
+      {sharedSyncState && syncReadOnly && (
+        <p className="sync-readonly-banner" role="status">
+          Viewing a shared encrypted profile in read-only mode. Switch to your profile in Settings
+          to edit planner data, periods, or day logs.
+        </p>
+      )}
+      {sharedSyncState && autoSyncNotice && (
         <p className={`auto-sync-banner auto-sync-${autoSyncNotice.kind}`} role="status">
           <RefreshCw
             aria-hidden
@@ -2186,18 +2234,28 @@ export default function App() {
                 options={opts}
                 periodRecords={periodRecords}
                 session={session}
-                syncState={syncState}
+                sharedSyncState={sharedSyncState}
                 onApplyPayload={applySyncedPayload}
-                onSyncStateChange={setSyncState}
+                onSharedSyncStateChange={setSharedSyncState}
                 onSyncComplete={markSyncComplete}
+                onProfileSwitch={async (state) => {
+                  if (!sharedSyncConfig) return;
+                  const { loadActiveProfileDataset } = await import("./sync/sharedSync");
+                  const result = await loadActiveProfileDataset(sharedSyncConfig);
+                  await applySyncedPayload(
+                    sharedPayloadToSyncPayload(result.payload, session.androidPreferences),
+                  );
+                  setSharedSyncState(state);
+                }}
               />
               <section className="settings-platform-card">
                 <h3>Platform-specific settings</h3>
                 <p className="hint">
                   Android keeps <strong>Device Calendar Export</strong>, reminder scheduling, and
                   <strong> Backup File</strong> export/import in its native settings screen. The web
-                  app keeps browser-safe settings here and uses <strong>Encrypted Cloud Sync</strong>
-                  for shared planner, period, and logged-day data.
+                  app keeps browser-safe settings here and uses <strong>Encrypted Sync</strong>
+                  for shared planner, period, and logged-day data. Shared sync is web-only today;
+                  Android continues personal encrypted sync on your Google account.
                 </p>
                 <p className="settings-links">
                   <a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy policy</a>

@@ -328,20 +328,37 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     val status by vm.cloudStatus.collectAsState()
     val connected by vm.cloudConnected.collectAsState()
     val lastSync by vm.lastCloudSync.collectAsState()
+    val sharedState by vm.sharedSyncState.collectAsState()
+    val joinUrl by vm.joinUrl.collectAsState()
     var pendingOperation by remember { mutableStateOf<CloudSyncOperation?>(null) }
+    var pendingProfileKey by remember { mutableStateOf<String?>(null) }
+    var pendingInvite by remember { mutableStateOf<Pair<String, String>?>(null) }
     var confirming by remember { mutableStateOf<CloudSyncOperation?>(null) }
+    var inviteEmail by remember { mutableStateOf("") }
+    var inviteRole by remember { mutableStateOf("viewer") }
 
     val resolutionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
         val operation = pendingOperation
+        val profileKey = pendingProfileKey
+        val invite = pendingInvite
         pendingOperation = null
-        if (result.resultCode != Activity.RESULT_OK || operation == null) {
+        pendingProfileKey = null
+        pendingInvite = null
+        if (result.resultCode != Activity.RESULT_OK) {
             vm.cloudError("Google authorization was cancelled.")
             return@rememberLauncherForActivityResult
         }
         runCatching { vm.finishCloudAuthorization(activity, result.data) }
-            .onSuccess { vm.runCloudOperation(activity, operation, it) }
+            .onSuccess { token ->
+                when {
+                    profileKey != null -> vm.switchProfile(token, profileKey)
+                    invite != null -> vm.inviteParticipant(token, invite.first, invite.second)
+                    operation != null -> vm.runCloudOperation(activity, operation, token)
+                    else -> vm.cloudError("Google authorization completed with no pending action.")
+                }
+            }
             .onFailure { vm.cloudError(it.message ?: "Google authorization failed.") }
     }
 
@@ -365,9 +382,9 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     }
 
     Text(
-        "Merge planner settings, period records, and day logs through an encrypted Google Drive snapshot. " +
-            "EasyBC encrypts the snapshot before upload and only requests access to its own hidden app-data file. " +
-            "After passkey unlock, the encryption key stays only in app memory for automatic sync.",
+        "Encrypt planner settings, period records, and day logs in your own Google Drive folder " +
+            "(EasyBC — you@email). Share read or write access with others by email. " +
+            "Open a join link on this device to accept someone else's share.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -382,12 +399,12 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             Icon(if (connected) Icons.Default.Cloud else Icons.Default.Key, null)
             Column {
                 Text(
-                    if (connected) "Encrypted cloud sync enabled on this device" else "Passkey-protected encrypted cloud copy",
+                    if (connected) "Encrypted sync enabled on this device" else "Passkey-protected encrypted sync",
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Text(
-                    lastSync?.let { "Last encrypted cloud update ${formatSyncTime(it)}" }
-                        ?: "No encrypted cloud sync has completed on this device.",
+                    lastSync?.let { "Last encrypted update ${formatSyncTime(it)}" }
+                        ?: "No encrypted sync has completed on this device.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -397,6 +414,64 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     Spacer(Modifier.height(8.dp))
 
     val busy = status is SettingsViewModel.SyncStatus.Running
+    sharedState?.let { state ->
+        Spacer(Modifier.height(8.dp))
+        Text("Profiles", style = MaterialTheme.typography.labelLarge)
+        state.profiles.forEach { profile ->
+            val key = com.easybc.planner.sync.shared.profileKey(profile.ownerEmail, profile.datasetId)
+            val active = key == state.activeProfileKey
+            val label = if (
+                profile.ownerEmail.equals(state.ownerEmail, ignoreCase = true) && profile.role == "owner"
+            ) {
+                "My data"
+            } else {
+                profile.folderName
+            }
+            OutlinedButton(
+                onClick = {
+                    if (active || busy) return@OutlinedButton
+                    scope.launch {
+                        try {
+                            when (val step = vm.beginCloudAuthorization(activity)) {
+                                is AuthorizationStep.Authorized ->
+                                    vm.switchProfile(step.accessToken, key)
+                                is AuthorizationStep.NeedsResolution -> {
+                                    pendingProfileKey = key
+                                    resolutionLauncher.launch(
+                                        IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                                    )
+                                }
+                            }
+                        } catch (error: Exception) {
+                            vm.cloudError(error.message ?: "Google authorization failed.")
+                        }
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    buildString {
+                        append(if (active) "● " else "○ ")
+                        append(label)
+                        append(" · ")
+                        append(profile.ownerEmail)
+                        if (!com.easybc.planner.sync.shared.canPublishRole(profile.role)) {
+                            append(" · read-only")
+                        }
+                    },
+                )
+            }
+        }
+        if (vm.isReadOnlyActiveProfile()) {
+            Text(
+                "Viewing a shared profile in read-only mode.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Spacer(modifier = Modifier.height(8.dp))
     if (connected) {
         Button(
             onClick = { authorizeAndRun(CloudSyncOperation.SYNC) },
@@ -405,19 +480,71 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Sync, null)
             Spacer(Modifier.width(8.dp))
-            Text("Merge encrypted cloud data")
+            Text("Merge encrypted changes")
+        }
+        if (sharedState != null && vm.activeProfile()?.role == "owner") {
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = inviteEmail,
+                onValueChange = { inviteEmail = it },
+                label = { Text("Invite email") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { inviteRole = "viewer" },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                ) { Text(if (inviteRole == "viewer") "● Viewer" else "Viewer") }
+                OutlinedButton(
+                    onClick = { inviteRole = "writer" },
+                    enabled = !busy,
+                    modifier = Modifier.weight(1f),
+                ) { Text(if (inviteRole == "writer") "● Writer" else "Writer") }
+            }
+            OutlinedButton(
+                onClick = {
+                    if (inviteEmail.isBlank()) return@OutlinedButton
+                    scope.launch {
+                        try {
+                            when (val step = vm.beginCloudAuthorization(activity)) {
+                                is AuthorizationStep.Authorized ->
+                                    vm.inviteParticipant(step.accessToken, inviteEmail, inviteRole)
+                                is AuthorizationStep.NeedsResolution -> {
+                                    pendingInvite = inviteEmail to inviteRole
+                                    resolutionLauncher.launch(
+                                        IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                                    )
+                                }
+                            }
+                        } catch (error: Exception) {
+                            vm.cloudError(error.message ?: "Google authorization failed.")
+                        }
+                    }
+                },
+                enabled = !busy && inviteEmail.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Invite by email") }
+            joinUrl?.let { url ->
+                Text(
+                    "Join link: $url",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = { confirming = CloudSyncOperation.RESET },
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
-            ) { Text("Replace cloud passkey") }
+            ) { Text("Reset encrypted sync") }
             OutlinedButton(
                 onClick = { confirming = CloudSyncOperation.DELETE },
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
-            ) { Text("Delete encrypted cloud copy") }
+            ) { Text("Remove from this device") }
         }
     } else {
         Button(
@@ -427,13 +554,13 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         ) {
             Icon(Icons.Default.Key, null)
             Spacer(Modifier.width(8.dp))
-            Text("Set up encrypted cloud sync")
+            Text("Set up encrypted sync")
         }
         OutlinedButton(
             onClick = { authorizeAndRun(CloudSyncOperation.ENABLE) },
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Enable encrypted cloud sync on this device") }
+        ) { Text("Migrate legacy encrypted sync") }
     }
     StatusRow(status = status, onDismiss = vm::dismissCloudStatus)
     Text(

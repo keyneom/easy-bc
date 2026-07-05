@@ -25,8 +25,8 @@ android {
         applicationId = "com.easybc.planner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.1.24"
+        versionCode = 26
+        versionName = "0.1.25"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
@@ -82,11 +82,17 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
 
-    // Encrypted snapshot sync (crypto, Drive appData store, passkey PRF, controller).
-    implementation("com.keyneom:sync-kit-android:0.2.0-rc.0")
+    // Tier A background sharing detection (sync-kit worker base class).
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
-    // User-consented OAuth access to Drive's app-private data folder.
+    // Encrypted snapshot sync (crypto, Drive appData store, passkey PRF, controller).
+    implementation("com.keyneom:sync-kit-android:0.2.0-rc.1")
+
+    // User-consented OAuth access to Drive (appData + shared drive.file).
     implementation("com.google.android.gms:play-services-auth:21.6.0")
+
+    // Encrypted storage for per-device sharing identity private keys.
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.8.4")

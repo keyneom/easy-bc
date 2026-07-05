@@ -12,16 +12,18 @@ All Android application data stays on the device unless you explicitly export a 
 
 ## Use on the web
 
-The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyneom.github.io/easy-bc/). It uses the same planner core and Android-inspired interface, with data stored in the browser on the current device. Optional encrypted sync stores only ciphertext in Google Drive's app-data folder. After passkey unlock, EasyBC retains only the derived content key in tab or Android-process memory so local changes can sync automatically without repeated prompts. The key is cleared when the tab/process ends or after the app remains backgrounded for 15 minutes. All project paths under `keyneom.github.io` share one browser origin and must be treated as equally trusted; see the [hosting and passkey notes](docs/github-pages-passkeys.md).
+The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyneom.github.io/easy-bc/). It uses the same planner core and Android-inspired interface, with data stored in the browser on the current device. Optional **encrypted sync** stores ciphertext in a per-owner Google Drive folder (`EasyBC — you@email`), supports inviting others with viewer or writer access, and lets you switch between your profile and datasets shared with you. Web and Android both use `@keyneom/sync-kit` 0.2.0-rc.1 shared backups (`drive.file`, join deep links, Tier A background change detection). After unlock, keys stay in process/tab memory for automatic sync and clear after 15 minutes in the background. See [`docs/android-multi-calendar.md`](docs/android-multi-calendar.md) for per-profile device calendar projection (Phase 2).
 
 For a local web build, install Rust and `wasm-bindgen-cli` 0.2.117, run `npm run build:wasm` from [`web/`](web/), then use the normal npm development or build command. Generated native and WebAssembly binaries are intentionally not committed; publication workflows rebuild them from source.
 
-EasyBC web uses `@keyneom/sync-kit` for provider-neutral encryption, passkey,
-Google authorization/Drive adapters, and serialized sync orchestration.
-EasyBC continues to own its payload schema, merge policy, persistence,
-lifecycle timing, and exact v1 compatibility profile in this repository.
-Android remains a native protocol consumer and continues reading and writing
-v1 independently. The extraction constraints are documented in
+EasyBC web and Android use `@keyneom/sync-kit` 0.2.0-rc.1 for encrypted shared backups: passkey-protected
+sharing identities, Google Drive `drive.file` transport, multi-profile switching,
+Tier A background change detection, and serialized sync orchestration. Android
+consumes `com.keyneom:sync-kit-android` from GitHub Packages (sharing controller,
+Drive transport, `SharingSyncWorker`). EasyBC owns its payload schema,
+merge policy, persistence, lifecycle timing, and UI on both platforms.
+Upstream improvements tracked in [`docs/sync-kit-upstream-issues.md`](docs/sync-kit-upstream-issues.md).
+The extraction constraints are documented in
 [`docs/sync-kit-extraction-handoff.md`](docs/sync-kit-extraction-handoff.md).
 
 ## Functional Requirements: Personal-Use Fertility Risk Planner

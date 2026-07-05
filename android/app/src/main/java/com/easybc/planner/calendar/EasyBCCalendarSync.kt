@@ -86,13 +86,18 @@ class EasyBCCalendarSync(private val context: Context) {
 
     // ── Public entry points ──────────────────────────────────────────────
 
+    data class CalendarIdentity(
+        val internalName: String = CALENDAR_NAME,
+        val displayName: String = CALENDAR_DISPLAY_NAME,
+    )
+
     /**
      * Idempotently ensure our calendar exists. Returns its provider id.
      * Caller must hold WRITE_CALENDAR.
      */
-    fun ensureCalendarExists(): Long {
-        findCalendarId()?.let { return it }
-        return createLocalCalendar()
+    fun ensureCalendarExists(identity: CalendarIdentity = CalendarIdentity()): Long {
+        findCalendarId(identity)?.let { return it }
+        return createLocalCalendar(identity)
     }
 
     /**
@@ -116,8 +121,9 @@ class EasyBCCalendarSync(private val context: Context) {
         cycleCalc: CycleCalculator,
         today: LocalDate = LocalDate.now(),
         fertileHalfWidth: Int = 5,
+        calendarIdentity: CalendarIdentity = CalendarIdentity(),
     ): SyncResult {
-        val calendarId = ensureCalendarExists()
+        val calendarId = ensureCalendarExists(calendarIdentity)
         deleteAllEvents(calendarId)
 
         val coverageCycles = cycleCalc.buildCoverageCycles(periods, settings)
@@ -260,25 +266,25 @@ class EasyBCCalendarSync(private val context: Context) {
 
     // ── Private: calendar lookup / create ───────────────────────────────
 
-    private fun findCalendarId(): Long? {
+    private fun findCalendarId(identity: CalendarIdentity = CalendarIdentity()): Long? {
         val uri = CalendarContract.Calendars.CONTENT_URI
         val projection = arrayOf(CalendarContract.Calendars._ID)
         val selection = "${CalendarContract.Calendars.ACCOUNT_NAME} = ? AND " +
             "${CalendarContract.Calendars.ACCOUNT_TYPE} = ? AND " +
             "${CalendarContract.Calendars.NAME} = ?"
-        val args = arrayOf(ACCOUNT_NAME, ACCOUNT_TYPE, CALENDAR_NAME)
+        val args = arrayOf(ACCOUNT_NAME, ACCOUNT_TYPE, identity.internalName)
         context.contentResolver.query(uri, projection, selection, args, null)?.use { cursor ->
             if (cursor.moveToFirst()) return cursor.getLong(0)
         }
         return null
     }
 
-    private fun createLocalCalendar(): Long {
+    private fun createLocalCalendar(identity: CalendarIdentity = CalendarIdentity()): Long {
         val values = ContentValues().apply {
             put(CalendarContract.Calendars.ACCOUNT_NAME, ACCOUNT_NAME)
             put(CalendarContract.Calendars.ACCOUNT_TYPE, ACCOUNT_TYPE)
-            put(CalendarContract.Calendars.NAME, CALENDAR_NAME)
-            put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, CALENDAR_DISPLAY_NAME)
+            put(CalendarContract.Calendars.NAME, identity.internalName)
+            put(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME, identity.displayName)
             put(CalendarContract.Calendars.CALENDAR_COLOR, CALENDAR_COLOR)
             put(
                 CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,

@@ -22,6 +22,8 @@ jobs:
       contents: read
     env:
       VITE_GOOGLE_WEB_CLIENT_ID: ${{ vars.GOOGLE_WEB_CLIENT_ID }}
+      VITE_GOOGLE_API_KEY: ${{ vars.GOOGLE_API_KEY }}
+      VITE_GOOGLE_CLOUD_PROJECT_NUMBER: ${{ vars.GOOGLE_CLOUD_PROJECT_NUMBER }}
     steps:
       - uses: actions/checkout@v7
       - name: Build WebAssembly planner from source

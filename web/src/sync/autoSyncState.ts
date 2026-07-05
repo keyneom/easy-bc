@@ -1,4 +1,4 @@
-export type AutoSyncReason = "startup" | "foreground" | "change";
+export type AutoSyncReason = "startup" | "foreground" | "change" | "remote-change";
 
 export const FOREGROUND_SYNC_MIN_HIDDEN_MS = 30_000;
 

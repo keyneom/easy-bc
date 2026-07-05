@@ -1,0 +1,50 @@
+import { parseGoogleDriveOpenState } from "@keyneom/sync-kit/stores/google-drive/picker";
+import { easyBcSyncFolderName } from "./sharedFolderName";
+
+export type JoinLinkParams = {
+  exchangeId: string;
+  appFolderId: string;
+  ownerEmail: string;
+  invitationFileId: string;
+};
+
+export function parseJoinLinkParams(
+  search: string | URLSearchParams = window.location.search,
+): JoinLinkParams | null {
+  const params =
+    typeof search === "string"
+      ? new URLSearchParams(search.startsWith("?") ? search.slice(1) : search)
+      : search;
+  if (params.get("sync") !== "join") return null;
+  const exchangeId = params.get("exchange")?.trim() ?? "";
+  const appFolderId = params.get("folder")?.trim() ?? "";
+  const ownerEmail = params.get("owner")?.trim() ?? "";
+  const invitationFileId = params.get("invitation")?.trim() ?? "";
+  if (!exchangeId || !appFolderId || !ownerEmail) return null;
+  return { exchangeId, appFolderId, ownerEmail, invitationFileId };
+}
+
+export function clearJoinLinkParams(): void {
+  const url = new URL(window.location.href);
+  for (const key of ["sync", "exchange", "folder", "owner", "invitation"]) {
+    url.searchParams.delete(key);
+  }
+  window.history.replaceState({}, "", url.toString());
+}
+
+export function parseDriveOpenFolderId(): string | null {
+  try {
+    const open = parseGoogleDriveOpenState(window.location.search);
+    return open?.fileIds[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function folderNameForOwner(ownerEmail: string): string {
+  return easyBcSyncFolderName(ownerEmail);
+}
+
+export function joinLinkSummary(params: JoinLinkParams): string {
+  return `${folderNameForOwner(params.ownerEmail)} (${params.ownerEmail})`;
+}

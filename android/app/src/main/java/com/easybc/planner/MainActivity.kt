@@ -18,9 +18,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.easybc.planner.notify.ReminderScheduler
 import com.easybc.planner.sync.CloudAutoSyncSession
+import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
+import com.easybc.planner.sync.shared.SharedSyncCoordinator
 import com.easybc.planner.ui.navigation.AppNavigation
 import com.easybc.planner.ui.theme.EasyBCTheme
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -53,11 +56,13 @@ class MainActivity : ComponentActivity() {
 
     private val cloudAutoSyncSession: CloudAutoSyncSession by lazy {
         val app = application as EasyBCApp
+        val store = SyncPayloadStore(app.database)
         CloudAutoSyncSession(
             activity = this,
             repo = app.repository,
-            store = SyncPayloadStore(app.database),
+            store = store,
             resolveAuthorization = ::resolveCloudAutoSyncAuthorization,
+            sharedSync = SharedSyncCoordinator(app, app.database, store),
         )
     }
 
@@ -78,6 +83,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         cloudAutoSyncSession.start(cloudAutoSyncScope)
+        handleSharedSyncJoinIntent(intent)
     }
 
     override fun onStart() {
@@ -96,6 +102,31 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         if (shouldRouteToReconcile(intent)) {
             initialReconcileRequest.value = true
+        }
+        handleSharedSyncJoinIntent(intent)
+    }
+
+    private fun handleSharedSyncJoinIntent(intent: Intent?) {
+        val data = intent?.data ?: return
+        if (data.getQueryParameter("sync") != "join") return
+        val invitationFileId = data.getQueryParameter("invitation") ?: return
+        val ownerFolderId = data.getQueryParameter("folder") ?: return
+        val ownerEmail = data.getQueryParameter("owner") ?: return
+        cloudAutoSyncScope.launch {
+            runCatching {
+                val app = application as EasyBCApp
+                val store = SyncPayloadStore(app.database)
+                val sharedSync = SharedSyncCoordinator(app, app.database, store)
+                val auth = GoogleAuthorization()
+                val token = when (val step = auth.begin(this@MainActivity)) {
+                    is com.easybc.planner.sync.AuthorizationStep.Authorized -> step.accessToken
+                    is com.easybc.planner.sync.AuthorizationStep.NeedsResolution -> {
+                        val result = resolveCloudAutoSyncAuthorization(step.pendingIntent)
+                        auth.finish(this@MainActivity, result)
+                    }
+                }
+                sharedSync.join(token, invitationFileId, ownerFolderId, ownerEmail)
+            }
         }
     }
 

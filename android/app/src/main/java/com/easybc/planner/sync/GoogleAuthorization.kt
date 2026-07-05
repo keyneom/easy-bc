@@ -3,6 +3,7 @@ package com.easybc.planner.sync
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.Intent
+import com.easybc.planner.sync.shared.DRIVE_FILE_SCOPE
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
@@ -21,7 +22,12 @@ class GoogleAuthorization {
     suspend fun begin(activity: Activity): AuthorizationStep {
         @Suppress("DEPRECATION")
         val request = AuthorizationRequest.builder()
-            .setRequestedScopes(listOf(Scope(DRIVE_APPDATA_SCOPE)))
+            .setRequestedScopes(
+                listOf(
+                    Scope(DRIVE_FILE_SCOPE),
+                    Scope(DRIVE_APPDATA_SCOPE),
+                ),
+            )
             .build()
         val result = Identity.getAuthorizationClient(activity).authorize(request).await()
         return result.toStep()
@@ -36,11 +42,11 @@ class GoogleAuthorization {
     private fun AuthorizationResult.toStep(): AuthorizationStep {
         if (hasResolution()) {
             return AuthorizationStep.NeedsResolution(
-                pendingIntent ?: error("Google authorization resolution was unavailable.")
+                pendingIntent ?: error("Google authorization resolution was unavailable."),
             )
         }
         return AuthorizationStep.Authorized(
-            accessToken ?: error("Google authorization did not return an access token.")
+            accessToken ?: error("Google authorization did not return an access token."),
         )
     }
 }
@@ -50,4 +56,3 @@ private suspend fun <T> Task<T>.await(): T = suspendCancellableCoroutine { conti
     addOnFailureListener { if (continuation.isActive) continuation.resumeWithException(it) }
     addOnCanceledListener { if (continuation.isActive) continuation.cancel() }
 }
-

@@ -15,6 +15,11 @@ import com.easybc.planner.sync.CloudSyncCoordinator
 import com.easybc.planner.sync.CloudSyncOperation
 import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
+import com.easybc.planner.sync.shared.ProfileRecord
+import com.easybc.planner.sync.shared.SharedSyncCoordinator
+import com.easybc.planner.sync.shared.SharedSyncState
+import com.easybc.planner.sync.shared.canPublishRole
+import com.easybc.planner.sync.shared.profileKey
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -24,7 +29,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val cycleCalc = app.cycleCalculator
     private val calendarSync = app.calendarSync
     private val syncStore = SyncPayloadStore(app.database)
-    private val cloudSync = CloudSyncCoordinator(syncStore)
+    private val legacyCloudSync = CloudSyncCoordinator(syncStore)
+    private val sharedSync = SharedSyncCoordinator(app, app.database, syncStore)
     private val googleAuthorization = GoogleAuthorization()
 
     val settings: StateFlow<UserSettingsEntity?> = repo.settingsFlow
@@ -55,13 +61,31 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _lastCloudSync = MutableStateFlow<String?>(null)
     val lastCloudSync: StateFlow<String?> = _lastCloudSync
 
+    private val _sharedSyncState = MutableStateFlow<SharedSyncState?>(null)
+    val sharedSyncState: StateFlow<SharedSyncState?> = _sharedSyncState
+
+    private val _joinUrl = MutableStateFlow<String?>(null)
+    val joinUrl: StateFlow<String?> = _joinUrl
+
+    private val _pendingResponses = MutableStateFlow<List<SharedSyncCoordinator.PendingResponse>>(emptyList())
+    val pendingResponses: StateFlow<List<SharedSyncCoordinator.PendingResponse>> = _pendingResponses
+
     init {
         viewModelScope.launch {
             val existing = repo.getSettings()
             _draft.value = existing ?: UserSettingsEntity()
-            _cloudConnected.value = syncStore.fileId() != null
-            _lastCloudSync.value = syncStore.lastSyncedAt()
+            refreshSharedSyncState()
         }
+    }
+
+    private suspend fun refreshSharedSyncState() {
+        val state = sharedSync.loadState()
+        _sharedSyncState.value = state
+        _cloudConnected.value = state != null || syncStore.fileId() != null
+        val active = state?.profiles?.firstOrNull {
+            profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
+        }
+        _lastCloudSync.value = active?.lastSyncedAt ?: syncStore.lastSyncedAt()
     }
 
     fun updateDraft(transform: (UserSettingsEntity) -> UserSettingsEntity) {
@@ -217,18 +241,144 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
-                val message = cloudSync.execute(activity, operation, accessToken)
+                val message = when (operation) {
+                    CloudSyncOperation.SETUP -> {
+                        sharedSync.setup(accessToken)
+                        "Encrypted sync is set up. Your data lives in a Drive folder labeled with your email."
+                    }
+                    CloudSyncOperation.ENABLE -> {
+                        // Legacy personal appData enable, then migrate into shared sync.
+                        if (sharedSync.loadState() == null && syncStore.fileId() != null) {
+                            legacyCloudSync.execute(activity, CloudSyncOperation.ENABLE, accessToken)
+                        }
+                        sharedSync.setup(accessToken)
+                        "Encrypted sync is enabled and the latest records were merged."
+                    }
+                    CloudSyncOperation.SYNC -> {
+                        if (sharedSync.loadState() != null) {
+                            sharedSync.sync(accessToken)
+                            "Encrypted sync data is up to date."
+                        } else {
+                            legacyCloudSync.execute(activity, operation, accessToken)
+                        }
+                    }
+                    CloudSyncOperation.RESET -> {
+                        sharedSync.forget()
+                        sharedSync.setup(accessToken)
+                        "Encrypted sync was reset with this device's local data."
+                    }
+                    CloudSyncOperation.DELETE -> {
+                        if (sharedSync.loadState() != null) {
+                            sharedSync.forget()
+                            "Encrypted sync was removed from this device."
+                        } else {
+                            legacyCloudSync.execute(activity, operation, accessToken)
+                        }
+                    }
+                }
                 repo.getSettings()?.let {
                     _draft.value = it
                     applyReminderSchedule(it)
                 }
-                _cloudConnected.value = syncStore.fileId() != null
-                _lastCloudSync.value = syncStore.lastSyncedAt()
+                refreshSharedSyncState()
                 _cloudStatus.value = SyncStatus.Success(message)
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Encrypted cloud sync failed.")
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Encrypted sync failed.")
             }
         }
+    }
+
+    fun inviteParticipant(accessToken: String, email: String, role: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                val url = sharedSync.invite(accessToken, email.trim(), role)
+                _joinUrl.value = url
+                _cloudStatus.value = SyncStatus.Success("Invitation created. Share the join link with $email.")
+            } catch (error: Exception) {
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Invite failed.")
+            }
+        }
+    }
+
+    fun joinSharedSync(
+        accessToken: String,
+        invitationFileId: String,
+        ownerFolderId: String,
+        ownerEmail: String,
+    ) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.join(accessToken, invitationFileId, ownerFolderId, ownerEmail)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "Join request submitted. The owner must accept before you can sync.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Join failed.")
+            }
+        }
+    }
+
+    fun switchProfile(accessToken: String, profileKeyValue: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.setActiveProfile(profileKeyValue)
+                sharedSync.loadActiveProfile(accessToken)
+                repo.getSettings()?.let {
+                    _draft.value = it
+                    applyReminderSchedule(it)
+                }
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Switched encrypted sync profile.")
+            } catch (error: Exception) {
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Profile switch failed.")
+            }
+        }
+    }
+
+    fun refreshPendingResponses(accessToken: String) {
+        viewModelScope.launch {
+            _pendingResponses.value = runCatching {
+                sharedSync.listPendingResponses(accessToken)
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    fun acceptPendingResponse(
+        accessToken: String,
+        response: SharedSyncCoordinator.PendingResponse,
+        recipientEmail: String,
+    ) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.acceptKeyResponse(
+                    accessToken = accessToken,
+                    invitationFileId = response.invitationFileId,
+                    responseFileId = response.responseFileId,
+                    recipientEmailAddress = recipientEmail.trim(),
+                )
+                refreshPendingResponses(accessToken)
+                _cloudStatus.value = SyncStatus.Success("Participant accepted into encrypted sync.")
+            } catch (error: Exception) {
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Accept failed.")
+            }
+        }
+    }
+
+    fun activeProfile(): ProfileRecord? {
+        val state = _sharedSyncState.value ?: return null
+        return state.profiles.firstOrNull {
+            profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
+        }
+    }
+
+    fun isReadOnlyActiveProfile(): Boolean {
+        val profile = activeProfile() ?: return false
+        return !canPublishRole(profile.role)
     }
 
     fun cloudError(message: String) {

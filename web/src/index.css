@@ -1212,6 +1212,68 @@ h3 {
   line-height: 1.5;
 }
 
+.profile-switcher {
+  margin: 1rem 0 0.75rem;
+}
+
+.profile-switcher-list {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+}
+
+.profile-switcher-item {
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--outline-soft);
+  border-radius: 14px;
+  background: var(--surface-soft);
+  text-align: left;
+}
+
+.profile-switcher-item.active {
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--outline-soft));
+  background: color-mix(in srgb, var(--primary-container) 35%, var(--surface));
+}
+
+.profile-switcher-label {
+  font-weight: 750;
+}
+
+.profile-switcher-meta {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.sync-share-panel {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--outline-soft);
+}
+
+.sync-pending-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.sync-pending-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+}
+
+.sync-readonly-banner {
+  margin: 0 0 0.75rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--primary) 10%, var(--surface));
+  color: var(--text);
+  font-size: 0.84rem;
+}
+
 .sync-notice {
   margin: 0.65rem 0;
   padding: 0.7rem 0.8rem;

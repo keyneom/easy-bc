@@ -28,13 +28,14 @@
     <p class="notice">EasyBC is local-first. It has no EasyBC account server, advertising SDK, or analytics SDK.</p>
     <h2>Data stored locally</h2>
     <p>Period records, day logs, body-signal observations, planner settings, and generated plans stay in application or browser storage. Android platform backup is disabled.</p>
-    <h2>Optional encrypted cloud sync</h2>
-    <p>When explicitly enabled in the web or Android app, EasyBC requests only the Google Drive app-data scope. It encrypts user-authored records on the device before placing one encrypted file in Drive's hidden application-data folder. Raw passkey output is kept only in memory for the active operation. A short-lived Google access token and the derived content-encryption key may remain in tab or Android-process memory for automatic sync, but are never intentionally written to browser or app storage and are cleared when the tab/process ends or after 15 minutes in the background.</p>
-    <p>EasyBC uses Google user data only to provide encrypted cloud sync requested by the user and does not sell or transfer that data to third parties.</p>
+    <h2>Optional encrypted sync</h2>
+    <p>When explicitly enabled in the web app, EasyBC uses Google Drive's non-sensitive <code>drive.file</code> scope. Each owner gets a visible Drive folder named with their Google account email (for example <strong>EasyBC — you@example.com</strong>). EasyBC encrypts reproductive-health records on the device before upload; Drive stores ciphertext. Owners can invite others by email with viewer or writer access. Folder names, file metadata, and participant lists are visible in Google Drive to people with folder access.</p>
+    <p>Android uses the same shared-folder model with a per-device sharing identity stored in EncryptedSharedPreferences (Android Keystore). Raw passkey output and derived keys are kept only in memory for the active session. A short-lived Google access token may remain in tab or app-process memory for automatic sync, but is not intentionally written to browser or app storage and is cleared when the session ends or after 15 minutes in the background.</p>
+    <p>EasyBC uses Google user data only to provide encrypted sync requested by the user and does not sell or transfer that data to third parties.</p>
     <h2>User-directed exports</h2>
     <p>Manual JSON backups, iCalendar exports, and entries written to a device calendar are not encrypted by EasyBC. Treat them as sensitive files.</p>
     <h2>Retention and deletion</h2>
-    <p>Local data remains until records or application storage are deleted. Encrypted cloud data remains in the Drive app-data folder until the user chooses <strong>Delete encrypted cloud copy</strong> in EasyBC or removes EasyBC's hidden app data through their Google Account. Revoking access prevents future access but does not by itself guarantee file deletion.</p>
+    <p>Local data remains until records or application storage are deleted. Encrypted web sync data remains in the owner's Google Drive folder until the user removes encrypted sync from EasyBC or deletes the folder in Google Drive. Legacy Android app-data snapshots remain until deleted through EasyBC settings or Google Account app-data cleanup. Revoking OAuth access prevents future access but does not by itself guarantee file deletion.</p>
     <h2>Security reports</h2>
     <p>Use the repository's <a href="https://github.com/keyneom/easy-bc/security/advisories/new">private security advisory form</a>. Do not post personal health data in public issues.</p>
   </body>
