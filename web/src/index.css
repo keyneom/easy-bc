@@ -1362,6 +1362,49 @@ h3 {
   color: #6c4100;
 }
 
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--outline-soft));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--primary-container) 24%, var(--surface));
+  color: var(--primary-strong);
+  box-shadow: 0 6px 18px rgba(32, 29, 36, 0.06);
+}
+
+.update-banner svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+
+.update-banner-copy {
+  display: grid;
+  gap: 0.15rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.82rem;
+}
+
+.update-banner-copy strong {
+  font-size: 0.88rem;
+}
+
+.update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
+.update-banner .btn-secondary,
+.update-banner .btn-icon {
+  min-height: 2rem;
+}
+
 .planner-screen {
   width: min(100%, 840px);
   margin: 0 auto;

@@ -66,6 +66,7 @@ import { EC_COPY } from "./strings";
 import { DayDetailPanel, type MethodRiskRow } from "./components/DayDetailPanel";
 import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components/MonthCalendar";
 import { SyncSettings } from "./components/SyncSettings";
+import { UpdateBanner } from "./components/UpdateBanner";
 import {
   AutoSyncTriggerState,
   type AutoSyncReason,
@@ -1554,6 +1555,8 @@ export default function App() {
           Local-first
         </div>
       </header>
+
+      <UpdateBanner />
 
       <nav className="app-tabs" role="tablist" aria-label="Main sections">
         <button

@@ -1,5 +1,7 @@
 package com.easybc.planner.ui.navigation
 
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
@@ -26,6 +28,7 @@ import com.easybc.planner.ui.history.HistoryScreen
 import com.easybc.planner.ui.planner.PlannerScreen
 import com.easybc.planner.ui.reconcile.ReconcileScreen
 import com.easybc.planner.ui.settings.SettingsScreen
+import com.easybc.planner.ui.update.UpdateAvailableBanner
 
 enum class Screen(
     val route: String,
@@ -88,11 +91,17 @@ fun AppNavigation(
             }
         },
     ) { innerPadding ->
-        NavHost(
-            navController = navController,
-            startDestination = Screen.Calendar.route,
-            modifier = Modifier.padding(innerPadding),
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
         ) {
+            UpdateAvailableBanner()
+            NavHost(
+                navController = navController,
+                startDestination = Screen.Calendar.route,
+                modifier = Modifier.weight(1f),
+            ) {
             composable(Screen.Calendar.route) {
                 CalendarScreen(onOpenReconcile = { navController.navigate("reconcile") })
             }
@@ -104,6 +113,7 @@ fun AppNavigation(
             composable("reconcile") {
                 ReconcileScreen(onBack = { navController.popBackStack() })
             }
+        }
         }
     }
 }

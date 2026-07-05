@@ -8,8 +8,11 @@
   },
   "scripts": {
     "build:wasm": "cargo build -p planner-core --target wasm32-unknown-unknown --features wasm --release && wasm-bindgen ../target/wasm32-unknown-unknown/release/planner_core.wasm --out-dir pkg --target web",
+    "predev": "node scripts/write-app-version.mjs",
     "dev": "vite",
+    "prebuild": "node scripts/write-app-version.mjs",
     "build": "vite build",
+    "pretest": "node scripts/write-app-version.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
