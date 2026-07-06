@@ -6,6 +6,16 @@ import kotlinx.serialization.Serializable
 const val EASY_BC_APP_ID = "easy-bc"
 const val PRIMARY_DATASET_ID = "primary"
 const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+
+/**
+ * Full Drive scope. Required on Android for cross-account sharing: with only
+ * drive.file, files shared from another account are invisible to the app
+ * (Drive returns 404) until the user grants them through the Google Picker —
+ * which exists on web but has no Android equivalent. Covers the recipient
+ * reading invitations and datasets in the owner's folder, writing the
+ * key-response there, and the owner reading that response back.
+ */
+const val DRIVE_FULL_SCOPE = "https://www.googleapis.com/auth/drive"
 const val EASY_BC_JOIN_LANDING_URL = "https://keyneom.github.io/easy-bc/"
 
 private const val MAX_DRIVE_NAME_LENGTH = 255

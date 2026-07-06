@@ -26,6 +26,22 @@ invitation file until they unmark it — the join flow's error now says what
 failed, and onboarding copy should tell recipients to check
 drive.google.com → Spam if a join fails with a not-found/permission error.
 
+### 2c. Cross-account access needs the full drive scope on Android — FIXED v0.1.38
+Live-confirmed: with only `drive.file`, files shared from another account are
+invisible to the app's token — Drive returns 404 ("File not found:
+<invitationFileId>") even though the recipient's *account* can browse the
+shared folder in the Drive UI. `drive.file` covers only files the app created
+for this user or that the user explicitly opened with the app; on web that
+grant comes from the Google Picker (which is why `sharedPicker.ts` exists),
+but Android has no Picker equivalent. Every cross-account step is affected:
+recipient reading the invitation and dataset, recipient writing the
+key-response into the owner's exchanges folder, and the owner reading that
+response back. v0.1.38 requests the full `drive` scope on Android.
+Caveats: `drive` is a *restricted* OAuth scope — if Google starts blocking
+consent ("access_blocked"), put the OAuth client in Testing mode and add both
+accounts as test users, or complete verification. A future privacy-tightening
+option is scoping the escalation to sharing flows only.
+
 ### 2b. Join links did not work at all — FIXED v0.1.37
 The link generator (sync-kit `appendSharingJoinParams`, SYNC_KIT style) emits
 `sync-kit-join/sync-kit-folder/sync-kit-exchange` plus app-appended

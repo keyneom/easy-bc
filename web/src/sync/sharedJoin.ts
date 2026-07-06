@@ -15,9 +15,15 @@ export function parseJoinLinkParams(
     typeof search === "string"
       ? new URLSearchParams(search.startsWith("?") ? search.slice(1) : search)
       : search;
-  if (params.get("sync") !== "join") return null;
-  const exchangeId = params.get("exchange")?.trim() ?? "";
-  const appFolderId = params.get("folder")?.trim() ?? "";
+  // Current invite links use sync-kit's parameter style
+  // (sync-kit-join/sync-kit-folder/sync-kit-exchange); older links used
+  // sync=join with bare exchange/folder names.
+  const syncKitStyle = params.get("sync-kit-join") != null;
+  if (!syncKitStyle && params.get("sync") !== "join") return null;
+  const exchangeId =
+    (params.get("sync-kit-exchange") ?? params.get("exchange"))?.trim() ?? "";
+  const appFolderId =
+    (params.get("sync-kit-folder") ?? params.get("folder"))?.trim() ?? "";
   const ownerEmail = params.get("owner")?.trim() ?? "";
   const invitationFileId = params.get("invitation")?.trim() ?? "";
   if (!exchangeId || !appFolderId || !ownerEmail) return null;
@@ -26,7 +32,16 @@ export function parseJoinLinkParams(
 
 export function clearJoinLinkParams(): void {
   const url = new URL(window.location.href);
-  for (const key of ["sync", "exchange", "folder", "owner", "invitation"]) {
+  for (const key of [
+    "sync",
+    "exchange",
+    "folder",
+    "owner",
+    "invitation",
+    "sync-kit-join",
+    "sync-kit-exchange",
+    "sync-kit-folder",
+  ]) {
     url.searchParams.delete(key);
   }
   window.history.replaceState({}, "", url.toString());

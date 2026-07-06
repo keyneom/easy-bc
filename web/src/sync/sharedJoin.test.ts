@@ -22,6 +22,15 @@ describe("join link parsing", () => {
     const parsed = parseJoinLinkParams(
       "?sync=join&exchange=ex-1&folder=folder-1&owner=sarah@example.com&invitation=inv-1",
     );
+    const syncKitStyle = parseJoinLinkParams(
+      "?sync-kit-join=1&sync-kit-folder=folder-1&sync-kit-exchange=ex-1&owner=sarah%40example.com&invitation=inv-1",
+    );
+    expect(syncKitStyle).toEqual({
+      exchangeId: "ex-1",
+      appFolderId: "folder-1",
+      ownerEmail: "sarah@example.com",
+      invitationFileId: "inv-1",
+    });
     expect(parsed).toEqual({
       exchangeId: "ex-1",
       appFolderId: "folder-1",
