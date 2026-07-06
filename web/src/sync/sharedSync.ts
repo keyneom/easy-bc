@@ -38,6 +38,7 @@ import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
 import {
   createInitialSharedSyncState,
   forgetSharedSyncState,
+  isSharedSyncConfigured,
   loadSharedSyncState,
   ProfileScopedSharedBackupRegistry,
   saveSharedSyncState,
@@ -283,6 +284,7 @@ export async function setupSharedSync(
 ): Promise<{ state: SharedSyncState; result: SharedSyncRunResult }> {
   return serialized(async () => {
     disposeRuntime();
+    const previousState = await loadSharedSyncState();
     const bootstrapProfileId = "__easybc-bootstrap__";
     const bootstrap = createProviders(config, bootstrapProfileId);
     const authorization = await authorizeAndRemember(
@@ -322,47 +324,59 @@ export async function setupSharedSync(
         },
       ],
     };
-    cachedState = provisional;
-    await saveSharedSyncState(provisional);
-    const controller = buildController(
-      provisional,
-      provisional.profiles[0],
-      config,
-      identityProvider,
-      authorizationProvider,
-      googleIdentity,
-    );
-    await controller.ensureStorage();
-    const created = await controller.createDataset(PRIMARY_DATASET_ID, local);
-    const storage = await controller.ensureStorage();
-    const nextState = createInitialSharedSyncState({
-      rpId: config.rpId,
-      ownerEmail,
-      folderName,
-      trustedOwnerKeyId: identity.publicKey.keyId,
-      appFolderId: storage.appFolderId,
-      fileId: created.fileId,
-      lastRevisionId: created.revisionId,
-    });
-    cachedState = nextState;
-    await saveSharedSyncState(nextState);
-    runtime = {
-      config,
-      state: nextState,
-      local: created.value,
-      identityProvider,
-      authorizationProvider,
-      controller,
-    };
-    return {
-      state: nextState,
-      result: {
-        payload: created.value,
-        syncedAt: new Date().toISOString(),
-        revisionId: created.revisionId,
-        profileKey: nextState.activeProfileKey,
-      },
-    };
+    try {
+      cachedState = provisional;
+      await saveSharedSyncState(provisional);
+      const controller = buildController(
+        provisional,
+        provisional.profiles[0],
+        config,
+        identityProvider,
+        authorizationProvider,
+        googleIdentity,
+      );
+      await controller.ensureStorage();
+      const created = await controller.createDataset(PRIMARY_DATASET_ID, local);
+      const storage = await controller.ensureStorage();
+      const nextState = createInitialSharedSyncState({
+        rpId: config.rpId,
+        ownerEmail,
+        folderName,
+        trustedOwnerKeyId: identity.publicKey.keyId,
+        appFolderId: storage.appFolderId,
+        fileId: created.fileId,
+        lastRevisionId: created.revisionId,
+      });
+      cachedState = nextState;
+      await saveSharedSyncState(nextState);
+      runtime = {
+        config,
+        state: nextState,
+        local: created.value,
+        identityProvider,
+        authorizationProvider,
+        controller,
+      };
+      return {
+        state: nextState,
+        result: {
+          payload: created.value,
+          syncedAt: new Date().toISOString(),
+          revisionId: created.revisionId,
+          profileKey: nextState.activeProfileKey,
+        },
+      };
+    } catch (error) {
+      if (previousState) {
+        cachedState = previousState;
+        await saveSharedSyncState(previousState);
+      } else {
+        cachedState = null;
+        await forgetSharedSyncState();
+      }
+      disposeRuntime();
+      throw error;
+    }
   });
 }
 
@@ -743,7 +757,7 @@ export async function createSharingChangeDetectorForActiveProfile(
   });
 }
 
-export { loadSharedSyncState, saveSharedSyncState };
+export { isSharedSyncConfigured, loadSharedSyncState, saveSharedSyncState };
 
 export function sharedSyncConfigFromEnv(rpId: string): SharedSyncConfig | null {
   const clientId = import.meta.env.VITE_GOOGLE_WEB_CLIENT_ID?.trim() ?? "";

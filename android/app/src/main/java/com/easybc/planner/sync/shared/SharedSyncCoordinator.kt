@@ -31,11 +31,26 @@ class SharedSyncCoordinator(
 
     suspend fun loadState(): SharedSyncState? = registry.load()
 
+    suspend fun isConfigured(): Boolean {
+        val state = registry.load() ?: return false
+        return state.profiles.any { !it.fileId.isNullOrBlank() }
+    }
+
+    suspend fun clearIncompleteSetup() {
+        val state = registry.load() ?: return
+        if (state.profiles.none { !it.fileId.isNullOrBlank() }) {
+            registry.clear()
+            registry.clearCheckpoint()
+        }
+    }
+
     suspend fun setup(accessToken: String): SharedSyncState {
+        clearIncompleteSetup()
         rememberAccess(accessToken)
         val ownerEmail = fetchGoogleAccountEmail(accessToken)
         val folderName = easyBcSyncFolderName(ownerEmail)
         val identity = identityStore.getOrCreate()
+        val previousState = registry.load()
         val provisional = SharedSyncState(
             rpId = SYNC_RP_ID,
             ownerEmail = ownerEmail,
@@ -50,31 +65,41 @@ class SharedSyncCoordinator(
                 ),
             ),
         )
-        registry.save(provisional)
-        val controller = controllerFor(provisional, PRIMARY_DATASET_ID)
-        val storage = controller.ensureStorage()
-        val local = sharedPayload(store.localPayload())
-        val created = controller.createDataset(PRIMARY_DATASET_ID, local)
-        val profile = ProfileRecord(
-            datasetId = PRIMARY_DATASET_ID,
-            ownerEmail = ownerEmail,
-            folderName = folderName,
-            role = SharingRole.OWNER.name.lowercase(),
-            trustedOwnerKeyId = identity.publicKey.keyId,
-            appFolderId = storage.appFolderId,
-            fileId = created.fileId,
-            lastRevisionId = created.revisionId,
-            lastSyncedAt = java.time.Instant.now().toString(),
-        )
-        val state = provisional.copy(
-            activeProfileKey = profileKey(ownerEmail, PRIMARY_DATASET_ID),
-            profiles = listOf(profile),
-        )
-        registry.save(state)
-        store.apply(local)
-        store.rememberSync(created.fileId, profile.lastSyncedAt!!)
-        SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
-        return state
+        return try {
+            registry.save(provisional)
+            val controller = controllerFor(provisional, PRIMARY_DATASET_ID)
+            val storage = controller.ensureStorage()
+            val local = sharedPayload(store.localPayload())
+            val created = controller.createDataset(PRIMARY_DATASET_ID, local)
+            val profile = ProfileRecord(
+                datasetId = PRIMARY_DATASET_ID,
+                ownerEmail = ownerEmail,
+                folderName = folderName,
+                role = SharingRole.OWNER.name.lowercase(),
+                trustedOwnerKeyId = identity.publicKey.keyId,
+                appFolderId = storage.appFolderId,
+                fileId = created.fileId,
+                lastRevisionId = created.revisionId,
+                lastSyncedAt = java.time.Instant.now().toString(),
+            )
+            val state = provisional.copy(
+                activeProfileKey = profileKey(ownerEmail, PRIMARY_DATASET_ID),
+                profiles = listOf(profile),
+            )
+            registry.save(state)
+            store.apply(local)
+            store.rememberSync(created.fileId, profile.lastSyncedAt!!)
+            SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
+            state
+        } catch (error: Exception) {
+            if (previousState == null) {
+                registry.clear()
+                registry.clearCheckpoint()
+            } else {
+                registry.save(previousState)
+            }
+            throw error
+        }
     }
 
     suspend fun sync(accessToken: String): SharedSyncState {

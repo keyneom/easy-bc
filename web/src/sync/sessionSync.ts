@@ -28,6 +28,7 @@ import {
   easyBcEnvelopeCrypto,
 } from "./crypto";
 import { easyBcV1Profile } from "./profile";
+import { isSyncSnapshotMissing } from "./syncErrors";
 import {
   portablePlannerOptions,
   type LocalSyncState,
@@ -133,7 +134,12 @@ export async function runEncryptedSyncOperation({
   active.local = local;
 
   if (operation === "delete") {
-    await active.controller.delete();
+    try {
+      await active.controller.delete();
+    } catch (error) {
+      if (!isSyncSnapshotMissing(error)) throw error;
+    }
+    await forgetSyncState();
     return {
       operation,
       fileId: null,

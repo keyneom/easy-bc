@@ -5,6 +5,8 @@ import com.keyneom.synckit.core.Authorization
 import com.keyneom.synckit.core.CloudStore
 import com.keyneom.synckit.core.CreatedKey
 import com.keyneom.synckit.core.KeyProvider
+import com.keyneom.synckit.core.SyncKitError
+import com.keyneom.synckit.core.SyncKitErrorCode
 import com.keyneom.synckit.core.StoredEnvelope
 import com.keyneom.synckit.crypto.SyncEnvelopeV1
 import com.keyneom.synckit.crypto.V1KeyMetadata
@@ -124,6 +126,27 @@ class CloudSyncCoordinatorTest {
     }
 
     @Test
+    fun deleteClearsLocalStateWhenRemoteSnapshotMissing() = runBlocking {
+        passkeys.remember(metadata, contentKey)
+        drive.deleteThrowsNotFound = true
+
+        coordinator.execute(activity, CloudSyncOperation.DELETE, "token")
+
+        assertTrue(store.forgotten)
+    }
+
+    @Test
+    fun enableOrForgetIfMissingClearsLocalStateWhenRemoteSnapshotMissing() = runBlocking {
+        store.rememberSync("file", "2026-06-29T12:00:00.000Z")
+        drive.snapshot = null
+
+        val enabled = coordinator.enableOrForgetIfMissing(activity, "token")
+
+        assertEquals(false, enabled)
+        assertTrue(store.forgotten)
+    }
+
+    @Test
     fun resetReplacesKeyAndUnlocksForCurrentSession() = runBlocking {
         passkeys.remember(metadata, contentKey)
         val newSecret = ByteArray(32) { (it + 97).toByte() }
@@ -177,6 +200,7 @@ class CloudSyncCoordinatorTest {
         }
         override suspend fun rememberSync(fileId: String, syncedAt: String) {
             lastSyncedAt = syncedAt
+            forgotten = false
         }
         override suspend fun forgetSync() {
             forgotten = true
@@ -187,6 +211,7 @@ class CloudSyncCoordinatorTest {
         var snapshot: StoredEnvelope? = null
         var writeCalls = 0
         var deletedFileId: String? = null
+        var deleteThrowsNotFound = false
 
         override suspend fun find(appId: String, authorization: Authorization): StoredEnvelope? =
             snapshot
@@ -204,6 +229,9 @@ class CloudSyncCoordinatorTest {
         }
 
         override suspend fun delete(appId: String, fileId: String, authorization: Authorization) {
+            if (deleteThrowsNotFound) {
+                throw SyncKitError(SyncKitErrorCode.NOT_FOUND, "Encrypted snapshot not found.")
+            }
             deletedFileId = fileId
             snapshot = null
         }

@@ -16,7 +16,7 @@ import type { PersistedSession } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
 import { idbGet, KV_SYNC_STATE } from "../idbStore";
 import { currentRpId, passkeysSupported } from "../sync/passkey";
-import { formatLastSync } from "../sync/sessionSync";
+import { formatLastSync, forgetSyncState } from "../sync/sessionSync";
 import {
   clearJoinLinkParams,
   folderNameForOwner,
@@ -30,6 +30,7 @@ import {
   createOwnedProfile,
   forgetSharedSync,
   inviteToDataset,
+  isSharedSyncConfigured,
   listPendingKeyResponses,
   loadActiveProfileDataset,
   setActiveProfileKey,
@@ -104,6 +105,7 @@ export function SyncSettings({
   }, [config, sharedSyncState]);
 
   const unavailable = !config || !passkeysSupported();
+  const sharedConfigured = isSharedSyncConfigured(sharedSyncState);
 
   const localShared = () => buildSharedSyncPayload(options, periodRecords, session);
 
@@ -120,6 +122,7 @@ export function SyncSettings({
     try {
       const { state, result } = await setupSharedSync(config, localShared());
       await applyShared(result.payload);
+      await forgetSyncState();
       onSharedSyncStateChange(state);
       onSyncComplete?.(sharedPayloadToSyncPayload(result.payload, session.androidPreferences));
       setNotice({
@@ -398,7 +401,7 @@ export function SyncSettings({
           Local development creates a passkey for <strong>{rpId}</strong>, not keyneom.github.io.
         </p>
       )}
-      {legacyAvailable && !sharedSyncState && (
+      {legacyAvailable && !sharedConfigured && (
         <p className="sync-notice sync-notice-info">
           This device still uses legacy app-data encrypted sync.
           <button type="button" className="ghost" disabled={busy !== null} onClick={() => void runMigrateLegacy()}>
@@ -409,7 +412,7 @@ export function SyncSettings({
       {notice && <p className={`sync-notice sync-notice-${notice.kind}`} role="status">{notice.message}</p>}
 
       <div className="sync-actions">
-        {!sharedSyncState ? (
+        {!sharedConfigured ? (
           <>
             <button type="button" disabled={unavailable || busy !== null} onClick={() => void runSetup()}>
               <KeyRound aria-hidden />
@@ -434,7 +437,7 @@ export function SyncSettings({
         )}
       </div>
 
-      {sharedSyncState && findProfile(sharedSyncState, sharedSyncState.activeProfileKey)?.role === "owner" && (
+      {sharedConfigured && findProfile(sharedSyncState!, sharedSyncState!.activeProfileKey)?.role === "owner" && (
         <div className="sync-share-panel">
           <p className="eyebrow">Share encrypted data</p>
           <label className="field">

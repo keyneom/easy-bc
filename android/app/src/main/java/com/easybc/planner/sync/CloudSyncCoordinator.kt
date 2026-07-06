@@ -43,9 +43,12 @@ class CloudSyncCoordinator(
             try {
                 controller.delete()
             } catch (error: SyncKitError) {
-                throw mapError(error)
+                if (error.code != SyncKitErrorCode.NOT_FOUND) {
+                    throw mapError(error)
+                }
             }
             store.forgetSync()
+            EasyBcSyncRuntime.lock()
             return "The encrypted EasyBC cloud snapshot was deleted from Google Drive."
         }
 
@@ -80,6 +83,23 @@ class CloudSyncCoordinator(
         }
     }
 
+    suspend fun enableOrForgetIfMissing(
+        activity: Activity,
+        accessToken: String,
+    ): Boolean {
+        return try {
+            execute(activity, CloudSyncOperation.ENABLE, accessToken)
+            true
+        } catch (error: Exception) {
+            if (isNotFound(error)) {
+                store.forgetSync()
+                false
+            } else {
+                throw error
+            }
+        }
+    }
+
     private fun mapError(error: SyncKitError): Exception = when (error.code) {
         SyncKitErrorCode.STATE,
         SyncKitErrorCode.NOT_FOUND,
@@ -88,6 +108,17 @@ class CloudSyncCoordinator(
         SyncKitErrorCode.CRYPTO,
         -> IllegalArgumentException(error.message, error)
         else -> error
+    }
+
+    companion object {
+        fun isNotFound(error: Throwable): Boolean {
+            val syncError = when (error) {
+                is SyncKitError -> error
+                is IllegalArgumentException -> error.cause as? SyncKitError
+                else -> null
+            }
+            return syncError?.code == SyncKitErrorCode.NOT_FOUND
+        }
     }
 }
 

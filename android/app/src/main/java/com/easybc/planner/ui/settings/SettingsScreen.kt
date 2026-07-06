@@ -327,6 +327,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     val scope = rememberCoroutineScope()
     val status by vm.cloudStatus.collectAsState()
     val connected by vm.cloudConnected.collectAsState()
+    val sharedConfigured by vm.sharedSyncConfigured.collectAsState()
     val lastSync by vm.lastCloudSync.collectAsState()
     val sharedState by vm.sharedSyncState.collectAsState()
     val joinUrl by vm.joinUrl.collectAsState()
@@ -404,15 +405,22 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(if (connected) Icons.Default.Cloud else Icons.Default.Key, null)
+            Icon(if (sharedConfigured) Icons.Default.Cloud else Icons.Default.Key, null)
             Column {
                 Text(
-                    if (connected) "Encrypted sync enabled on this device" else "Passkey-protected encrypted sync",
+                    when {
+                        sharedConfigured -> "Encrypted sync enabled on this device"
+                        connected -> "Legacy encrypted sync metadata on this device"
+                        else -> "Passkey-protected encrypted sync"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Text(
-                    lastSync?.let { "Last encrypted update ${formatSyncTime(it)}" }
-                        ?: "No encrypted sync has completed on this device.",
+                    when {
+                        sharedConfigured || connected -> lastSync?.let { "Last encrypted update ${formatSyncTime(it)}" }
+                            ?: "No encrypted sync has completed on this device."
+                        else -> "No encrypted sync has completed on this device."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -422,7 +430,8 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     Spacer(Modifier.height(8.dp))
 
     val busy = status is SettingsViewModel.SyncStatus.Running
-    sharedState?.let { state ->
+    if (sharedConfigured) {
+        sharedState?.let { state ->
         Spacer(Modifier.height(8.dp))
         Text("Profiles", style = MaterialTheme.typography.labelLarge)
         state.profiles.forEach { profile ->
@@ -511,9 +520,19 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         ) {
             Text("Add profile")
         }
+        }
     }
     Spacer(modifier = Modifier.height(8.dp))
-    if (connected) {
+    if (connected && !sharedConfigured) {
+        Text(
+            "Legacy encrypted sync metadata remains on this device. If the cloud file was removed, " +
+                "use Set up encrypted sync or Migrate to create a new shared Drive folder.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+    }
+    if (sharedConfigured) {
         Button(
             onClick = { authorizeAndRun(CloudSyncOperation.SYNC) },
             enabled = !busy,

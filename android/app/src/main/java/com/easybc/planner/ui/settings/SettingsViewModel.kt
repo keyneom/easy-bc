@@ -13,6 +13,7 @@ import com.easybc.planner.notify.ReminderScheduler
 import com.easybc.planner.sync.AuthorizationStep
 import com.easybc.planner.sync.CloudSyncCoordinator
 import com.easybc.planner.sync.CloudSyncOperation
+import com.easybc.planner.sync.EasyBcSyncRuntime
 import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.shared.ProfileRecord
@@ -58,6 +59,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _cloudConnected = MutableStateFlow(false)
     val cloudConnected: StateFlow<Boolean> = _cloudConnected
 
+    private val _sharedSyncConfigured = MutableStateFlow(false)
+    val sharedSyncConfigured: StateFlow<Boolean> = _sharedSyncConfigured
+
     private val _lastCloudSync = MutableStateFlow<String?>(null)
     val lastCloudSync: StateFlow<String?> = _lastCloudSync
 
@@ -79,13 +83,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     private suspend fun refreshSharedSyncState() {
+        sharedSync.clearIncompleteSetup()
         val state = sharedSync.loadState()
+        val configured = sharedSync.isConfigured()
         _sharedSyncState.value = state
-        _cloudConnected.value = state != null || syncStore.fileId() != null
+        _sharedSyncConfigured.value = configured
+        _cloudConnected.value = configured || syncStore.fileId() != null
         val active = state?.profiles?.firstOrNull {
             profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
         }
-        _lastCloudSync.value = active?.lastSyncedAt ?: syncStore.lastSyncedAt()
+        _lastCloudSync.value = if (configured) {
+            active?.lastSyncedAt ?: syncStore.lastSyncedAt()
+        } else {
+            syncStore.lastSyncedAt()
+        }
     }
 
     fun updateDraft(transform: (UserSettingsEntity) -> UserSettingsEntity) {
@@ -247,19 +258,33 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                         "Encrypted sync is set up. Your data lives in a Drive folder labeled with your email."
                     }
                     CloudSyncOperation.ENABLE -> {
-                        // Legacy personal appData enable, then migrate into shared sync.
                         if (sharedSync.loadState() == null && syncStore.fileId() != null) {
-                            legacyCloudSync.execute(activity, CloudSyncOperation.ENABLE, accessToken)
+                            legacyCloudSync.enableOrForgetIfMissing(activity, accessToken)
                         }
                         sharedSync.setup(accessToken)
                         "Encrypted sync is enabled and the latest records were merged."
                     }
                     CloudSyncOperation.SYNC -> {
-                        if (sharedSync.loadState() != null) {
+                        if (sharedSync.isConfigured()) {
                             sharedSync.sync(accessToken)
                             "Encrypted sync data is up to date."
                         } else {
-                            legacyCloudSync.execute(activity, operation, accessToken)
+                            try {
+                                legacyCloudSync.execute(activity, operation, accessToken)
+                                "Encrypted sync data is up to date."
+                            } catch (error: Exception) {
+                                if (CloudSyncCoordinator.isNotFound(error)) {
+                                    syncStore.forgetSync()
+                                    EasyBcSyncRuntime.lock()
+                                    throw IllegalArgumentException(
+                                        "The legacy encrypted cloud snapshot was not found on Google Drive. " +
+                                            "Local sync metadata was cleared. Use Set up encrypted sync to start fresh.",
+                                        error,
+                                    )
+                                } else {
+                                    throw error
+                                }
+                            }
                         }
                     }
                     CloudSyncOperation.RESET -> {

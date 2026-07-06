@@ -88,10 +88,11 @@ class CloudAutoSyncSession(
     }
 
     private suspend fun isEnabled(): Boolean =
-        sharedSync.loadState() != null || store.fileId() != null
+        sharedSync.isConfigured() || store.fileId() != null
 
     private suspend fun isReadOnlyActiveProfile(): Boolean {
         val state = sharedSync.loadState() ?: return false
+        if (!sharedSync.isConfigured()) return false
         val profile = state.profiles.firstOrNull {
             profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
         } ?: return false
@@ -105,11 +106,19 @@ class CloudAutoSyncSession(
         lastSyncedFingerprint = fingerprint
 
         val token = accessToken()
-        val sharedState = sharedSync.loadState()
-        if (sharedState != null) {
+        if (sharedSync.isConfigured()) {
             sharedSync.sync(token)
-        } else {
-            legacyCoordinator.execute(activity, CloudSyncOperation.SYNC, token)
+        } else if (store.fileId() != null) {
+            try {
+                legacyCoordinator.execute(activity, CloudSyncOperation.SYNC, token)
+            } catch (error: Exception) {
+                if (CloudSyncCoordinator.isNotFound(error)) {
+                    store.forgetSync()
+                    EasyBcSyncRuntime.lock()
+                } else {
+                    throw error
+                }
+            }
         }
         lastSyncedFingerprint = fingerprint(store.localPayload())
     }
