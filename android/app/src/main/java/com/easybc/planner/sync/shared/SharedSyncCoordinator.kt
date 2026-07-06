@@ -72,7 +72,26 @@ class SharedSyncCoordinator(
             val controller = controllerFor(provisional, PRIMARY_DATASET_ID)
             val storage = controller.ensureStorage()
             val local = sharedPayload(store.localPayload())
-            val created = controller.createDataset(PRIMARY_DATASET_ID, local)
+            // Adopt an existing primary dataset (interrupted setup, reinstall,
+            // reconnecting device) instead of failing with "already exists";
+            // create only when the folder has none.
+            val existing = controller.listDatasets()
+                .firstOrNull { it.datasetId == PRIMARY_DATASET_ID }
+            val created = if (existing != null) {
+                try {
+                    controller.adoptDataset(PRIMARY_DATASET_ID, requireOwned = true)
+                } catch (error: Exception) {
+                    throw IllegalArgumentException(
+                        "An encrypted sync dataset already exists in your Drive folder, " +
+                            "but this device cannot unlock it. Use Reset encrypted sync to " +
+                            "replace it with this device's data.",
+                        error,
+                    )
+                }
+                controller.syncDataset(PRIMARY_DATASET_ID, local)
+            } else {
+                controller.createDataset(PRIMARY_DATASET_ID, local)
+            }
             val profile = ProfileRecord(
                 datasetId = PRIMARY_DATASET_ID,
                 ownerEmail = ownerEmail,
@@ -89,7 +108,7 @@ class SharedSyncCoordinator(
                 profiles = listOf(profile),
             )
             registry.save(state)
-            store.apply(local)
+            store.apply(created.value.withLocalAndroidPreferences(store.localPayload()))
             store.rememberSync(created.fileId, profile.lastSyncedAt!!)
             SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
             state
@@ -332,6 +351,40 @@ class SharedSyncCoordinator(
         registry.clearCheckpoint()
         store.forgetSync()
         SharingSyncScheduler.cancel(context.applicationContext)
+    }
+
+    /**
+     * Delete every dataset in this account's own EasyBC folder (including
+     * orphans from interrupted setups), forget local state, and set up fresh
+     * with this device's data. Never touches folders shared BY others: the
+     * owned-profile transport always targets the folder named with this
+     * account's email.
+     */
+    suspend fun reset(accessToken: String): SharedSyncState {
+        rememberAccess(accessToken)
+        runCatching {
+            val ownerEmail = fetchGoogleAccountEmail(accessToken)
+            val provisional = SharedSyncState(
+                rpId = SYNC_RP_ID,
+                ownerEmail = ownerEmail,
+                activeProfileKey = profileKey(ownerEmail, PRIMARY_DATASET_ID),
+                profiles = listOf(
+                    ProfileRecord(
+                        datasetId = PRIMARY_DATASET_ID,
+                        ownerEmail = ownerEmail,
+                        folderName = easyBcSyncFolderName(ownerEmail),
+                        role = SharingRole.OWNER.name.lowercase(),
+                        trustedOwnerKeyId = identityStore.getOrCreate().publicKey.keyId,
+                    ),
+                ),
+            )
+            val controller = controllerFor(provisional, PRIMARY_DATASET_ID)
+            for (dataset in controller.listDatasets()) {
+                runCatching { controller.deleteDataset(dataset.datasetId) }
+            }
+        }
+        forget()
+        return setup(accessToken)
     }
 
     suspend fun transportForPolling(): GoogleDriveSharedBackupTransport? {

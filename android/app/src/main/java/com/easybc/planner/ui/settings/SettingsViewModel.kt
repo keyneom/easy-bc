@@ -65,6 +65,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _sharedSyncConfigured = MutableStateFlow(false)
     val sharedSyncConfigured: StateFlow<Boolean> = _sharedSyncConfigured
 
+    private val _legacySyncPresent = MutableStateFlow(false)
+    val legacySyncPresent: StateFlow<Boolean> = _legacySyncPresent
+
     private val _lastCloudSync = MutableStateFlow<String?>(null)
     val lastCloudSync: StateFlow<String?> = _lastCloudSync
 
@@ -91,6 +94,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val configured = sharedSync.isConfigured()
         _sharedSyncState.value = state
         _sharedSyncConfigured.value = configured
+        _legacySyncPresent.value = syncStore.fileId() != null
         _cloudConnected.value = configured || syncStore.fileId() != null
         val active = state?.profiles?.firstOrNull {
             profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
@@ -291,8 +295,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                         }
                     }
                     CloudSyncOperation.RESET -> {
-                        sharedSync.forget()
-                        sharedSync.setup(accessToken)
+                        sharedSync.reset(accessToken)
                         "Encrypted sync was reset with this device's local data."
                     }
                     CloudSyncOperation.DELETE -> {

@@ -6,48 +6,40 @@ first, web follows best-effort.
 
 ## Quick wins
 
-### 1. Join link is not copyable
-`SettingsScreen.kt` renders the invite result as plain
-`Text("Join link: $url")` — no selection, no copy. Add a copy-to-clipboard
-button and the system share sheet. The join link must become the primary
-invitation channel (see #2/#3).
+### 1. Join link is not copyable — SHIPPED v0.1.35
+`SettingsScreen.kt` now shows the join link with a copy-to-clipboard button
+and the system share sheet; the link is the primary invitation channel.
 
-### 2. Invite email never arrives / 3. shared folder flagged as spam
+### 2. Invite email never arrives / 3. shared folder flagged as spam — MITIGATED v0.1.35
 The "invite" email is Google Drive's generic folder-share notification for
-`EasyBC — owner@email` (sync-kit `grantExchangeAccess` shares the app folder
-with `sendNotificationEmail = true`). Google's own notification is easily
-spam-filtered and we cannot control its content or deliverability.
-Mitigations:
-- pass a custom `emailMessage` (sync-kit already supports it) explaining what
-  the share is;
-- treat email as best-effort only — surface the join link with copy/share as
-  the primary channel and say so in the UI ("Send this link to …").
+`EasyBC — owner@email`; sync-kit already attaches a join-link message, but
+deliverability is Google's and cannot be fixed by us. v0.1.35 states this in
+the UI ("Google's share email is often filtered as spam — send this join link
+directly") and makes the link copyable/shareable (#1). Remaining option if
+this stays painful: suppress the notification email entirely
+(`sendNotificationEmail = false`) so users never wait for it.
 
-### 4. Migrate vs. Set up is user-hostile
-Both buttons render whenever shared sync is unconfigured; the user cannot know
-which applies. The app already knows: `syncStore.fileId() != null` means
-legacy snapshot metadata exists. Detect and show exactly one primary action:
-- legacy metadata present → "Migrate legacy encrypted sync" (with one line of
-  copy about what will happen), Setup demoted or hidden;
-- otherwise → "Set up encrypted sync" only.
-Additionally, setup should detect an existing owned dataset in Drive
-(`listDatasets`) and offer to reconnect/adopt it instead of failing with
-"Dataset primary already exists" (the orphaned-dataset case; sync-kit rc.4
-already rolls back new orphans, but adoption also covers reinstalls and
-multi-device reconnects).
+### 4. Migrate vs. Set up is user-hostile — SHIPPED v0.1.35
+Exactly one primary action now renders: "Migrate legacy encrypted sync" when
+legacy snapshot metadata exists on the device (with copy explaining it merges
+into the new format), otherwise "Set up encrypted sync". Setup also adopts an
+existing decryptable primary dataset in Drive (sync-kit rc.5
+`adoptDataset(requireOwned)`) instead of failing with "already exists", and
+"Reset encrypted sync" now really deletes the owned Drive datasets (sync-kit
+rc.5 `deleteDataset`) before recreating, so an undecryptable orphan has an
+in-app recovery path.
 
 ## Design work
 
-### 5. Cannot join a share without an in-app entry point
-Web has the Google Picker (`sharedPicker.ts`); Android can only join via the
-deep link. Add an in-app "Join a shared profile" flow: paste a join link (and
-optionally a Drive folder picker) so joining works even when the email/link
-handoff is imperfect.
+### 5. Cannot join a share without an in-app entry point — SHIPPED v0.1.35
+Settings now has "Paste a join link" + "Join a shared profile" when shared
+sync is unconfigured, parsing the same invitation/folder/owner parameters as
+the deep link. A Drive folder picker remains a possible future addition.
 
-### 6. Viewer-only use is impossible
-A recipient is forced to keep their own local primary profile; they cannot run
-the app purely against a profile that was shared with them. Joining should be
-possible as the *only* profile on the device.
+### 6. Viewer-only use is impossible — PARTIALLY ADDRESSED v0.1.35
+With the paste-join flow, a device can join a shared profile without ever
+setting up its own encrypted sync — the joined profile becomes the active
+one. Full "no local profile at all" semantics land with #7.
 
 ### 7. Profiles must become native to the app, not a sync feature
 Today "profiles" only exist inside encrypted sync (`SharedSyncRegistry`

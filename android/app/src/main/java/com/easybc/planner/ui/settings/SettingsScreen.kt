@@ -2,6 +2,8 @@ package com.easybc.planner.ui.settings
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
@@ -13,18 +15,22 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -330,12 +336,16 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     val sharedConfigured by vm.sharedSyncConfigured.collectAsState()
     val lastSync by vm.lastCloudSync.collectAsState()
     val sharedState by vm.sharedSyncState.collectAsState()
+    val legacyPresent by vm.legacySyncPresent.collectAsState()
     val joinUrl by vm.joinUrl.collectAsState()
+    val clipboard = LocalClipboardManager.current
     var pendingOperation by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var pendingProfileKey by remember { mutableStateOf<String?>(null) }
     var pendingProfileDisplayName by remember { mutableStateOf<String?>(null) }
     var newProfileName by remember { mutableStateOf("") }
     var pendingInvite by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var pendingJoin by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    var joinLinkInput by remember { mutableStateOf("") }
     var confirming by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var inviteEmail by remember { mutableStateOf("") }
     var inviteRole by remember { mutableStateOf("viewer") }
@@ -347,10 +357,12 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         val profileKey = pendingProfileKey
         val profileDisplayName = pendingProfileDisplayName
         val invite = pendingInvite
+        val join = pendingJoin
         pendingOperation = null
         pendingProfileKey = null
         pendingProfileDisplayName = null
         pendingInvite = null
+        pendingJoin = null
         if (result.resultCode != Activity.RESULT_OK) {
             vm.cloudError("Google authorization was cancelled.")
             return@rememberLauncherForActivityResult
@@ -364,6 +376,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                     }
                     profileKey != null -> vm.switchProfile(token, profileKey)
                     invite != null -> vm.inviteParticipant(token, invite.first, invite.second)
+                    join != null -> vm.joinSharedSync(token, join.first, join.second, join.third)
                     operation != null -> vm.runCloudOperation(activity, operation, token)
                     else -> vm.cloudError("Google authorization completed with no pending action.")
                 }
@@ -379,6 +392,36 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                     is AuthorizationStep.Authorized -> vm.runCloudOperation(activity, operation, step.accessToken)
                     is AuthorizationStep.NeedsResolution -> {
                         pendingOperation = operation
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build()
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    // Join links carry invitation/folder/owner query params (same format the
+    // deep-link handler in MainActivity consumes).
+    fun parseJoinLink(raw: String): Triple<String, String, String>? {
+        val uri = runCatching { Uri.parse(raw.trim()) }.getOrNull() ?: return null
+        val invitation = uri.getQueryParameter("invitation") ?: return null
+        val folder = uri.getQueryParameter("folder") ?: return null
+        val owner = uri.getQueryParameter("owner") ?: return null
+        return Triple(invitation, folder, owner)
+    }
+
+    fun authorizeAndJoin(params: Triple<String, String, String>) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized ->
+                        vm.joinSharedSync(step.accessToken, params.first, params.second, params.third)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingJoin = params
                         resolutionLauncher.launch(
                             IntentSenderRequest.Builder(step.pendingIntent.intentSender).build()
                         )
@@ -588,10 +631,36 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             ) { Text("Invite by email") }
             joinUrl?.let { url ->
                 Text(
-                    "Join link: $url",
+                    "Google's share email is often filtered as spam — send this join link " +
+                        "to the invitee directly.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                    )
+                    IconButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
+                        Icon(Icons.Default.ContentCopy, "Copy join link")
+                    }
+                    IconButton(onClick = {
+                        activity.startActivity(
+                            Intent.createChooser(
+                                Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, url)
+                                },
+                                "Share join link",
+                            ),
+                        )
+                    }) {
+                        Icon(Icons.Default.Share, "Share join link")
+                    }
+                }
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -606,6 +675,24 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 modifier = Modifier.weight(1f),
             ) { Text("Remove from this device") }
         }
+    } else if (legacyPresent) {
+        // This device still has legacy snapshot metadata: migrating is the
+        // one correct action, so it is the only one offered.
+        Button(
+            onClick = { authorizeAndRun(CloudSyncOperation.ENABLE) },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(Icons.Default.Sync, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Migrate legacy encrypted sync")
+        }
+        Text(
+            "This device has records from the older encrypted sync. Migrating merges them " +
+                "into the current format — nothing is lost.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     } else {
         Button(
             onClick = { authorizeAndRun(CloudSyncOperation.SETUP) },
@@ -616,11 +703,34 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             Spacer(Modifier.width(8.dp))
             Text("Set up encrypted sync")
         }
-        OutlinedButton(
-            onClick = { authorizeAndRun(CloudSyncOperation.ENABLE) },
-            enabled = !busy,
+    }
+    if (!sharedConfigured) {
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = joinLinkInput,
+            onValueChange = { joinLinkInput = it },
+            label = { Text("Paste a join link") },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Migrate legacy encrypted sync") }
+            singleLine = true,
+        )
+        OutlinedButton(
+            onClick = {
+                val params = parseJoinLink(joinLinkInput)
+                if (params == null) {
+                    vm.cloudError("That link is missing its invitation details. Ask for a fresh join link.")
+                } else {
+                    authorizeAndJoin(params)
+                }
+            },
+            enabled = !busy && joinLinkInput.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Join a shared profile") }
+        Text(
+            "Joining connects this device to a profile someone shared with you — " +
+                "no encrypted sync setup of your own is needed.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
     StatusRow(status = status, onDismiss = vm::dismissCloudStatus)
     Text(
