@@ -206,7 +206,22 @@ class SharedSyncCoordinator(
             ),
             driveAuth,
         )
-        val invitation = transport.readInvitation(invitationFileId)
+        // With drive.file, another account's shares are invisible (Drive
+        // answers 404) until the user grants the folder through the Google
+        // Picker — the app hands off to the web app's picker for that.
+        val invitation = try {
+            transport.readInvitation(invitationFileId)
+        } catch (error: Exception) {
+            if (com.easybc.planner.sync.CloudSyncCoordinator.isNotFound(error)) {
+                throw IllegalArgumentException(
+                    "EasyBC can't see the shared folder yet. Tap \"Grant folder access\" " +
+                        "to allow it in your browser (sign in with this same Google " +
+                        "account), then try joining again.",
+                    error,
+                )
+            }
+            throw error
+        }
         val grant = invitation.requestedGrants.firstOrNull()
             ?: error("Invitation has no dataset grants.")
         val joinProfile = ProfileRecord(

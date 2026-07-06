@@ -3,7 +3,10 @@ package com.easybc.planner.ui.settings
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.browser.customtabs.CustomTabsClient
+import androidx.browser.customtabs.CustomTabsIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -720,9 +723,20 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             enabled = !busy && joinLinkInput.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Join a shared profile") }
+        TextButton(
+            onClick = {
+                val base = joinLinkInput.trim()
+                val grantUrl = base + (if (base.contains('?')) "&" else "?") + "grant-folder=1"
+                launchGrantInBrowser(activity, grantUrl)
+            },
+            enabled = joinLinkInput.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Grant folder access (opens browser)") }
         Text(
             "Joining connects this device to a profile someone shared with you — " +
-                "no encrypted sync setup of your own is needed.",
+                "no encrypted sync setup of your own is needed. If joining says EasyBC " +
+                "can't see the folder, grant access in the browser first (sign in with " +
+                "this same Google account), then join again.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -765,6 +779,17 @@ private fun formatSyncTime(value: String): String = runCatching {
         .withZone(ZoneId.systemDefault())
         .format(Instant.parse(value))
 }.getOrDefault(value)
+
+/**
+ * Opens the web app's Google Picker grant page in a Custom Tab. The browser
+ * package is forced because the app itself owns the keyneom.github.io App
+ * Link and a plain VIEW intent would route straight back into the app.
+ */
+private fun launchGrantInBrowser(activity: Activity, url: String) {
+    val customTab = CustomTabsIntent.Builder().build()
+    CustomTabsClient.getPackageName(activity, null)?.let { customTab.intent.setPackage(it) }
+    customTab.launchUrl(activity, Uri.parse(url))
+}
 
 /**
  * Opt-in daily reminder. The notification always prompts about **yesterday**

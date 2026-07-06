@@ -220,9 +220,10 @@ export function SyncSettings({
         return;
       }
       setNotice({
-        kind: "info",
-        message:
-          "Folder selected. Open the invitation link from the person who shared with you, or paste the invitation file id once available.",
+        kind: grantOnlyRequested ? "success" : "info",
+        message: grantOnlyRequested
+          ? "Access granted. Return to the EasyBC app and tap Join again."
+          : "Folder selected. Open the invitation link from the person who shared with you, or paste the invitation file id once available.",
       });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -365,7 +366,15 @@ export function SyncSettings({
     }
   };
 
+  // The Android app hands off here for the Google Picker grant: joining must
+  // happen on the device (its sharing identity lives there), so with
+  // grant-folder=1 we only grant folder access and never auto-join.
+  const grantOnlyRequested =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("grant-folder") === "1";
+
   useEffect(() => {
+    if (grantOnlyRequested) return;
     if (parseJoinLinkParams() && config && !sharedSyncState) {
       void runJoinFromLink();
     }
@@ -435,6 +444,16 @@ export function SyncSettings({
           This device still uses legacy app-data encrypted sync.
           <button type="button" className="ghost" disabled={busy !== null} onClick={() => void runMigrateLegacy()}>
             Migrate to shared encrypted sync
+          </button>
+        </p>
+      )}
+      {grantOnlyRequested && (
+        <p className="sync-notice sync-notice-info">
+          The EasyBC app needs access to the folder that was shared with you.
+          Select the folder named &ldquo;EasyBC &mdash; owner@email&rdquo; below, then return
+          to the app and tap Join again.
+          <button type="button" className="ghost" disabled={busy !== null} onClick={() => void runPickFolderJoin()}>
+            Select the shared folder
           </button>
         </p>
       )}

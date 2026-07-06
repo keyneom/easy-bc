@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.PendingIntent
 import android.content.Intent
 import com.easybc.planner.sync.shared.DRIVE_FILE_SCOPE
-import com.easybc.planner.sync.shared.DRIVE_FULL_SCOPE
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
@@ -27,7 +26,6 @@ class GoogleAuthorization {
                 listOf(
                     Scope(DRIVE_FILE_SCOPE),
                     Scope(DRIVE_APPDATA_SCOPE),
-                    Scope(DRIVE_FULL_SCOPE),
                 ),
             )
             .build()

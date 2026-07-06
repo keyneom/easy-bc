@@ -26,21 +26,32 @@ invitation file until they unmark it — the join flow's error now says what
 failed, and onboarding copy should tell recipients to check
 drive.google.com → Spam if a join fails with a not-found/permission error.
 
-### 2c. Cross-account access needs the full drive scope on Android — FIXED v0.1.38
+### 2c. Cross-account access is invisible to drive.file — PICKER HAND-OFF v0.1.39
 Live-confirmed: with only `drive.file`, files shared from another account are
 invisible to the app's token — Drive returns 404 ("File not found:
 <invitationFileId>") even though the recipient's *account* can browse the
 shared folder in the Drive UI. `drive.file` covers only files the app created
-for this user or that the user explicitly opened with the app; on web that
-grant comes from the Google Picker (which is why `sharedPicker.ts` exists),
-but Android has no Picker equivalent. Every cross-account step is affected:
-recipient reading the invitation and dataset, recipient writing the
+for this user or that the user explicitly granted via the Google Picker
+(which is why `sharedPicker.ts` exists on web). Every cross-account step is
+affected: the recipient reading the invitation and dataset, writing the
 key-response into the owner's exchanges folder, and the owner reading that
-response back. v0.1.38 requests the full `drive` scope on Android.
-Caveats: `drive` is a *restricted* OAuth scope — if Google starts blocking
-consent ("access_blocked"), put the OAuth client in Testing mode and add both
-accounts as test users, or complete verification. A future privacy-tightening
-option is scoping the escalation to sharing flows only.
+response back.
+
+v0.1.38 briefly requested the full `drive` scope; v0.1.39 reverts that
+(restricted scope, disproportionate access) in favor of matching the web:
+the app opens the web app in a Custom Tab with `grant-folder=1`, the user
+runs the Google Picker there ("Select the shared folder"), and because
+Picker grants are keyed to the Cloud *project* (not the OAuth client), the
+grant covers the Android token too. Then the user returns to the app and
+joins. The join error message walks the user through this. Note: Android's
+system Files app (SAF) cannot substitute — SAF grants are device-local
+content-provider permissions and never reach the Drive API's per-app ACL.
+
+Open validation: whether a Picker folder grant covers descendants
+(invitation inside `exchanges/`, the dataset file) — the web design assumes
+it does; first live cross-account join will confirm. Owner-side accept
+(reading the recipient's response file) may need the same grant dance on the
+owner's device if creating-in-folder doesn't self-grant.
 
 ### 2b. Join links did not work at all — FIXED v0.1.37
 The link generator (sync-kit `appendSharingJoinParams`, SYNC_KIT style) emits

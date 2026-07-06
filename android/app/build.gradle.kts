@@ -25,8 +25,8 @@ android {
         applicationId = "com.easybc.planner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.1.38"
+        versionCode = 40
+        versionName = "0.1.39"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
@@ -93,6 +93,10 @@ dependencies {
 
     // Encrypted storage for per-device sharing identity private keys.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // Custom Tabs for the Google Picker folder-grant hand-off (the app owns
+    // the keyneom.github.io App Link, so a plain VIEW intent would loop back).
+    implementation("androidx.browser:browser:1.8.0")
 
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.8.4")
