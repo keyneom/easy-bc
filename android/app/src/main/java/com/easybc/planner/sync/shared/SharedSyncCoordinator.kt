@@ -367,15 +367,20 @@ class SharedSyncCoordinator(
 
     // Must stay off the main thread: callers run in viewModelScope and raw
     // HttpURLConnection I/O there throws NetworkOnMainThreadException.
+    // Drive about.get is authorized by the Drive scopes we already request;
+    // the OpenID userinfo endpoint would need an extra email/openid grant.
     private suspend fun fetchGoogleAccountEmail(accessToken: String): String =
         withContext(Dispatchers.IO) {
-            val connection = (URL("https://www.googleapis.com/oauth2/v3/userinfo").openConnection()
-                as HttpURLConnection)
+            val connection = (URL(
+                "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+            ).openConnection() as HttpURLConnection)
             connection.setRequestProperty("Authorization", "Bearer $accessToken")
             val body = connection.inputStream.bufferedReader().readText()
             val email = SyncKitJson.instance
                 .parseToJsonElement(body)
-                .jsonObject["email"]
+                .jsonObject["user"]
+                ?.jsonObject
+                ?.get("emailAddress")
                 ?.jsonPrimitive
                 ?.content
             require(!email.isNullOrBlank()) {

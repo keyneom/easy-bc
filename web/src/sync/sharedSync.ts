@@ -112,18 +112,22 @@ function serialized<T>(operation: () => Promise<T>): Promise<T> {
   });
 }
 
+// Drive about.get is authorized by the drive.file scope we already request;
+// the OpenID userinfo endpoint would need an extra email/openid grant.
 export async function fetchGoogleAccountEmail(accessToken: string): Promise<string> {
-  const response = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const response = await fetch(
+    "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
+    { headers: { Authorization: `Bearer ${accessToken}` } },
+  );
   if (!response.ok) {
     throw new Error("Could not read your Google account email for encrypted sync.");
   }
-  const data = (await response.json()) as { email?: string };
-  if (!data.email?.trim()) {
+  const data = (await response.json()) as { user?: { emailAddress?: string } };
+  const email = data.user?.emailAddress?.trim();
+  if (!email) {
     throw new Error("Your Google account has no email address for encrypted sync.");
   }
-  return data.email.trim();
+  return email;
 }
 
 async function refreshCachedState(): Promise<SharedSyncState | null> {
