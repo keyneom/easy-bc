@@ -111,6 +111,24 @@ class MainActivity : ComponentActivity() {
 
     private fun handleSharedSyncJoinIntent(intent: Intent?) {
         val data = intent?.data ?: return
+        // Grant URLs are meant for the browser's Google Picker page; if our
+        // App Link captured one anyway, forward it instead of joining.
+        if (data.getQueryParameter("grant-folder") == "1") {
+            if (com.easybc.planner.util.launchGrantInBrowser(this, data.toString())) {
+                Toast.makeText(
+                    this,
+                    "Opening the browser to grant folder access…",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            } else {
+                Toast.makeText(
+                    this,
+                    "Open this link in Chrome to grant folder access, then join again in Settings.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            return
+        }
         val join = parseSharedJoinLink(data) ?: return
         cloudAutoSyncScope.launch {
             runCatching {

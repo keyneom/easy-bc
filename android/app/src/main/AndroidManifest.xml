@@ -21,6 +21,24 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!--
+        Package visibility for the Google Picker folder-grant hand-off: the
+        app must discover a Custom Tabs browser (and a default browser as
+        fallback) to open the web grant page. Without these, package lookups
+        return null on Android 11+ and the VIEW intent loops back into our
+        own App Link.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
+
     <application
         android:name=".EasyBCApp"
         android:allowBackup="false"

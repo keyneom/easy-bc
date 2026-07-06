@@ -3,10 +3,7 @@ package com.easybc.planner.ui.settings
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.browser.customtabs.CustomTabsClient
-import androidx.browser.customtabs.CustomTabsIntent
 import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -727,7 +724,13 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             onClick = {
                 val base = joinLinkInput.trim()
                 val grantUrl = base + (if (base.contains('?')) "&" else "?") + "grant-folder=1"
-                launchGrantInBrowser(activity, grantUrl)
+                if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
+                    clipboard.setText(AnnotatedString(grantUrl))
+                    vm.cloudError(
+                        "No browser found to open automatically. The grant link was " +
+                            "copied — paste it into Chrome, grant access, then join again.",
+                    )
+                }
             },
             enabled = joinLinkInput.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
@@ -780,16 +783,6 @@ private fun formatSyncTime(value: String): String = runCatching {
         .format(Instant.parse(value))
 }.getOrDefault(value)
 
-/**
- * Opens the web app's Google Picker grant page in a Custom Tab. The browser
- * package is forced because the app itself owns the keyneom.github.io App
- * Link and a plain VIEW intent would route straight back into the app.
- */
-private fun launchGrantInBrowser(activity: Activity, url: String) {
-    val customTab = CustomTabsIntent.Builder().build()
-    CustomTabsClient.getPackageName(activity, null)?.let { customTab.intent.setPackage(it) }
-    customTab.launchUrl(activity, Uri.parse(url))
-}
 
 /**
  * Opt-in daily reminder. The notification always prompts about **yesterday**
