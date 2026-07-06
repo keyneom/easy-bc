@@ -12,11 +12,13 @@ All Android application data stays on the device unless you explicitly export a 
 
 ## Use on the web
 
-The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyneom.github.io/easy-bc/). It uses the same planner core and Android-inspired interface, with data stored in the browser on the current device. Optional **encrypted sync** stores ciphertext in a per-owner Google Drive folder (`EasyBC — you@email`), supports **multiple owned profiles** on one account (e.g. tracking a child's cycle on a parent's phone), inviting others with viewer or writer access, and switching between profiles in Settings. Web and Android both use `@keyneom/sync-kit` 0.2.0-rc.1 shared backups (`drive.file`, join deep links, Tier A background change detection). After unlock, keys stay in process/tab memory for automatic sync and clear after 15 minutes in the background. See [`docs/android-multi-calendar.md`](docs/android-multi-calendar.md) for per-profile device calendar projection (Phase 2).
+**The Android app is the reference implementation.** The web app is secondary: it makes a best effort to match Android functionality and features, and some capabilities (for example, background sync) cannot be as good as the native app's.
+
+The local-first web app is deployed at [keyneom.github.io/easy-bc](https://keyneom.github.io/easy-bc/). It uses the same planner core and Android-inspired interface, with data stored in the browser on the current device. Optional **encrypted sync** stores ciphertext in a per-owner Google Drive folder (`EasyBC — you@email`), supports **multiple owned profiles** on one account (e.g. tracking a child's cycle on a parent's phone), inviting others with viewer or writer access, and switching between profiles in Settings. Web and Android both use `@keyneom/sync-kit` shared backups (`drive.file`, join deep links, Tier A background change detection). After unlock, keys stay in process/tab memory for automatic sync and clear after 15 minutes in the background. See [`docs/android-multi-calendar.md`](docs/android-multi-calendar.md) for per-profile device calendar projection (Phase 2).
 
 For a local web build, install Rust and `wasm-bindgen-cli` 0.2.117, run `npm run build:wasm` from [`web/`](web/), then use the normal npm development or build command. Generated native and WebAssembly binaries are intentionally not committed; publication workflows rebuild them from source.
 
-EasyBC web and Android use `@keyneom/sync-kit` 0.2.0-rc.1 for encrypted shared backups: passkey-protected
+EasyBC web and Android use `@keyneom/sync-kit` for encrypted shared backups: passkey-protected
 sharing identities, Google Drive `drive.file` transport, multi-profile switching,
 Tier A background change detection, and serialized sync orchestration. Android
 consumes `com.keyneom:sync-kit-android` from GitHub Packages (sharing controller,
