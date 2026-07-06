@@ -19,6 +19,23 @@ directly") and makes the link copyable/shareable (#1). Remaining option if
 this stays painful: suppress the notification email entirely
 (`sendNotificationEmail = false`) so users never wait for it.
 
+Live-confirmed 2026-07-06: the folder share landed in the recipient Drive's
+own spam section and had to be marked "not spam"; no email ever arrived. If
+Drive quarantines the share, the recipient may not be able to read the
+invitation file until they unmark it — the join flow's error now says what
+failed, and onboarding copy should tell recipients to check
+drive.google.com → Spam if a join fails with a not-found/permission error.
+
+### 2b. Join links did not work at all — FIXED v0.1.37
+The link generator (sync-kit `appendSharingJoinParams`, SYNC_KIT style) emits
+`sync-kit-join/sync-kit-folder/sync-kit-exchange` plus app-appended
+`owner`/`invitation`, but the Android deep-link handler required `sync=join`
++ `folder`, and the v0.1.35 paste parser required `folder` — so every link
+"opened the app and did nothing" (the handler also swallowed all errors
+silently). Both paths now share one parser (`SharedJoinLink.kt`) accepting
+both styles, and the deep-link join reports success/failure with a toast and
+logs under `EasyBcSync`.
+
 ### 4. Migrate vs. Set up is user-hostile — SHIPPED v0.1.35
 Exactly one primary action now renders: "Migrate legacy encrypted sync" when
 legacy snapshot metadata exists on the device (with copy explaining it merges

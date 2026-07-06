@@ -3,7 +3,6 @@ package com.easybc.planner.ui.settings
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
@@ -403,14 +402,10 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
 
-    // Join links carry invitation/folder/owner query params (same format the
-    // deep-link handler in MainActivity consumes).
+    // Same parser the deep-link handler in MainActivity consumes.
     fun parseJoinLink(raw: String): Triple<String, String, String>? {
-        val uri = runCatching { Uri.parse(raw.trim()) }.getOrNull() ?: return null
-        val invitation = uri.getQueryParameter("invitation") ?: return null
-        val folder = uri.getQueryParameter("folder") ?: return null
-        val owner = uri.getQueryParameter("owner") ?: return null
-        return Triple(invitation, folder, owner)
+        val join = com.easybc.planner.sync.shared.parseSharedJoinLink(raw) ?: return null
+        return Triple(join.invitationFileId, join.ownerFolderId, join.ownerEmail)
     }
 
     fun authorizeAndJoin(params: Triple<String, String, String>) {

@@ -4,6 +4,8 @@ import android.app.Activity
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.ComponentActivity
@@ -21,6 +23,7 @@ import com.easybc.planner.sync.CloudAutoSyncSession
 import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.shared.SharedSyncCoordinator
+import com.easybc.planner.sync.shared.parseSharedJoinLink
 import com.easybc.planner.ui.navigation.AppNavigation
 import com.easybc.planner.ui.theme.EasyBCTheme
 import kotlinx.coroutines.launch
@@ -108,10 +111,7 @@ class MainActivity : ComponentActivity() {
 
     private fun handleSharedSyncJoinIntent(intent: Intent?) {
         val data = intent?.data ?: return
-        if (data.getQueryParameter("sync") != "join") return
-        val invitationFileId = data.getQueryParameter("invitation") ?: return
-        val ownerFolderId = data.getQueryParameter("folder") ?: return
-        val ownerEmail = data.getQueryParameter("owner") ?: return
+        val join = parseSharedJoinLink(data) ?: return
         cloudAutoSyncScope.launch {
             runCatching {
                 val app = application as EasyBCApp
@@ -125,7 +125,20 @@ class MainActivity : ComponentActivity() {
                         auth.finish(this@MainActivity, result)
                     }
                 }
-                sharedSync.join(token, invitationFileId, ownerFolderId, ownerEmail)
+                sharedSync.join(token, join.invitationFileId, join.ownerFolderId, join.ownerEmail)
+            }.onSuccess {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Join request sent. The profile owner must accept it before this device can sync.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }.onFailure { error ->
+                Log.e("EasyBcSync", "Join from link failed", error)
+                Toast.makeText(
+                    this@MainActivity,
+                    error.message ?: "Join failed (${error.javaClass.simpleName}).",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
