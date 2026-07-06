@@ -282,6 +282,70 @@ export function disposeRuntime(): void {
   runtime = null;
 }
 
+export async function resetSharedSync(
+  config: SharedSyncConfig,
+  local: SharedSyncPayloadV1,
+): Promise<{ state: SharedSyncState; result: SharedSyncRunResult }> {
+  return serialized(async () => {
+    disposeRuntime();
+    const bootstrapProfileId = "__easybc-bootstrap__";
+    const bootstrap = createProviders(config, bootstrapProfileId);
+    const authorization = await authorizeAndRemember(
+      bootstrap.authorizationProvider,
+      bootstrapProfileId,
+    );
+    const ownerEmail = await fetchGoogleAccountEmail(authorization.accessToken);
+    const activeProfileId = profileKey(ownerEmail, PRIMARY_DATASET_ID);
+    const { authorizationProvider, googleIdentity } =
+      activeProfileId === bootstrapProfileId
+        ? bootstrap
+        : createProviders(config, activeProfileId);
+    if (activeProfileId !== bootstrapProfileId) {
+      await sharedAuthCache.save({
+        profileId: activeProfileId,
+        accessToken: authorization.accessToken,
+        expiresAt: authorization.expiresAt ?? Date.now() + 3_600_000,
+      });
+      rememberTokenExpiry(activeProfileId, authorization.expiresAt);
+    }
+    const identityProvider = createSharingIdentityProvider(config.rpId);
+    await identityProvider.getOrCreate();
+    const identity = await identityProvider.get();
+    const provisional: SharedSyncState = {
+      schemaVersion: 1,
+      rpId: config.rpId,
+      ownerEmail,
+      activeProfileKey: profileKey(ownerEmail, PRIMARY_DATASET_ID),
+      profiles: [
+        {
+          datasetId: PRIMARY_DATASET_ID,
+          ownerEmail,
+          folderName: easyBcSyncFolderName(ownerEmail),
+          role: "owner",
+          trustedOwnerKeyId: identity.publicKey.keyId,
+        },
+      ],
+    };
+    try {
+      const controller = buildController(
+        provisional,
+        provisional.profiles[0],
+        config,
+        identityProvider,
+        authorizationProvider,
+        googleIdentity,
+      );
+      for (const dataset of await controller.listDatasets()) {
+        await controller.deleteDataset(dataset.datasetId).catch(() => undefined);
+      }
+    } catch {
+      // Best-effort Drive cleanup; setup recreates from local data.
+    }
+    await forgetSharedSync();
+    return setupSharedSync(config, local);
+  });
+}
+
 export async function setupSharedSync(
   config: SharedSyncConfig,
   local: SharedSyncPayloadV1,
@@ -339,9 +403,28 @@ export async function setupSharedSync(
         authorizationProvider,
         googleIdentity,
       );
-      await controller.ensureStorage();
-      const created = await controller.createDataset(PRIMARY_DATASET_ID, local);
       const storage = await controller.ensureStorage();
+      // Adopt an existing primary dataset (interrupted setup, reinstall,
+      // reconnecting device) instead of failing with "already exists";
+      // create only when the folder has none.
+      const existing = (await controller.listDatasets()).find(
+        (dataset) => dataset.datasetId === PRIMARY_DATASET_ID,
+      );
+      const created = existing
+        ? await (async () => {
+            try {
+              await controller.adoptDataset(PRIMARY_DATASET_ID, { requireOwned: true });
+            } catch (error) {
+              throw new Error(
+                "An encrypted sync dataset already exists in your Drive folder, " +
+                  "but this device cannot unlock it. Use Reset encrypted sync to " +
+                  "replace it with this device's data.",
+                { cause: error },
+              );
+            }
+            return controller.syncDataset(PRIMARY_DATASET_ID, local);
+          })()
+        : await controller.createDataset(PRIMARY_DATASET_ID, local);
       const nextState = createInitialSharedSyncState({
         rpId: config.rpId,
         ownerEmail,

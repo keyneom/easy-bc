@@ -33,6 +33,7 @@ import {
   isSharedSyncConfigured,
   listPendingKeyResponses,
   loadActiveProfileDataset,
+  resetSharedSync,
   setActiveProfileKey,
   setupSharedSync,
   sharedSyncConfigFromEnv,
@@ -269,6 +270,34 @@ export function SyncSettings({
     }
   };
 
+  const runReset = async () => {
+    if (!config) return;
+    if (
+      !window.confirm(
+        "Delete encrypted sync data in your Drive folder and replace it with this device's local data? " +
+          "Shared profiles you joined are not affected.",
+      )
+    ) {
+      return;
+    }
+    setBusy("reset");
+    setNotice({ kind: "info", message: "Resetting encrypted sync with this device's data…" });
+    try {
+      const { state, result } = await resetSharedSync(config, localShared());
+      await applyShared(result.payload);
+      onSharedSyncStateChange(state);
+      onSyncComplete?.(sharedPayloadToSyncPayload(result.payload, session.androidPreferences));
+      setNotice({
+        kind: "success",
+        message: "Encrypted sync was reset with this device's local data.",
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const switchProfile = async (key: string) => {
     if (!config || !sharedSyncState) return;
     setBusy("switch");
@@ -428,6 +457,10 @@ export function SyncSettings({
             <button type="button" disabled={unavailable || busy !== null} onClick={() => void runSync()}>
               <RefreshCw aria-hidden className={busy === "sync" ? "spin" : undefined} />
               {busy === "sync" ? "Merging…" : "Merge encrypted changes"}
+            </button>
+            <button type="button" className="ghost" disabled={unavailable || busy !== null} onClick={() => void runReset()}>
+              <Trash2 aria-hidden />
+              {busy === "reset" ? "Resetting…" : "Reset encrypted sync"}
             </button>
             <button type="button" className="ghost" disabled={unavailable || busy !== null} onClick={() => void runForget()}>
               <Trash2 aria-hidden />
