@@ -27,6 +27,7 @@ import { pickSharedAppFolder } from "../sync/sharedPicker";
 import { migrateLegacyEncryptedSync } from "../sync/sharedMigration";
 import {
   acceptPendingKeyResponse,
+  createOwnedProfile,
   forgetSharedSync,
   inviteToDataset,
   listPendingKeyResponses,
@@ -37,8 +38,10 @@ import {
   syncActiveDataset,
   submitJoinResponse,
 } from "../sync/sharedSync";
+import { profileDisplayLabel } from "../sync/profileLabels";
 import {
   buildSharedSyncPayload,
+  canPublishRole,
   findProfile,
   sharedPayloadToSyncPayload,
   type SharedSyncState,
@@ -282,6 +285,30 @@ export function SyncSettings({
     }
   };
 
+  const addOwnedProfile = async (displayName: string) => {
+    if (!config || !sharedSyncState) return;
+    setBusy("create-profile");
+    try {
+      const active = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+      if (active && canPublishRole(active.role)) {
+        const local = buildSharedSyncPayload(options, periodRecords, session);
+        await syncActiveDataset(config, local);
+      }
+      const { state, result } = await createOwnedProfile(config, displayName);
+      onSharedSyncStateChange(state);
+      if (onProfileSwitch) await onProfileSwitch(state);
+      else await applyShared(result.payload);
+      setNotice({
+        kind: "success",
+        message: `Created profile ${displayName.trim()}. Enter cycle data for this person below.`,
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const acceptResponse = async (entry: {
     responseFileId: string;
     invitationFileId: string;
@@ -341,6 +368,7 @@ export function SyncSettings({
         <ProfileSwitcher
           sharedSyncState={sharedSyncState}
           onSwitchProfile={(key) => void switchProfile(key)}
+          onCreateProfile={(name) => void addOwnedProfile(name)}
           disabled={busy !== null}
         />
       )}
@@ -349,7 +377,7 @@ export function SyncSettings({
         <div className="sync-connected">
           <span className="status-dot" aria-hidden />
           <div>
-            <strong>{activeProfile.folderName}</strong>
+            <strong>{profileDisplayLabel(sharedSyncState, activeProfile)}</strong>
             <span>Last encrypted update {formatLastSync(activeProfile.lastSyncedAt)}</span>
           </div>
         </div>

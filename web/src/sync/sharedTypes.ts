@@ -22,6 +22,8 @@ export type ProfileRecord = {
   datasetId: string;
   ownerEmail: string;
   folderName: string;
+  /** User-facing label for owned profiles (e.g. "Daughter"). */
+  displayName?: string;
   appFolderId?: string;
   role: SharingRole;
   trustedOwnerKeyId: string;

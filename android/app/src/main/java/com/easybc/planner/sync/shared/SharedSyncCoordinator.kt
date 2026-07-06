@@ -263,6 +263,41 @@ class SharedSyncCoordinator(
         return registry.upsertProfile(nextProfile)
     }
 
+    suspend fun createOwnedProfile(accessToken: String, displayName: String): SharedSyncState {
+        rememberAccess(accessToken)
+        val trimmed = displayName.trim()
+        require(trimmed.isNotEmpty()) { "Enter a profile name." }
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val primary = findOwnedPrimaryProfile(state)
+            ?: error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.")
+        val appFolderId = primary.appFolderId
+            ?: error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.")
+        val datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles)
+        val controller = controllerFor(state, primary.datasetId)
+        val created = controller.createDataset(datasetId, emptySharedPayload())
+        val syncedAt = java.time.Instant.now().toString()
+        val newProfile = ProfileRecord(
+            datasetId = datasetId,
+            ownerEmail = state.ownerEmail,
+            folderName = primary.folderName,
+            displayName = trimmed,
+            role = SharingRole.OWNER.name.lowercase(),
+            trustedOwnerKeyId = primary.trustedOwnerKeyId,
+            appFolderId = appFolderId,
+            fileId = created.fileId,
+            lastRevisionId = created.revisionId,
+            lastSyncedAt = syncedAt,
+        )
+        registry.upsertProfile(newProfile)
+        val profileKeyValue = profileKey(state.ownerEmail, datasetId)
+        registry.setActiveProfile(profileKeyValue)
+        store.apply(created.value.withLocalAndroidPreferences(store.localPayload()))
+        store.rememberSync(created.fileId, syncedAt)
+        registry.clearCheckpoint()
+        SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
+        return registry.load() ?: error("Shared sync is not configured on this device.")
+    }
+
     suspend fun forget() {
         identityStore.clear()
         driveAuth.clear()

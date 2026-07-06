@@ -339,6 +339,23 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun createOwnedProfile(accessToken: String, displayName: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.createOwnedProfile(accessToken, displayName)
+                repo.getSettings()?.let {
+                    _draft.value = it
+                    applyReminderSchedule(it)
+                }
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Created profile ${displayName.trim()}.")
+            } catch (error: Exception) {
+                _cloudStatus.value = SyncStatus.Error(error.message ?: "Profile creation failed.")
+            }
+        }
+    }
+
     fun refreshPendingResponses(accessToken: String) {
         viewModelScope.launch {
             _pendingResponses.value = runCatching {

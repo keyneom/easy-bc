@@ -332,6 +332,8 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     val joinUrl by vm.joinUrl.collectAsState()
     var pendingOperation by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var pendingProfileKey by remember { mutableStateOf<String?>(null) }
+    var pendingProfileDisplayName by remember { mutableStateOf<String?>(null) }
+    var newProfileName by remember { mutableStateOf("") }
     var pendingInvite by remember { mutableStateOf<Pair<String, String>?>(null) }
     var confirming by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var inviteEmail by remember { mutableStateOf("") }
@@ -342,9 +344,11 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     ) { result ->
         val operation = pendingOperation
         val profileKey = pendingProfileKey
+        val profileDisplayName = pendingProfileDisplayName
         val invite = pendingInvite
         pendingOperation = null
         pendingProfileKey = null
+        pendingProfileDisplayName = null
         pendingInvite = null
         if (result.resultCode != Activity.RESULT_OK) {
             vm.cloudError("Google authorization was cancelled.")
@@ -353,6 +357,10 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         runCatching { vm.finishCloudAuthorization(activity, result.data) }
             .onSuccess { token ->
                 when {
+                    profileDisplayName != null -> {
+                        vm.createOwnedProfile(token, profileDisplayName)
+                        newProfileName = ""
+                    }
                     profileKey != null -> vm.switchProfile(token, profileKey)
                     invite != null -> vm.inviteParticipant(token, invite.first, invite.second)
                     operation != null -> vm.runCloudOperation(activity, operation, token)
@@ -420,13 +428,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         state.profiles.forEach { profile ->
             val key = com.easybc.planner.sync.shared.profileKey(profile.ownerEmail, profile.datasetId)
             val active = key == state.activeProfileKey
-            val label = if (
-                profile.ownerEmail.equals(state.ownerEmail, ignoreCase = true) && profile.role == "owner"
-            ) {
-                "My data"
-            } else {
-                profile.folderName
-            }
+            val label = com.easybc.planner.sync.shared.profileDisplayLabel(state, profile)
             OutlinedButton(
                 onClick = {
                     if (active || busy) return@OutlinedButton
@@ -469,6 +471,45 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        Spacer(Modifier.height(8.dp))
+        OutlinedTextField(
+            value = newProfileName,
+            onValueChange = { newProfileName = it },
+            label = { Text("New profile name") },
+            placeholder = { Text("Daughter") },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                val name = newProfileName.trim()
+                if (name.isEmpty() || busy) return@OutlinedButton
+                scope.launch {
+                    try {
+                        when (val step = vm.beginCloudAuthorization(activity)) {
+                            is AuthorizationStep.Authorized -> {
+                                vm.createOwnedProfile(step.accessToken, name)
+                                newProfileName = ""
+                            }
+                            is AuthorizationStep.NeedsResolution -> {
+                                pendingProfileDisplayName = name
+                                resolutionLauncher.launch(
+                                    IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                                )
+                            }
+                        }
+                    } catch (error: Exception) {
+                        vm.cloudError(error.message ?: "Google authorization failed.")
+                    }
+                }
+            },
+            enabled = !busy && newProfileName.trim().isNotEmpty(),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Add profile")
         }
     }
     Spacer(modifier = Modifier.height(8.dp))

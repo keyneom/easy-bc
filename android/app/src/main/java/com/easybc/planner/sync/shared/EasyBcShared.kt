@@ -42,6 +42,7 @@ data class ProfileRecord(
     val datasetId: String,
     val ownerEmail: String,
     val folderName: String,
+    val displayName: String? = null,
     val role: String,
     val trustedOwnerKeyId: String,
     val appFolderId: String? = null,

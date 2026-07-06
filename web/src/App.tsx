@@ -850,6 +850,7 @@ export default function App() {
     };
     const nextSession: PersistedSession = {
       ...session,
+      locks: [],
       plannerConfigured: plannerConfiguredFromPayload(payload),
       calendarDayLogs: payload.calendarDayLogs,
       voluntaryAbstinenceDates: payload.voluntaryAbstinenceDates,
@@ -863,6 +864,7 @@ export default function App() {
       androidPreferences: payload.androidPreferences ?? session.androidPreferences,
     };
     optionsFingerprintRef.current = JSON.stringify(portablePlannerOptions(nextOptions));
+    setLocks([]);
     setPeriodRecords(payload.periodRecords);
     setSession(nextSession);
     setOpts(nextOptions);
@@ -2245,9 +2247,12 @@ export default function App() {
                   if (!sharedSyncConfig) return;
                   const { loadActiveProfileDataset } = await import("./sync/sharedSync");
                   const result = await loadActiveProfileDataset(sharedSyncConfig);
-                  await applySyncedPayload(
-                    sharedPayloadToSyncPayload(result.payload, session.androidPreferences),
+                  const payload = sharedPayloadToSyncPayload(
+                    result.payload,
+                    session.androidPreferences,
                   );
+                  await applySyncedPayload(payload);
+                  markSyncComplete(payload);
                   setSharedSyncState(state);
                 }}
               />

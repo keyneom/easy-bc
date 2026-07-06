@@ -30,6 +30,12 @@ import { easyBcSharedCodec } from "./sharedCodec";
 import { createSharingIdentityProvider } from "./sharedIdentity";
 import { easyBcSyncFolderName, profileKey } from "./sharedFolderName";
 import {
+  findOwnedPrimaryProfile,
+  isOwnedProfile,
+  uniqueOwnedDatasetId,
+} from "./profileLabels";
+import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
+import {
   createInitialSharedSyncState,
   forgetSharedSyncState,
   loadSharedSyncState,
@@ -132,13 +138,6 @@ function profileForActive(state: SharedSyncState): ProfileRecord {
   const profile = findProfile(state, state.activeProfileKey);
   if (!profile) throw new Error("The active encrypted sync profile is missing.");
   return profile;
-}
-
-function isOwnedProfile(state: SharedSyncState, profile: ProfileRecord): boolean {
-  return (
-    profile.ownerEmail.toLowerCase() === state.ownerEmail.toLowerCase() &&
-    profile.role === "owner"
-  );
 }
 
 function createProviders(config: SharedSyncConfig, profileId: string) {
@@ -439,8 +438,69 @@ export async function setActiveProfileKey(profileKeyValue: string): Promise<Shar
   const next = { ...state, activeProfileKey: profileKeyValue };
   cachedState = next;
   await saveSharedSyncState(next);
+  await clearSharingSyncCheckpoint();
   disposeRuntime();
   return next;
+}
+
+export async function createOwnedProfile(
+  config: SharedSyncConfig,
+  displayName: string,
+): Promise<{ state: SharedSyncState; result: SharedSyncRunResult }> {
+  return serialized(async () => {
+    const trimmed = displayName.trim();
+    if (!trimmed) throw new Error("Enter a profile name.");
+    const state = await getCachedState();
+    if (!state) throw new Error("Encrypted sync is not set up on this device.");
+    const primary = findOwnedPrimaryProfile(state);
+    if (!primary?.appFolderId) {
+      throw new Error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.");
+    }
+    const datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles);
+    const emptyPayload = createEmptySharedSyncPayload();
+    disposeRuntime();
+    const identityProvider = createSharingIdentityProvider(config.rpId);
+    const primaryKey = profileKey(primary.ownerEmail, primary.datasetId);
+    const { authorizationProvider, googleIdentity } = createProviders(config, primaryKey);
+    const controller = buildController(
+      state,
+      primary,
+      config,
+      identityProvider,
+      authorizationProvider,
+      googleIdentity,
+    );
+    const created = await controller.createDataset(datasetId, emptyPayload);
+    const syncedAt = new Date().toISOString();
+    const newProfile: ProfileRecord = {
+      datasetId,
+      ownerEmail: state.ownerEmail,
+      folderName: primary.folderName,
+      displayName: trimmed,
+      role: "owner",
+      trustedOwnerKeyId: primary.trustedOwnerKeyId,
+      appFolderId: primary.appFolderId,
+      fileId: created.fileId,
+      lastRevisionId: created.revisionId,
+      lastSyncedAt: syncedAt,
+    };
+    const profileKeyValue = profileKey(state.ownerEmail, datasetId);
+    let nextState = upsertProfile(state, newProfile);
+    nextState = { ...nextState, activeProfileKey: profileKeyValue };
+    cachedState = nextState;
+    await saveSharedSyncState(nextState);
+    await clearSharingSyncCheckpoint();
+    disposeRuntime();
+    return {
+      state: nextState,
+      result: {
+        payload: created.value,
+        syncedAt,
+        revisionId: created.revisionId,
+        profileKey: profileKeyValue,
+      },
+    };
+  });
 }
 
 export async function inviteToDataset(
@@ -643,6 +703,10 @@ export async function forgetSharedSync(): Promise<void> {
   cachedState = null;
   tokenExpiresAtByProfile.clear();
   await forgetSharedSyncState();
+  await idbSet(KV_SHARING_SYNC_CHECKPOINT, {});
+}
+
+export async function clearSharingSyncCheckpoint(): Promise<void> {
   await idbSet(KV_SHARING_SYNC_CHECKPOINT, {});
 }
 
