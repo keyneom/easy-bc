@@ -2290,7 +2290,7 @@ pre {
  * only handle we have.
  */
 @media (max-width: 700px) {
-  body > div.picker-dialog {
+  .picker-dialog {
     left: 0 !important;
     top: 0 !important;
     width: 100vw !important;
@@ -2300,9 +2300,20 @@ pre {
     border: none !important;
     z-index: 2147483000 !important;
   }
-  body > div.picker-dialog .picker-dialog-content,
-  body > div.picker-dialog iframe {
+  .picker-dialog-bg {
+    z-index: 2147482000 !important;
+  }
+  .picker-dialog .picker-dialog-content,
+  .picker-dialog iframe {
     width: 100% !important;
     height: 100% !important;
+  }
+  /*
+   * The Google Picker footer (Select/Cancel) sits at the bottom of its
+   * iframe. Hide the app's fixed bottom nav while the picker is open so it
+   * does not cover those buttons.
+   */
+  body[data-picker-open] .app-tabs {
+    display: none !important;
   }
 }

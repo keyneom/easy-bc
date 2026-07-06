@@ -22,7 +22,15 @@ export async function pickSharedAppFolder(
       "Google Picker is not configured. Set VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLOUD_PROJECT_NUMBER.",
     );
   }
-  const picked = await picker.pickFolder(authorization);
-  if (!picked) return null;
-  return { folderId: picked.folderId, name: picked.name };
+  // The picker iframe's Select/Cancel footer sits at the bottom of the
+  // viewport, where the app's fixed bottom nav would cover it on mobile.
+  // Flag the body so CSS can hide the nav for the picker's lifetime.
+  document.body.dataset.pickerOpen = "true";
+  try {
+    const picked = await picker.pickFolder(authorization);
+    if (!picked) return null;
+    return { folderId: picked.folderId, name: picked.name };
+  } finally {
+    delete document.body.dataset.pickerOpen;
+  }
 }
