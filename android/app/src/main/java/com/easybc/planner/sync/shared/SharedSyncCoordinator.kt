@@ -15,6 +15,8 @@ import com.keyneom.synckit.sharing.SharingJoinParams
 import com.keyneom.synckit.sharing.SharingRole
 import com.keyneom.synckit.sharing.appendSharingJoinParams
 import com.keyneom.synckit.stores.GoogleDriveSharedBackupTransport
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.HttpURLConnection
@@ -363,21 +365,24 @@ class SharedSyncCoordinator(
         )
     }
 
-    private fun fetchGoogleAccountEmail(accessToken: String): String {
-        val connection = (URL("https://www.googleapis.com/oauth2/v3/userinfo").openConnection()
-            as HttpURLConnection)
-        connection.setRequestProperty("Authorization", "Bearer $accessToken")
-        val body = connection.inputStream.bufferedReader().readText()
-        val email = SyncKitJson.instance
-            .parseToJsonElement(body)
-            .jsonObject["email"]
-            ?.jsonPrimitive
-            ?.content
-        require(!email.isNullOrBlank()) {
-            "Your Google account has no email address for encrypted sync."
+    // Must stay off the main thread: callers run in viewModelScope and raw
+    // HttpURLConnection I/O there throws NetworkOnMainThreadException.
+    private suspend fun fetchGoogleAccountEmail(accessToken: String): String =
+        withContext(Dispatchers.IO) {
+            val connection = (URL("https://www.googleapis.com/oauth2/v3/userinfo").openConnection()
+                as HttpURLConnection)
+            connection.setRequestProperty("Authorization", "Bearer $accessToken")
+            val body = connection.inputStream.bufferedReader().readText()
+            val email = SyncKitJson.instance
+                .parseToJsonElement(body)
+                .jsonObject["email"]
+                ?.jsonPrimitive
+                ?.content
+            require(!email.isNullOrBlank()) {
+                "Your Google account has no email address for encrypted sync."
+            }
+            email
         }
-        return email
-    }
 
     private fun sharedPayload(payload: SyncPayloadV1): SyncPayloadV1 =
         payload.copy(androidPreferences = null)

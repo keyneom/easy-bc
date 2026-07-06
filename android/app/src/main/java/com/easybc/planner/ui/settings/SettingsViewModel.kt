@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.easybc.planner.EasyBCApp
@@ -23,6 +24,8 @@ import com.easybc.planner.sync.shared.canPublishRole
 import com.easybc.planner.sync.shared.profileKey
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+
+private const val SYNC_LOG_TAG = "EasyBcSync"
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EasyBCApp
@@ -308,9 +311,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 refreshSharedSyncState()
                 _cloudStatus.value = SyncStatus.Success(message)
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Encrypted sync failed.")
+                _cloudStatus.value = cloudFailure("Cloud operation $operation", error, "Encrypted sync failed")
             }
         }
+    }
+
+    /** Log the full stack trace and surface a message that always identifies the error. */
+    private fun cloudFailure(what: String, error: Exception, fallback: String): SyncStatus.Error {
+        Log.e(SYNC_LOG_TAG, "$what failed", error)
+        return SyncStatus.Error(
+            error.message ?: "$fallback (${error.javaClass.simpleName}).",
+        )
     }
 
     fun inviteParticipant(accessToken: String, email: String, role: String) {
@@ -321,7 +332,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 _joinUrl.value = url
                 _cloudStatus.value = SyncStatus.Success("Invitation created. Share the join link with $email.")
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Invite failed.")
+                _cloudStatus.value = cloudFailure("Invite", error, "Invite failed")
             }
         }
     }
@@ -341,7 +352,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     "Join request submitted. The owner must accept before you can sync.",
                 )
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Join failed.")
+                _cloudStatus.value = cloudFailure("Join", error, "Join failed")
             }
         }
     }
@@ -359,7 +370,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 refreshSharedSyncState()
                 _cloudStatus.value = SyncStatus.Success("Switched encrypted sync profile.")
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Profile switch failed.")
+                _cloudStatus.value = cloudFailure("Profile switch", error, "Profile switch failed")
             }
         }
     }
@@ -376,7 +387,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 refreshSharedSyncState()
                 _cloudStatus.value = SyncStatus.Success("Created profile ${displayName.trim()}.")
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Profile creation failed.")
+                _cloudStatus.value = cloudFailure("Profile creation", error, "Profile creation failed")
             }
         }
     }
@@ -406,7 +417,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 refreshPendingResponses(accessToken)
                 _cloudStatus.value = SyncStatus.Success("Participant accepted into encrypted sync.")
             } catch (error: Exception) {
-                _cloudStatus.value = SyncStatus.Error(error.message ?: "Accept failed.")
+                _cloudStatus.value = cloudFailure("Accept participant", error, "Accept failed")
             }
         }
     }
