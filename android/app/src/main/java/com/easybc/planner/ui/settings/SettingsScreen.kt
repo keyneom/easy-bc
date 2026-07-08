@@ -349,6 +349,12 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     var inviteEmail by remember { mutableStateOf("") }
     var inviteRole by remember { mutableStateOf("viewer") }
 
+    // A join link that arrived via a deep link (and couldn't complete inline)
+    // pre-fills the paste field so the user can grant access and retry here.
+    LaunchedEffect(Unit) {
+        com.easybc.planner.sync.shared.PendingSharedJoin.consume()?.let { joinLinkInput = it }
+    }
+
     val resolutionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
@@ -448,14 +454,14 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 Text(
                     when {
                         sharedConfigured -> "Encrypted sync enabled on this device"
-                        connected -> "Legacy encrypted sync metadata on this device"
+                        legacyPresent -> "Legacy encrypted sync on this device"
                         else -> "Passkey-protected encrypted sync"
                     },
                     style = MaterialTheme.typography.labelLarge,
                 )
                 Text(
                     when {
-                        sharedConfigured || connected -> lastSync?.let { "Last encrypted update ${formatSyncTime(it)}" }
+                        sharedConfigured || legacyPresent -> lastSync?.let { "Last encrypted update ${formatSyncTime(it)}" }
                             ?: "No encrypted sync has completed on this device."
                         else -> "No encrypted sync has completed on this device."
                     },
@@ -561,15 +567,6 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
-    if (connected && !sharedConfigured) {
-        Text(
-            "Legacy encrypted sync metadata remains on this device. If the cloud file was removed, " +
-                "use Set up encrypted sync or Migrate to create a new shared Drive folder.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-    }
     if (sharedConfigured) {
         Button(
             onClick = { authorizeAndRun(CloudSyncOperation.SYNC) },
@@ -668,7 +665,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 onClick = { confirming = CloudSyncOperation.DELETE },
                 enabled = !busy,
                 modifier = Modifier.weight(1f),
-            ) { Text("Remove from this device") }
+            ) { Text("Stop syncing on this device") }
         }
     } else if (legacyPresent) {
         // This device still has legacy snapshot metadata: migrating is the
@@ -718,51 +715,59 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-    if (!sharedConfigured) {
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = joinLinkInput,
-            onValueChange = { joinLinkInput = it },
-            label = { Text("Paste a join link") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        OutlinedButton(
-            onClick = {
-                val params = parseJoinLink(joinLinkInput)
-                if (params == null) {
-                    vm.cloudError("That link is missing its invitation details. Ask for a fresh join link.")
-                } else {
-                    authorizeAndJoin(params)
-                }
-            },
-            enabled = !busy && joinLinkInput.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Join a shared profile") }
-        TextButton(
-            onClick = {
-                val base = joinLinkInput.trim()
-                val grantUrl = base + (if (base.contains('?')) "&" else "?") + "grant-folder=1"
-                if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
-                    clipboard.setText(AnnotatedString(grantUrl))
-                    vm.cloudError(
-                        "No browser found to open automatically. The grant link was " +
-                            "copied — paste it into Chrome, grant access, then join again.",
-                    )
-                }
-            },
-            enabled = joinLinkInput.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Grant folder access (opens browser)") }
-        Text(
-            "Joining connects this device to a profile someone shared with you — " +
-                "no encrypted sync setup of your own is needed. If joining says EasyBC " +
-                "can't see the folder, grant access in the browser first (sign in with " +
-                "this same Google account), then join again.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
+    // Joining a profile someone shared with you is always available — with or
+    // without your own encrypted sync — so it lives in its own subsection.
+    Spacer(Modifier.height(16.dp))
+    HorizontalDivider()
+    Spacer(Modifier.height(8.dp))
+    Text("Join a shared profile", style = MaterialTheme.typography.labelLarge)
+    Text(
+        "Paste a join link someone sent you to add their profile on this device. " +
+            "You don't need your own encrypted sync to join.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = joinLinkInput,
+        onValueChange = { joinLinkInput = it },
+        label = { Text("Join link") },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+    )
+    OutlinedButton(
+        onClick = {
+            val params = parseJoinLink(joinLinkInput)
+            if (params == null) {
+                vm.cloudError("That link is missing its invitation details. Ask for a fresh join link.")
+            } else {
+                authorizeAndJoin(params)
+            }
+        },
+        enabled = !busy && joinLinkInput.isNotBlank(),
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Join shared profile") }
+    TextButton(
+        onClick = {
+            val base = joinLinkInput.trim()
+            val grantUrl = base + (if (base.contains('?')) "&" else "?") + "grant-folder=1"
+            if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
+                clipboard.setText(AnnotatedString(grantUrl))
+                vm.cloudError(
+                    "No browser found to open automatically. The grant link was " +
+                        "copied — paste it into Chrome, grant access, then join again.",
+                )
+            }
+        },
+        enabled = joinLinkInput.isNotBlank(),
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Grant folder access (opens browser)") }
+    Text(
+        "If joining says EasyBC can't see the folder, tap Grant folder access first " +
+            "(sign in with this same Google account), then Join again.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
     StatusRow(status = status, onDismiss = vm::dismissCloudStatus)
     Text(
         "Encrypted sync locks after EasyBC has been in the background for 15 minutes or its process ends.",
@@ -774,14 +779,14 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         AlertDialog(
             onDismissRequest = { confirming = null },
             title = {
-                Text(if (operation == CloudSyncOperation.RESET) "Replace the encrypted cloud copy?" else "Delete encrypted cloud copy?")
+                Text(if (operation == CloudSyncOperation.RESET) "Replace the encrypted cloud copy?" else "Stop encrypted sync on this device?")
             },
             text = {
                 Text(
                     if (operation == CloudSyncOperation.RESET) {
                         "This deletes the encrypted Drive snapshot — including one this device can't unlock — and recreates it from this device's local data. Your sharing identity (in Drive app data) is kept, so your other devices stay in sync."
                     } else {
-                        "This permanently deletes the encrypted EasyBC cloud snapshot from Drive. Local data stays on this device."
+                        "This disconnects encrypted sync on this device only. Your data stays on this device, and the encrypted cloud copy and your other devices are unaffected. You can set up or join again later."
                     }
                 )
             },
@@ -789,7 +794,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 TextButton(onClick = {
                     confirming = null
                     authorizeAndRun(operation)
-                }) { Text(if (operation == CloudSyncOperation.RESET) "Replace" else "Delete") }
+                }) { Text(if (operation == CloudSyncOperation.RESET) "Replace" else "Stop syncing") }
             },
             dismissButton = { TextButton(onClick = { confirming = null }) { Text("Cancel") } },
         )

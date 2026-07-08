@@ -130,6 +130,9 @@ class MainActivity : ComponentActivity() {
             return
         }
         val join = parseSharedJoinLink(data) ?: return
+        // Stash the link so Settings › Encrypted sync can recover the join (grant
+        // access + retry) if the inline attempt can't complete yet.
+        com.easybc.planner.sync.shared.PendingSharedJoin.set(data.toString())
         cloudAutoSyncScope.launch {
             runCatching {
                 val app = application as EasyBCApp
@@ -145,6 +148,7 @@ class MainActivity : ComponentActivity() {
                 }
                 sharedSync.join(token, join.invitationFileId, join.ownerFolderId, join.ownerEmail)
             }.onSuccess {
+                com.easybc.planner.sync.shared.PendingSharedJoin.set(null)
                 Toast.makeText(
                     this@MainActivity,
                     "Join request sent. The profile owner must accept it before this device can sync.",
@@ -152,9 +156,11 @@ class MainActivity : ComponentActivity() {
                 ).show()
             }.onFailure { error ->
                 Log.e("EasyBcSync", "Join from link failed", error)
+                // Keep the link stashed; guide the user to the Settings recovery.
                 Toast.makeText(
                     this@MainActivity,
-                    error.message ?: "Join failed (${error.javaClass.simpleName}).",
+                    "Couldn't join yet. Open Settings → Encrypted Cloud Sync to grant " +
+                        "folder access and finish joining.",
                     Toast.LENGTH_LONG,
                 ).show()
             }
