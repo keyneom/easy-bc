@@ -53,6 +53,36 @@ it does; first live cross-account join will confirm. Owner-side accept
 (reading the recipient's response file) may need the same grant dance on the
 owner's device if creating-in-folder doesn't self-grant.
 
+### 2d. Picker folder grant did NOT unblock the join — UNRESOLVED (2026-07-06)
+Live result on device (recipient = keyneom122, owner = leslie.tumulak):
+the browser hand-off, CSP, and mobile Picker layout all now work — the user
+selected "EasyBC — leslie…" and the web app confirmed "Access granted."
+But returning to the app and tapping Join STILL 404s on the invitation file
+(`exchanges/<id>-invitation.json`). So the Picker grant did not make that
+file visible to the Android `drive.file` token.
+
+Two candidate causes, not yet distinguished:
+1. **Descendant coverage** — a `drive.file` grant on a *folder* may not
+   confer API read access to pre-existing files *inside* it (the invitation
+   is a grandchild via `exchanges/`). Picking the folder lets you
+   list/create there, but reading an existing descendant may still 404.
+2. **OAuth-client scoping** — `drive.file` grants may bind to the OAuth
+   *client id*, not the Cloud *project*. Web and Android are separate
+   clients in project 749784659830; if grants are client-scoped, a web
+   Picker grant can never satisfy the Android token. (Both clients are in
+   the same project — auth works — so this is the open question.)
+
+This has NOT been verified to work on web either; cross-account join may
+never have completed end-to-end on any platform. Do not ship more
+grant-hand-off changes until one definitive test settles which cause it is:
+- If descendants aren't covered: have the Picker grant the specific files
+  (multi-select the invitation + dataset), or restructure so the recipient
+  only ever touches files it created (protocol change in sync-kit).
+- If grants are client-scoped: the web hand-off is architecturally dead for
+  Android; options narrow to a broader Drive scope (user rejected) or an
+  invitation-delivery redesign that doesn't require the recipient to read
+  from the owner's folder at all.
+
 ### 2b. Join links did not work at all — FIXED v0.1.37
 The link generator (sync-kit `appendSharingJoinParams`, SYNC_KIT style) emits
 `sync-kit-join/sync-kit-folder/sync-kit-exchange` plus app-appended

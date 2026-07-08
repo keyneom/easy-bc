@@ -28,8 +28,12 @@ class SharedSyncCoordinator(
     private val store: SyncPayloadGateway,
 ) {
     private val registry = SharedSyncRegistry(db)
-    private val identityStore = SharingIdentityStore(context.applicationContext)
     private val driveAuth = SharedDriveAuth(context.applicationContext)
+    // The sharing identity lives in drive.appdata (authorized by the remembered
+    // token) so it follows the Google account across devices.
+    private val identityStore = SharingIdentityStore(context.applicationContext) {
+        driveAuth.provider().authorize()
+    }
 
     suspend fun loadState(): SharedSyncState? = registry.load()
 
@@ -213,10 +217,12 @@ class SharedSyncCoordinator(
             transport.readInvitation(invitationFileId)
         } catch (error: Exception) {
             if (com.easybc.planner.sync.CloudSyncCoordinator.isNotFound(error)) {
+                val probe = probeDriveVisibility(accessToken, ownerFolderId, invitationFileId)
+                android.util.Log.w("EasyBcSync", "join visibility probe -> $probe")
                 throw IllegalArgumentException(
-                    "EasyBC can't see the shared folder yet. Tap \"Grant folder access\" " +
-                        "to allow it in your browser (sign in with this same Google " +
-                        "account), then try joining again.",
+                    "EasyBC can't see the shared folder yet ($probe). Tap " +
+                        "\"Grant folder access\" to allow it in your browser (sign in " +
+                        "with this same Google account), then try joining again.",
                     error,
                 )
             }
@@ -456,6 +462,37 @@ class SharedSyncCoordinator(
             }
             email
         }
+
+    // Diagnostic parity with sharedSync.ts#probeDriveVisibility: with
+    // drive.file, another account's shares can be invisible to our token (404)
+    // even after a Picker grant. Probing files.get for both the shared folder
+    // and the invitation file inside it distinguishes the hypotheses:
+    //   folder 200 + invitation 404 -> folder grant does not cover descendants
+    //   folder 404 + invitation 404 -> grant never reached this OAuth client
+    //   folder 200 + invitation 403 -> visible but not authorized
+    private suspend fun probeDriveVisibility(
+        accessToken: String,
+        folderId: String,
+        invitationFileId: String,
+    ): String = withContext(Dispatchers.IO) {
+        fun status(id: String): String {
+            if (id.isBlank()) return "0(no id)"
+            return try {
+                val connection = (URL(
+                    "https://www.googleapis.com/drive/v3/files/${enc(id)}" +
+                        "?fields=id,name,parents&supportsAllDrives=true",
+                ).openConnection() as HttpURLConnection)
+                connection.setRequestProperty("Authorization", "Bearer $accessToken")
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty().take(200)
+                "$code $body"
+            } catch (error: Exception) {
+                "error: ${error.message}"
+            }
+        }
+        "folder[$folderId]=${status(folderId)} | invitation[$invitationFileId]=${status(invitationFileId)}"
+    }
 
     private fun sharedPayload(payload: SyncPayloadV1): SyncPayloadV1 =
         payload.copy(androidPreferences = null)

@@ -77,6 +77,13 @@ setup, reinstall, reconnect), otherwise create, and surface "exists but not
 decryptable by this identity" distinctly — is protocol-level and both
 platforms repeat it.
 
+### Hybrid identity substrate (appdata-hosted, passkey-wrapped)
+
+See [`sync-kit-hybrid-identity.md`](sync-kit-hybrid-identity.md). Full
+concept + interface changes for restoring cross-device same-user identity
+without dismantling the sharing (multi-user) protocol. Highest-priority
+sync-kit change after the join-link seam.
+
 ### Distinct error for scope-invisible files
 
 The Drive transport should map 404s on exchange/dataset reads to a dedicated

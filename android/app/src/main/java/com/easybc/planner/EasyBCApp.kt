@@ -1,6 +1,8 @@
 package com.easybc.planner
 
+import android.app.Activity
 import android.app.Application
+import android.os.Bundle
 import com.easybc.planner.bridge.PlannerBridge
 import com.easybc.planner.bridge.createPlannerBridge
 import com.easybc.planner.calendar.CalendarAutoSync
@@ -44,6 +46,25 @@ class EasyBCApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // Track the current resumed Activity so the sharing passkey flow can
+        // present Credential Manager UI without an Activity being threaded
+        // through every encrypted-sync call.
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: Activity) =
+                EasyBcForegroundActivity.set(activity)
+
+            override fun onActivityDestroyed(activity: Activity) {
+                if (EasyBcForegroundActivity.current === activity) {
+                    EasyBcForegroundActivity.set(null)
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+            override fun onActivityStarted(activity: Activity) = Unit
+            override fun onActivityPaused(activity: Activity) = Unit
+            override fun onActivityStopped(activity: Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+        })
         // Kick off the auto-sync collector. It's a no-op until the user
         // flips `calendarSyncEnabled` on in Settings, at which point it
         // begins debounced resyncs on every data change.
