@@ -337,6 +337,9 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     val sharedState by vm.sharedSyncState.collectAsState()
     val legacyPresent by vm.legacySyncPresent.collectAsState()
     val joinUrl by vm.joinUrl.collectAsState()
+    val responseLink by vm.responseLink.collectAsState()
+    var responseLinkInput by remember { mutableStateOf("") }
+    var deepLinkResponse by remember { mutableStateOf<String?>(null) }
     val clipboard = LocalClipboardManager.current
     var pendingOperation by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var pendingProfileKey by remember { mutableStateOf<String?>(null) }
@@ -344,15 +347,21 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     var newProfileName by remember { mutableStateOf("") }
     var pendingInvite by remember { mutableStateOf<Pair<String, String>?>(null) }
     var pendingJoin by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    var pendingLinkJoin by remember { mutableStateOf<String?>(null) }
+    var pendingLinkAccept by remember { mutableStateOf<String?>(null) }
     var joinLinkInput by remember { mutableStateOf("") }
     var confirming by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var inviteEmail by remember { mutableStateOf("") }
     var inviteRole by remember { mutableStateOf("viewer") }
 
-    // A join link that arrived via a deep link (and couldn't complete inline)
-    // pre-fills the paste field so the user can grant access and retry here.
+    // A legacy join link stashed by the deep-link handler pre-fills the paste
+    // field; a response link produced by a deep-link join is shown for copy.
     LaunchedEffect(Unit) {
         com.easybc.planner.sync.shared.PendingSharedJoin.consume()?.let { joinLinkInput = it }
+        com.easybc.planner.sync.shared.PendingSharedJoin.responseLink?.let {
+            deepLinkResponse = it
+            com.easybc.planner.sync.shared.PendingSharedJoin.responseLink = null
+        }
     }
 
     val resolutionLauncher = rememberLauncherForActivityResult(
@@ -363,11 +372,15 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         val profileDisplayName = pendingProfileDisplayName
         val invite = pendingInvite
         val join = pendingJoin
+        val linkJoin = pendingLinkJoin
+        val linkAccept = pendingLinkAccept
         pendingOperation = null
         pendingProfileKey = null
         pendingProfileDisplayName = null
         pendingInvite = null
         pendingJoin = null
+        pendingLinkJoin = null
+        pendingLinkAccept = null
         if (result.resultCode != Activity.RESULT_OK) {
             vm.cloudError("Google authorization was cancelled.")
             return@rememberLauncherForActivityResult
@@ -382,6 +395,8 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                     profileKey != null -> vm.switchProfile(token, profileKey)
                     invite != null -> vm.inviteParticipant(token, invite.first, invite.second)
                     join != null -> vm.joinSharedSync(token, join.first, join.second, join.third)
+                    linkJoin != null -> vm.joinFromLink(token, linkJoin)
+                    linkAccept != null -> vm.acceptResponseLink(token, linkAccept)
                     operation != null -> vm.runCloudOperation(activity, operation, token)
                     else -> vm.cloudError("Google authorization completed with no pending action.")
                 }
@@ -423,6 +438,44 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                         vm.joinSharedSync(step.accessToken, params.first, params.second, params.third)
                     is AuthorizationStep.NeedsResolution -> {
                         pendingJoin = params
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build()
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndJoinLink(url: String) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.joinFromLink(step.accessToken, url)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingLinkJoin = url
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build()
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndAcceptLink(url: String) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.acceptResponseLink(step.accessToken, url)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingLinkAccept = url
                         resolutionLauncher.launch(
                             IntentSenderRequest.Builder(step.pendingIntent.intentSender).build()
                         )
@@ -722,8 +775,8 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     Spacer(Modifier.height(8.dp))
     Text("Join a shared profile", style = MaterialTheme.typography.labelLarge)
     Text(
-        "Paste a join link someone sent you to add their profile on this device. " +
-            "You don't need your own encrypted sync to join.",
+        "Paste a join link someone sent you. EasyBC grants access to the shared file(s), " +
+            "then gives you a response link to send back so the owner can finish adding you.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -736,38 +789,58 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         singleLine = true,
     )
     OutlinedButton(
-        onClick = {
-            val params = parseJoinLink(joinLinkInput)
-            if (params == null) {
-                vm.cloudError("That link is missing its invitation details. Ask for a fresh join link.")
-            } else {
-                authorizeAndJoin(params)
-            }
-        },
+        onClick = { authorizeAndJoinLink(joinLinkInput.trim()) },
         enabled = !busy && joinLinkInput.isNotBlank(),
         modifier = Modifier.fillMaxWidth(),
     ) { Text("Join shared profile") }
-    TextButton(
-        onClick = {
-            val base = joinLinkInput.trim()
-            val grantUrl = base + (if (base.contains('?')) "&" else "?") + "grant-folder=1"
-            if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
-                clipboard.setText(AnnotatedString(grantUrl))
-                vm.cloudError(
-                    "No browser found to open automatically. The grant link was " +
-                        "copied — paste it into Chrome, grant access, then join again.",
-                )
+
+    // The response link a join produced (in-app or via a deep link) to send back.
+    (responseLink ?: deepLinkResponse)?.let { link ->
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Send this response link back to the owner to finish joining:",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                link,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+                maxLines = 2,
+            )
+            IconButton(onClick = { clipboard.setText(AnnotatedString(link)) }) {
+                Icon(Icons.Default.ContentCopy, "Copy response link")
             }
-        },
-        enabled = joinLinkInput.isNotBlank(),
+            IconButton(onClick = {
+                activity.startActivity(
+                    Intent.createChooser(
+                        Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, link)
+                        },
+                        "Share response link",
+                    ),
+                )
+            }) { Icon(Icons.Default.Share, "Share response link") }
+        }
+    }
+
+    Spacer(Modifier.height(16.dp))
+    Text("Finish a share you sent", style = MaterialTheme.typography.labelLarge)
+    OutlinedTextField(
+        value = responseLinkInput,
+        onValueChange = { responseLinkInput = it },
+        label = { Text("Response link") },
+        placeholder = { Text("Paste the response link the recipient sent back") },
         modifier = Modifier.fillMaxWidth(),
-    ) { Text("Grant folder access (opens browser)") }
-    Text(
-        "If joining says EasyBC can't see the folder, tap Grant folder access first " +
-            "(sign in with this same Google account), then Join again.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        singleLine = true,
     )
+    OutlinedButton(
+        onClick = { authorizeAndAcceptLink(responseLinkInput.trim()) },
+        enabled = !busy && responseLinkInput.isNotBlank(),
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Accept response link") }
     StatusRow(status = status, onDismiss = vm::dismissCloudStatus)
     Text(
         "Encrypted sync locks after EasyBC has been in the background for 15 minutes or its process ends.",

@@ -14,6 +14,10 @@ import com.keyneom.synckit.sharing.SharingJoinParamStyle
 import com.keyneom.synckit.sharing.SharingJoinParams
 import com.keyneom.synckit.sharing.SharingRole
 import com.keyneom.synckit.sharing.appendSharingJoinParams
+import com.keyneom.synckit.sharing.buildSharingJoinLinkV1
+import com.keyneom.synckit.sharing.buildSharingResponseLinkV1
+import com.keyneom.synckit.sharing.parseSharingJoinLinkV1
+import com.keyneom.synckit.sharing.parseSharingResponseLinkV1
 import com.keyneom.synckit.stores.GoogleDriveSharedBackupTransport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,6 +38,7 @@ class SharedSyncCoordinator(
     private val identityStore = SharingIdentityStore(context.applicationContext) {
         driveAuth.provider().authorize()
     }
+    private val pendingInvites = PendingInviteStore(context.applicationContext)
 
     suspend fun loadState(): SharedSyncState? = registry.load()
 
@@ -181,6 +186,107 @@ class SharedSyncCoordinator(
             ),
             SharingJoinParamStyle.SYNC_KIT,
         ) + "&owner=${enc(state.ownerEmail)}&invitation=${enc(invited.invitationFileId)}"
+    }
+
+    /**
+     * Link-carried invite: per-email shares the dataset file(s) and returns a
+     * join link carrying the signed invitation + file list. The invitation is
+     * persisted (by exchange id) so this device can accept the response link.
+     */
+    suspend fun inviteForLink(
+        accessToken: String,
+        emailAddress: String,
+        role: String,
+    ): String {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(canAdministerRole(profile.role)) { "Only owners/admins can invite participants." }
+        val sharingRole = sharingRoleFromString(role)
+        require(sharingRole != SharingRole.OWNER) { "Cannot invite as owner." }
+        val controller = controllerFor(state, profile.datasetId)
+        val invited = controller.inviteParticipantForLink(
+            emailAddress = emailAddress.trim(),
+            requestedGrants = listOf(SharingDatasetGrantV1(profile.datasetId, sharingRole)),
+        )
+        pendingInvites.save(invited.invitation, emailAddress.trim())
+        return buildSharingJoinLinkV1(
+            EASY_BC_JOIN_LANDING_URL,
+            invited.invitation,
+            invited.files,
+        ) + "&owner=${enc(state.ownerEmail)}"
+    }
+
+    /**
+     * Link-carried join: verifies the invitation from the join link, records the
+     * joined profile, produces a signed key response, and returns a response link
+     * to send back to the owner. Reading the dataset later requires granting the
+     * shared file(s) via the browser Picker (drive.file has no native Android UI).
+     */
+    suspend fun joinFromLink(accessToken: String, joinLinkUrl: String): String {
+        rememberAccess(accessToken)
+        val parsed = parseSharingJoinLinkV1(joinLinkUrl)
+            ?: throw IllegalArgumentException("That join link is missing its invitation details.")
+        val ownerEmail = android.net.Uri.parse(joinLinkUrl).getQueryParameter("owner")
+            ?: fetchGoogleAccountEmail(accessToken)
+        val selfEmail = fetchGoogleAccountEmail(accessToken)
+        val grant = parsed.invitation.requestedGrants.firstOrNull()
+            ?: error("Invitation has no dataset grants.")
+        val joinProfile = ProfileRecord(
+            datasetId = grant.datasetId,
+            ownerEmail = ownerEmail,
+            folderName = easyBcSyncFolderName(ownerEmail),
+            role = grant.role.name.lowercase(),
+            trustedOwnerKeyId = parsed.invitation.trustedOwnerKeyId,
+            appFolderId = parsed.invitation.appFolderId,
+        )
+        val profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId)
+        val existing = registry.load()
+        val state = if (existing == null) {
+            SharedSyncState(
+                rpId = SYNC_RP_ID,
+                ownerEmail = selfEmail,
+                activeProfileKey = profileKeyValue,
+                profiles = listOf(joinProfile),
+                selectedAppFolderId = parsed.invitation.appFolderId,
+            )
+        } else {
+            existing.copy(
+                selectedAppFolderId = parsed.invitation.appFolderId,
+                activeProfileKey = profileKeyValue,
+                profiles = existing.profiles.filter {
+                    profileKey(it.ownerEmail, it.datasetId) != profileKeyValue
+                } + joinProfile,
+            )
+        }
+        registry.save(state)
+        val controller = controllerFor(state, joinProfile.datasetId)
+        val response = controller.submitKeyResponseFromInvitation(parsed.invitation, parsed.files)
+        return buildSharingResponseLinkV1(EASY_BC_JOIN_LANDING_URL, response)
+    }
+
+    /**
+     * Owner side: accepts a recipient's response link, adding them to the dataset
+     * key grants and per-email sharing the dataset file(s).
+     */
+    suspend fun acceptResponseFromLink(accessToken: String, responseLinkUrl: String) {
+        rememberAccess(accessToken)
+        val parsed = parseSharingResponseLinkV1(responseLinkUrl)
+            ?: throw IllegalArgumentException("That response link is not valid.")
+        val pending = pendingInvites.load(parsed.response.exchangeId)
+            ?: throw IllegalArgumentException(
+                "No pending invitation matches this response. Send a fresh invite link.",
+            )
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val datasetId = pending.invitation.requestedGrants.firstOrNull()?.datasetId
+            ?: PRIMARY_DATASET_ID
+        val controller = controllerFor(state, datasetId)
+        controller.acceptKeyResponseFromPayload(
+            pending.invitation,
+            parsed.response,
+            pending.recipientEmail,
+        )
+        pendingInvites.delete(parsed.response.exchangeId)
     }
 
     suspend fun join(

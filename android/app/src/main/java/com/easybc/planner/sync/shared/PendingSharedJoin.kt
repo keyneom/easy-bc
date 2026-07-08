@@ -12,6 +12,10 @@ object PendingSharedJoin {
     var link: String? = null
         private set
 
+    /** A response link a joiner produced, to display in Settings for copy/share. */
+    @Volatile
+    var responseLink: String? = null
+
     fun set(value: String?) {
         link = value?.takeIf { it.isNotBlank() }
     }

@@ -17,19 +17,15 @@ import type { PeriodRecord } from "../tracker/types";
 import { idbGet, KV_SYNC_STATE } from "../idbStore";
 import { currentRpId, passkeysSupported } from "../sync/passkey";
 import { formatLastSync, forgetSyncState } from "../sync/sessionSync";
-import {
-  clearJoinLinkParams,
-  folderNameForOwner,
-  joinLinkSummary,
-  parseJoinLinkParams,
-} from "../sync/sharedJoin";
+import { clearJoinLinkParams } from "../sync/sharedJoin";
 import { pickSharedAppFolder } from "../sync/sharedPicker";
 import { migrateLegacyEncryptedSync } from "../sync/sharedMigration";
 import {
   acceptPendingKeyResponse,
+  acceptResponseFromLink,
   createOwnedProfile,
   forgetSharedSync,
-  inviteToDataset,
+  inviteToDatasetLink,
   isSharedSyncConfigured,
   listPendingKeyResponses,
   loadActiveProfileDataset,
@@ -37,9 +33,13 @@ import {
   setActiveProfileKey,
   setupSharedSync,
   sharedSyncConfigFromEnv,
+  submitJoinFromLink,
   syncActiveDataset,
-  submitJoinResponse,
 } from "../sync/sharedSync";
+import {
+  parseSharingJoinLinkV1,
+  parseSharingResponseLinkV1,
+} from "@keyneom/sync-kit/sharing";
 import { profileDisplayLabel } from "../sync/profileLabels";
 import {
   buildSharedSyncPayload,
@@ -80,6 +80,8 @@ export function SyncSettings({
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Exclude<SharingRole, "owner">>("viewer");
   const [lastJoinUrl, setLastJoinUrl] = useState<string | null>(null);
+  const [responseLink, setResponseLink] = useState<string | null>(null);
+  const [responseLinkInput, setResponseLinkInput] = useState("");
   const [pendingResponses, setPendingResponses] = useState<
     Array<{ responseFileId: string; invitationFileId: string; recipientEmail: string }>
   >([]);
@@ -157,15 +159,16 @@ export function SyncSettings({
     if (!config || !inviteEmail.trim()) return;
     setBusy("invite");
     try {
-      const invited = await inviteToDataset(config, {
+      const invited = await inviteToDatasetLink(config, {
         emailAddress: inviteEmail.trim(),
         role: inviteRole,
-        emailMessage: `Open this link in EasyBC to join encrypted sync: `,
       });
-      setLastJoinUrl(invited.joinUrl);
+      setLastJoinUrl(invited.joinLink);
       setNotice({
         kind: "success",
-        message: `Invitation sent to ${inviteEmail.trim()}. Copy the join link below for them.`,
+        message:
+          `Shared the folder with ${inviteEmail.trim()}. Send them the join link below; ` +
+          "they'll send you back a response link to finish.",
       });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -174,26 +177,56 @@ export function SyncSettings({
     }
   };
 
-  const runJoinFromLink = async () => {
-    const params = parseJoinLinkParams();
-    if (!params || !config) return;
+  const runJoinFromLink = async (linkText?: string) => {
+    if (!config) return;
+    const source = linkText ?? window.location.search;
+    const parsed = parseSharingJoinLinkV1(source);
+    if (!parsed) {
+      setNotice({ kind: "error", message: "That join link is missing its invitation details." });
+      return;
+    }
+    const ownerEmail =
+      new URLSearchParams(
+        source.includes("://") ? new URL(source).search : source,
+      ).get("owner")?.trim() ?? parsed.invitation.appId;
     setBusy("join");
     try {
-      await submitJoinResponse(config, {
-        invitationFileId: params.invitationFileId,
-        ownerFolderId: params.appFolderId,
-        ownerEmail: params.ownerEmail,
-        folderName: folderNameForOwner(params.ownerEmail),
+      const { responseLink: link } = await submitJoinFromLink(config, {
+        invitation: parsed.invitation,
+        files: parsed.files,
+        ownerEmail,
       });
+      setResponseLink(link);
       clearJoinLinkParams();
-      const loaded = await loadSharedSyncStateAfterJoin(config);
-      if (loaded) {
-        onSharedSyncStateChange(loaded.state);
-        await applyShared(loaded.result.payload);
-      }
       setNotice({
         kind: "success",
-        message: `Join request submitted for ${joinLinkSummary(params)}. The owner must accept before you can sync.`,
+        message:
+          "Access granted. Send this response link back to the owner to finish joining, " +
+          "then they'll accept and your data will sync.",
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runAcceptResponseLink = async (linkText?: string) => {
+    if (!config) return;
+    const source = linkText ?? responseLinkInput;
+    const parsed = parseSharingResponseLinkV1(source);
+    if (!parsed) {
+      setNotice({ kind: "error", message: "That response link is not valid." });
+      return;
+    }
+    setBusy("accept");
+    try {
+      await acceptResponseFromLink(config, { response: parsed.response });
+      setResponseLinkInput("");
+      clearJoinLinkParams();
+      setNotice({
+        kind: "success",
+        message: "Recipient added. They can now sync this shared profile.",
       });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -374,9 +407,15 @@ export function SyncSettings({
     new URLSearchParams(window.location.search).get("grant-folder") === "1";
 
   useEffect(() => {
-    if (grantOnlyRequested) return;
-    if (parseJoinLinkParams() && config && !sharedSyncState) {
-      void runJoinFromLink();
+    if (grantOnlyRequested || !config) return;
+    // Owner opened a recipient's response link → accept it.
+    if (parseSharingResponseLinkV1(window.location.search)) {
+      void runAcceptResponseLink(window.location.search);
+      return;
+    }
+    // Joiner opened an invite link → grant the file(s) and produce a response.
+    if (parseSharingJoinLinkV1(window.location.search)) {
+      void runJoinFromLink(window.location.search);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config, sharedSyncState]);
@@ -458,6 +497,41 @@ export function SyncSettings({
         </p>
       )}
       {notice && <p className={`sync-notice sync-notice-${notice.kind}`} role="status">{notice.message}</p>}
+
+      {responseLink && (
+        <div className="sync-share-panel">
+          <p className="field-hint">
+            Send this response link back to the person who invited you — they tap it to finish adding you.
+          </p>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => void navigator.clipboard.writeText(responseLink)}
+          >
+            <Copy aria-hidden />
+            Copy response link
+          </button>
+        </div>
+      )}
+
+      <div className="sync-share-panel">
+        <label className="field">
+          <span>Finish a share you sent</span>
+          <input
+            type="text"
+            placeholder="Paste the response link the recipient sent back"
+            value={responseLinkInput}
+            onChange={(event) => setResponseLinkInput(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={busy !== null || !responseLinkInput.trim()}
+          onClick={() => void runAcceptResponseLink()}
+        >
+          {busy === "accept" ? "Accepting…" : "Accept response link"}
+        </button>
+      </div>
 
       <div className="sync-actions">
         {!sharedConfigured ? (
@@ -559,12 +633,3 @@ export function SyncSettings({
   );
 }
 
-async function loadSharedSyncStateAfterJoin(
-  config: NonNullable<ReturnType<typeof sharedSyncConfigFromEnv>>,
-) {
-  const { loadSharedSyncState } = await import("../sync/sharedSync");
-  const state = await loadSharedSyncState();
-  if (!state) return null;
-  const result = await loadActiveProfileDataset(config);
-  return { state, result };
-}

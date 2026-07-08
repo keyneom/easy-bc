@@ -11,8 +11,13 @@ import { GoogleWebIdentityProvider } from "@keyneom/sync-kit/auth/google-web/ide
 import type { AuthorizationProvider } from "@keyneom/sync-kit/core";
 import type { SharingRole } from "@keyneom/sync-kit/sharing";
 import {
+  buildSharingJoinLinkV1,
+  buildSharingResponseLinkV1,
   createSharingChangeDetectorFromTransport,
   type SharingChangeDetector,
+  type SharingDatasetFileV1,
+  type SharingInvitationV1,
+  type SharingPublicKeyResponseV1,
   type SharingSyncCheckpoint,
 } from "@keyneom/sync-kit/sharing";
 import {
@@ -25,7 +30,8 @@ import {
 } from "@keyneom/sync-kit/sharing/controller";
 import { verifySharingInvitationV1 } from "@keyneom/sync-kit/sharing/web-crypto";
 import { GoogleDriveSharedBackupTransport } from "@keyneom/sync-kit/stores/google-drive/sharing";
-import { idbGet, idbSet, KV_SHARING_SYNC_CHECKPOINT } from "../idbStore";
+import { idbDelete, idbGet, idbSet, KV_SHARING_SYNC_CHECKPOINT } from "../idbStore";
+import { pickSharedDatasetFiles } from "./sharedPicker";
 import { easyBcSharedCodec } from "./sharedCodec";
 import { createSharingIdentityProvider } from "./sharedIdentity";
 import { easyBcSyncFolderName, profileKey } from "./sharedFolderName";
@@ -708,6 +714,179 @@ export async function inviteToDataset(
       exchangeId: invited.invitation.exchangeId,
       joinUrl,
     };
+  });
+}
+
+const pendingInviteKey = (exchangeId: string) => `sharing-pending-invite-${exchangeId}`;
+
+type PendingInvite = {
+  invitation: SharingInvitationV1;
+  recipientEmail: string;
+};
+
+/**
+ * Owner side of the link-carried invite: per-email shares each granted dataset
+ * file and returns a join link carrying the signed invitation + file list. No
+ * Drive exchange file is written. The invitation is persisted (by exchange id)
+ * so the owner can accept the recipient's response link later.
+ */
+export async function inviteToDatasetLink(
+  config: SharedSyncConfig,
+  input: {
+    emailAddress: string;
+    role: Exclude<SharingRole, "owner">;
+    datasetId?: string;
+  },
+): Promise<{ joinLink: string; exchangeId: string }> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("Encrypted sync is not set up on this device.");
+    const active = await ensureRuntime(config, {} as SharedSyncPayloadV1);
+    const datasetId = input.datasetId ?? PRIMARY_DATASET_ID;
+    const invited = await active.controller.inviteParticipantForLink({
+      emailAddress: input.emailAddress,
+      requestedGrants: [{ datasetId, role: input.role }],
+    });
+    await idbSet(pendingInviteKey(invited.invitation.exchangeId), {
+      invitation: invited.invitation,
+      recipientEmail: input.emailAddress,
+    } satisfies PendingInvite);
+    const landingUrl =
+      typeof window !== "undefined"
+        ? `${window.location.origin}${window.location.pathname}`
+        : "https://keyneom.github.io/easy-bc/";
+    const baseLink = buildSharingJoinLinkV1({
+      landingUrl,
+      invitation: invited.invitation,
+      files: invited.files,
+    });
+    // sync-kit sharing is email-agnostic; carry the owner email (app param) so
+    // the joiner can label the profile.
+    const joinLink = `${baseLink}&owner=${encodeURIComponent(state.ownerEmail)}`;
+    return { joinLink, exchangeId: invited.invitation.exchangeId };
+  });
+}
+
+/**
+ * Recipient side of the link-carried join: opens the Picker so the user grants
+ * the shared dataset file(s), then returns a response link to send back to the
+ * owner. Reads no Drive exchange file.
+ */
+export async function submitJoinFromLink(
+  config: SharedSyncConfig,
+  input: {
+    invitation: SharingInvitationV1;
+    files: SharingDatasetFileV1[];
+    ownerEmail: string;
+  },
+): Promise<{ responseLink: string }> {
+  return serialized(async () => {
+    disposeRuntime();
+    const bootstrapProfileId = "__easybc-bootstrap__";
+    const bootstrap = createProviders(config, bootstrapProfileId);
+    const authorization = await authorizeAndRemember(
+      bootstrap.authorizationProvider,
+      bootstrapProfileId,
+    );
+    // Grant the app drive.file access to the shared dataset file(s).
+    await pickSharedDatasetFiles(authorization);
+
+    const folderName = easyBcSyncFolderName(input.ownerEmail);
+    const grant = input.invitation.requestedGrants[0];
+    const joinProfile: ProfileRecord = {
+      datasetId: grant?.datasetId ?? PRIMARY_DATASET_ID,
+      ownerEmail: input.ownerEmail,
+      folderName,
+      appFolderId: input.invitation.appFolderId,
+      role: grant?.role ?? "viewer",
+      trustedOwnerKeyId: input.invitation.trustedOwnerKeyId,
+    };
+    const profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId);
+    const { authorizationProvider, googleIdentity } = createProviders(config, profileKeyValue);
+    await sharedAuthCache.save({
+      profileId: profileKeyValue,
+      accessToken: authorization.accessToken,
+      expiresAt: authorization.expiresAt ?? Date.now() + 3_600_000,
+    });
+    rememberTokenExpiry(profileKeyValue, authorization.expiresAt);
+    let state = await getCachedState();
+    state = {
+      schemaVersion: 1,
+      rpId: config.rpId,
+      ownerEmail: state?.ownerEmail ?? input.ownerEmail,
+      ...(state ?? {}),
+      selectedAppFolderId: input.invitation.appFolderId,
+      activeProfileKey: profileKeyValue,
+      profiles: upsertProfile(
+        state ?? {
+          schemaVersion: 1,
+          rpId: config.rpId,
+          ownerEmail: input.ownerEmail,
+          activeProfileKey: profileKeyValue,
+          profiles: [],
+        },
+        joinProfile,
+      ).profiles,
+    };
+    cachedState = state;
+    await saveSharedSyncState(state);
+    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+      authorizationProvider.authorize(),
+    );
+    await identityProvider.getOrCreate();
+    const controller = buildController(
+      state,
+      joinProfile,
+      config,
+      identityProvider,
+      authorizationProvider,
+      googleIdentity,
+    );
+    const response = await controller.submitKeyResponseFromInvitation(
+      input.invitation,
+      input.files,
+    );
+    runtime = {
+      config,
+      state,
+      local: {} as SharedSyncPayloadV1,
+      identityProvider,
+      authorizationProvider,
+      controller,
+    };
+    const landingUrl =
+      typeof window !== "undefined"
+        ? `${window.location.origin}${window.location.pathname}`
+        : "https://keyneom.github.io/easy-bc/";
+    return { responseLink: buildSharingResponseLinkV1({ landingUrl, response }) };
+  });
+}
+
+/**
+ * Owner side: accepts a key-response link, adding the recipient to the dataset's
+ * key grants and per-email sharing the dataset file(s). Uses the invitation
+ * persisted at invite time (by exchange id).
+ */
+export async function acceptResponseFromLink(
+  config: SharedSyncConfig,
+  input: { response: SharingPublicKeyResponseV1 },
+): Promise<void> {
+  return serialized(async () => {
+    const active = await ensureRuntime(config, {} as SharedSyncPayloadV1);
+    const pending = await idbGet<PendingInvite>(
+      pendingInviteKey(input.response.exchangeId),
+    );
+    if (!pending) {
+      throw new Error(
+        "No pending invitation matches this response. Send a fresh invite link.",
+      );
+    }
+    await active.controller.acceptKeyResponseFromPayload({
+      invitation: pending.invitation,
+      response: input.response,
+      recipientEmailAddress: pending.recipientEmail,
+    });
+    await idbDelete(pendingInviteKey(input.response.exchangeId));
   });
 }
 

@@ -76,6 +76,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _joinUrl = MutableStateFlow<String?>(null)
     val joinUrl: StateFlow<String?> = _joinUrl
+    private val _responseLink = MutableStateFlow<String?>(null)
+    val responseLink: StateFlow<String?> = _responseLink
 
     private val _pendingResponses = MutableStateFlow<List<SharedSyncCoordinator.PendingResponse>>(emptyList())
     val pendingResponses: StateFlow<List<SharedSyncCoordinator.PendingResponse>> = _pendingResponses
@@ -331,11 +333,44 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
-                val url = sharedSync.invite(accessToken, email.trim(), role)
+                val url = sharedSync.inviteForLink(accessToken, email.trim(), role)
                 _joinUrl.value = url
-                _cloudStatus.value = SyncStatus.Success("Invitation created. Share the join link with $email.")
+                _cloudStatus.value = SyncStatus.Success(
+                    "Shared the folder with $email. Send them the join link; they'll send back a " +
+                        "response link for you to accept here.",
+                )
             } catch (error: Exception) {
                 _cloudStatus.value = cloudFailure("Invite", error, "Invite failed")
+            }
+        }
+    }
+
+    /** Joiner side: run a join link, producing a response link to send to the owner. */
+    fun joinFromLink(accessToken: String, joinLinkUrl: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _responseLink.value = sharedSync.joinFromLink(accessToken, joinLinkUrl)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "Access granted. Send the response link back to the owner to finish joining.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Join", error, "Join failed")
+            }
+        }
+    }
+
+    /** Owner side: accept a recipient's response link. */
+    fun acceptResponseLink(accessToken: String, responseLinkUrl: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.acceptResponseFromLink(accessToken, responseLinkUrl)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Recipient added. They can now sync this profile.")
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Accept response", error, "Accept failed")
             }
         }
     }
