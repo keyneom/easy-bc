@@ -130,6 +130,65 @@ export async function fetchGoogleAccountEmail(accessToken: string): Promise<stri
   return email;
 }
 
+export type DriveVisibilityEntry = {
+  id: string;
+  status: number;
+  ok: boolean;
+  detail: string;
+};
+
+export type DriveVisibilityProbe = {
+  folder: DriveVisibilityEntry;
+  invitation: DriveVisibilityEntry;
+};
+
+/**
+ * Diagnostic: with drive.file, another account's shares can be invisible to
+ * our token (HTTP 404) even after the user Picker-grants the folder. This
+ * probes files.get for both the shared folder and the invitation file inside
+ * it so we can distinguish the two hypotheses with data:
+ *   folder 200 + invitation 404 -> folder grant does not cover descendants
+ *   folder 404 + invitation 404 -> grant never reached this OAuth client
+ *   folder 200 + invitation 403 -> visible but not authorized
+ * Kept in parity with SharedSyncCoordinator.probeDriveVisibility on Android.
+ */
+export async function probeDriveVisibility(
+  accessToken: string,
+  folderId: string,
+  invitationFileId: string,
+): Promise<DriveVisibilityProbe> {
+  const check = async (id: string): Promise<DriveVisibilityEntry> => {
+    if (!id) return { id, status: 0, ok: false, detail: "(no id in join link)" };
+    try {
+      const response = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}` +
+          "?fields=id,name,parents&supportsAllDrives=true",
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      const body = (await response.text()).slice(0, 300);
+      return { id, status: response.status, ok: response.ok, detail: body };
+    } catch (error) {
+      return {
+        id,
+        status: 0,
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  };
+  const [folder, invitation] = await Promise.all([
+    check(folderId),
+    check(invitationFileId),
+  ]);
+  return { folder, invitation };
+}
+
+function summarizeVisibilityProbe(probe: DriveVisibilityProbe): string {
+  const one = (entry: DriveVisibilityEntry): string =>
+    entry.status ? String(entry.status) : "ERR";
+  return `folder ${one(probe.folder)} / invitation ${one(probe.invitation)}`;
+}
+
 async function refreshCachedState(): Promise<SharedSyncState | null> {
   cachedState = await loadSharedSyncState();
   return cachedState;
@@ -254,10 +313,12 @@ async function ensureRuntime(
   }
   disposeRuntime();
   const profile = profileForActive(state);
-  const identityProvider = createSharingIdentityProvider(config.rpId);
   const { authorizationProvider, googleIdentity } = createProviders(
     config,
     state.activeProfileKey,
+  );
+  const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+    authorizationProvider.authorize(),
   );
   runtime = {
     config,
@@ -308,7 +369,9 @@ export async function resetSharedSync(
       });
       rememberTokenExpiry(activeProfileId, authorization.expiresAt);
     }
-    const identityProvider = createSharingIdentityProvider(config.rpId);
+    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+      authorizationProvider.authorize(),
+    );
     await identityProvider.getOrCreate();
     const identity = await identityProvider.get();
     const provisional: SharedSyncState = {
@@ -374,7 +437,9 @@ export async function setupSharedSync(
       rememberTokenExpiry(activeProfileId, authorization.expiresAt);
     }
     const folderName = easyBcSyncFolderName(ownerEmail);
-    const identityProvider = createSharingIdentityProvider(config.rpId);
+    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+      authorizationProvider.authorize(),
+    );
     await identityProvider.getOrCreate();
     const identity = await identityProvider.get();
     const provisional: SharedSyncState = {
@@ -560,9 +625,11 @@ export async function createOwnedProfile(
     const datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles);
     const emptyPayload = createEmptySharedSyncPayload();
     disposeRuntime();
-    const identityProvider = createSharingIdentityProvider(config.rpId);
     const primaryKey = profileKey(primary.ownerEmail, primary.datasetId);
     const { authorizationProvider, googleIdentity } = createProviders(config, primaryKey);
+    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+      authorizationProvider.authorize(),
+    );
     const controller = buildController(
       state,
       primary,
@@ -730,10 +797,28 @@ export async function submitJoinResponse(
       folderName: input.folderName,
       selectedAppFolderId: input.ownerFolderId,
     });
-    const invitation = await verifySharingInvitationV1(
-      await transport.readInvitation(input.invitationFileId),
-      { crypto: globalThis.crypto },
-    );
+    let invitationRaw;
+    try {
+      invitationRaw = await transport.readInvitation(input.invitationFileId);
+    } catch (error) {
+      const probe = await probeDriveVisibility(
+        authorization.accessToken,
+        input.ownerFolderId,
+        input.invitationFileId,
+      );
+      console.warn("[EasyBcSync] join visibility probe", probe);
+      const detail = summarizeVisibilityProbe(probe);
+      throw new Error(
+        "EasyBC can't see the shared folder yet " +
+          `(${detail}). Open Settings → the shared folder screen and use ` +
+          "“Grant folder access” to select the shared EasyBC folder with " +
+          "this same Google account, then try joining again.",
+        { cause: error },
+      );
+    }
+    const invitation = await verifySharingInvitationV1(invitationRaw, {
+      crypto: globalThis.crypto,
+    });
     const grant = invitation.requestedGrants[0];
     const joinProfile: ProfileRecord = {
       datasetId: grant?.datasetId ?? PRIMARY_DATASET_ID,
@@ -761,7 +846,9 @@ export async function submitJoinResponse(
     };
     cachedState = state;
     await saveSharedSyncState(state);
-    const identityProvider = createSharingIdentityProvider(config.rpId);
+    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+      authorizationProvider.authorize(),
+    );
     await identityProvider.getOrCreate();
     const controller = buildController(
       state,
