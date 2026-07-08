@@ -699,6 +699,25 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             Text("Set up encrypted sync")
         }
     }
+    if (connected && !sharedConfigured) {
+        // Escape hatch for an un-adoptable cloud copy (a dataset owned by an
+        // identity this device can't produce — e.g. an orphan from before the
+        // app-data identity scheme). "Set up" keeps failing on it; Reset deletes
+        // it and recreates from this device's data.
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = { confirming = CloudSyncOperation.RESET },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Reset encrypted sync") }
+        Text(
+            "If setup says a cloud copy already exists that this device can't " +
+                "unlock, Reset deletes that copy and starts fresh with this " +
+                "device's data.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
     if (!sharedConfigured) {
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
@@ -755,12 +774,12 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         AlertDialog(
             onDismissRequest = { confirming = null },
             title = {
-                Text(if (operation == CloudSyncOperation.RESET) "Replace passkey and encrypted cloud copy?" else "Delete encrypted cloud copy?")
+                Text(if (operation == CloudSyncOperation.RESET) "Replace the encrypted cloud copy?" else "Delete encrypted cloud copy?")
             },
             text = {
                 Text(
                     if (operation == CloudSyncOperation.RESET) {
-                        "This replaces the encrypted Drive snapshot with this device's local data and a new passkey. Other devices must enable encrypted cloud sync with the new passkey."
+                        "This deletes the encrypted Drive snapshot — including one this device can't unlock — and recreates it from this device's local data. Your sharing identity (in Drive app data) is kept, so your other devices stay in sync."
                     } else {
                         "This permanently deletes the encrypted EasyBC cloud snapshot from Drive. Local data stays on this device."
                     }
