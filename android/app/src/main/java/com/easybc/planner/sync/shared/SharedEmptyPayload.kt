@@ -16,3 +16,12 @@ fun emptySharedPayload(): SyncPayloadV1 =
         ),
         ecJournal = TimestampedBoolean(value = false, updatedAt = SYNC_EPOCH),
     )
+
+fun hasMeaningfulSharedData(payload: SyncPayloadV1): Boolean =
+    payload.planner.configured == true ||
+        payload.periodRecords.isNotEmpty() ||
+        payload.calendarDayLogs.isNotEmpty() ||
+        payload.voluntaryAbstinenceDates.isNotEmpty() ||
+        payload.deletedPeriodStarts.isNotEmpty() ||
+        payload.deletedVoluntaryAbstinenceDates.isNotEmpty() ||
+        payload.ecJournal.value

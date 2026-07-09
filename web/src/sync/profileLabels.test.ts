@@ -4,7 +4,7 @@ import {
   slugifyDatasetId,
   uniqueOwnedDatasetId,
 } from "./profileLabels";
-import type { ProfileRecord, SharedSyncState } from "./sharedTypes";
+import { findProfile, type ProfileRecord, type SharedSyncState } from "./sharedTypes";
 
 const state = (profiles: ProfileRecord[]): SharedSyncState => ({
   schemaVersion: 1,
@@ -71,5 +71,33 @@ describe("profileDisplayLabel", () => {
       trustedOwnerKeyId: "key-2",
     };
     expect(profileDisplayLabel(state([shared]), shared)).toBe("EasyBC — other@example.com");
+  });
+
+  it("labels local-only profiles independently of cloud ownership", () => {
+    const local: ProfileRecord = {
+      datasetId: "profile",
+      ownerEmail: "local-123",
+      folderName: "",
+      displayName: "Offline journal",
+      role: "owner",
+      trustedOwnerKeyId: "",
+      syncMode: "local",
+    };
+    expect(profileDisplayLabel(state([local]), local)).toBe("Offline journal");
+  });
+
+  it("keeps two owners' primary datasets distinct", () => {
+    const local = owned("primary");
+    const shared = {
+      ...owned("primary"),
+      ownerEmail: "other@example.com",
+      folderName: "EasyBC — other@example.com",
+      role: "writer" as const,
+      trustedOwnerKeyId: "other-key",
+    };
+    const profiles = [local, shared];
+    const value = state(profiles);
+    expect(findProfile(value, "mom@example.com/primary")).toEqual(local);
+    expect(findProfile(value, "other@example.com/primary")).toEqual(shared);
   });
 });

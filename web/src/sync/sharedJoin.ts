@@ -31,7 +31,12 @@ export function parseJoinLinkParams(
 }
 
 export function clearJoinLinkParams(): void {
-  const url = new URL(window.location.href);
+  const url = stripJoinLinkParams(new URL(window.location.href));
+  window.history.replaceState({}, "", url.toString());
+}
+
+export function stripJoinLinkParams(url: URL): URL {
+  const next = new URL(url.toString());
   for (const key of [
     "sync",
     "exchange",
@@ -41,10 +46,16 @@ export function clearJoinLinkParams(): void {
     "sync-kit-join",
     "sync-kit-exchange",
     "sync-kit-folder",
+    "sk-inv",
+    "sk-files",
+    "sk-resp",
+    "sk-kr",
+    "grant-files",
+    "grant-folder",
   ]) {
-    url.searchParams.delete(key);
+    next.searchParams.delete(key);
   }
-  window.history.replaceState({}, "", url.toString());
+  return next;
 }
 
 export function parseDriveOpenFolderId(): string | null {

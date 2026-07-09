@@ -18,12 +18,14 @@ import com.easybc.planner.sync.EasyBcSyncRuntime
 import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.shared.ProfileRecord
+import com.easybc.planner.sync.shared.PendingSharedJoin
 import com.easybc.planner.sync.shared.SharedSyncCoordinator
 import com.easybc.planner.sync.shared.SharedSyncState
-import com.easybc.planner.sync.shared.canPublishRole
 import com.easybc.planner.sync.shared.profileKey
+import com.easybc.planner.sync.shared.shouldLoadRemoteBeforePublish
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 private const val SYNC_LOG_TAG = "EasyBcSync"
 
@@ -82,10 +84,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _pendingResponses = MutableStateFlow<List<SharedSyncCoordinator.PendingResponse>>(emptyList())
     val pendingResponses: StateFlow<List<SharedSyncCoordinator.PendingResponse>> = _pendingResponses
 
+    private val _profileParticipants =
+        MutableStateFlow<List<SharedSyncCoordinator.ProfileParticipant>>(emptyList())
+    val profileParticipants: StateFlow<List<SharedSyncCoordinator.ProfileParticipant>> =
+        _profileParticipants
+
     init {
         viewModelScope.launch {
             val existing = repo.getSettings()
             _draft.value = existing ?: UserSettingsEntity()
+            _responseLink.value = PendingSharedJoin.producedResponse(app)
+            sharedSync.ensureProfileState()
             refreshSharedSyncState()
         }
     }
@@ -105,6 +114,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             active?.lastSyncedAt ?: syncStore.lastSyncedAt()
         } else {
             syncStore.lastSyncedAt()
+        }
+        if (active == null || com.easybc.planner.sync.shared.isLocalProfile(active)) {
+            _profileParticipants.value = emptyList()
         }
     }
 
@@ -263,7 +275,21 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             try {
                 val message = when (operation) {
                     CloudSyncOperation.SETUP -> {
-                        sharedSync.setup(accessToken)
+                        val state = sharedSync.loadState()
+                        val active = state?.let {
+                            it.profiles.firstOrNull { profile ->
+                                profileKey(profile.ownerEmail, profile.datasetId) == it.activeProfileKey
+                            }
+                        }
+                        if (
+                            active != null &&
+                            com.easybc.planner.sync.shared.isLocalProfile(active) &&
+                            sharedSync.isConfigured()
+                        ) {
+                            sharedSync.connectActiveLocalProfile(accessToken)
+                        } else {
+                            sharedSync.setup(accessToken)
+                        }
                         "Encrypted sync is set up. Your data lives in a Drive folder labeled with your email."
                     }
                     CloudSyncOperation.ENABLE -> {
@@ -350,7 +376,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
-                _responseLink.value = sharedSync.joinFromLink(accessToken, joinLinkUrl)
+                val response = withTimeout(90_000) {
+                    sharedSync.joinFromLink(accessToken, joinLinkUrl)
+                }
+                PendingSharedJoin.setProducedResponse(app, response)
+                PendingSharedJoin.clearJoinLink(app)
+                _responseLink.value = response
                 refreshSharedSyncState()
                 _cloudStatus.value = SyncStatus.Success(
                     "Access granted. Send the response link back to the owner to finish joining.",
@@ -366,7 +397,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
-                sharedSync.acceptResponseFromLink(accessToken, responseLinkUrl)
+                withTimeout(90_000) {
+                    sharedSync.acceptResponseFromLink(accessToken, responseLinkUrl)
+                }
+                PendingSharedJoin.clearResponseToAccept(app)
                 refreshSharedSyncState()
                 _cloudStatus.value = SyncStatus.Success("Recipient added. They can now sync this profile.")
             } catch (error: Exception) {
@@ -395,12 +429,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun switchProfile(accessToken: String, profileKeyValue: String) {
+    fun switchProfile(accessToken: String?, profileKeyValue: String) {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
-                sharedSync.setActiveProfile(profileKeyValue)
-                sharedSync.loadActiveProfile(accessToken)
+                sharedSync.switchActiveProfile(accessToken, profileKeyValue)
                 repo.getSettings()?.let {
                     _draft.value = it
                     applyReminderSchedule(it)
@@ -409,6 +442,107 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 _cloudStatus.value = SyncStatus.Success("Switched encrypted sync profile.")
             } catch (error: Exception) {
                 _cloudStatus.value = cloudFailure("Profile switch", error, "Profile switch failed")
+            }
+        }
+    }
+
+    fun createLocalProfile(accessToken: String?, displayName: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.createLocalProfile(accessToken, displayName)
+                repo.getSettings()?.let { _draft.value = it }
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Local profile created.")
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Create local profile", error, "Profile creation failed")
+            }
+        }
+    }
+
+    fun renameProfile(profileKeyValue: String, displayName: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.renameProfile(profileKeyValue, displayName)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Profile renamed.")
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Rename profile", error, "Rename failed")
+            }
+        }
+    }
+
+    fun disconnectActiveProfileToLocal() {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.disconnectActiveProfileToLocal()
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("This profile is now local only.")
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Disconnect profile", error, "Disconnect failed")
+            }
+        }
+    }
+
+    fun deleteProfile(
+        accessToken: String?,
+        profileKeyValue: String,
+        deleteEverywhere: Boolean,
+    ) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                sharedSync.deleteProfile(accessToken, profileKeyValue, deleteEverywhere)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    if (deleteEverywhere) "Profile deleted everywhere." else "Profile removed.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Delete profile", error, "Delete failed")
+            }
+        }
+    }
+
+    fun refreshProfileParticipants(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _profileParticipants.value = sharedSync.listActiveParticipants(accessToken)
+                _cloudStatus.value = SyncStatus.Success("Profile access list refreshed.")
+            } catch (error: Exception) {
+                _cloudStatus.value =
+                    cloudFailure("Refresh profile access", error, "Access refresh failed")
+            }
+        }
+    }
+
+    fun updateParticipantRole(accessToken: String, keyId: String, email: String, role: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _profileParticipants.value =
+                    sharedSync.updateParticipantRole(accessToken, keyId, email, role)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Participant access updated.")
+            } catch (error: Exception) {
+                _cloudStatus.value =
+                    cloudFailure("Update participant access", error, "Access update failed")
+            }
+        }
+    }
+
+    fun revokeParticipant(accessToken: String, keyId: String, email: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _profileParticipants.value = sharedSync.revokeParticipant(accessToken, keyId, email)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success("Participant access removed.")
+            } catch (error: Exception) {
+                _cloudStatus.value =
+                    cloudFailure("Remove participant access", error, "Access removal failed")
             }
         }
     }
@@ -469,7 +603,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun isReadOnlyActiveProfile(): Boolean {
         val profile = activeProfile() ?: return false
-        return !canPublishRole(profile.role)
+        return shouldLoadRemoteBeforePublish(profile)
     }
 
     fun cloudError(message: String) {

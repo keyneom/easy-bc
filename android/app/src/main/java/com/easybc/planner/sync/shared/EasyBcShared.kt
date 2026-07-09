@@ -29,12 +29,25 @@ fun canAdministerRole(role: String): Boolean =
     role.equals(SharingRole.OWNER.name, true) ||
         role.equals(SharingRole.ADMIN.name, true)
 
+fun isLocalProfile(profile: ProfileRecord): Boolean = profile.syncMode == "local"
+
+fun isEncryptedProfile(profile: ProfileRecord): Boolean = !isLocalProfile(profile)
+
 fun sharingRoleFromString(role: String): SharingRole =
     when (role.lowercase()) {
         "owner" -> SharingRole.OWNER
         "admin" -> SharingRole.ADMIN
         "writer" -> SharingRole.WRITER
         else -> SharingRole.VIEWER
+    }
+
+fun shouldLoadRemoteBeforePublish(profile: ProfileRecord): Boolean =
+    isEncryptedProfile(profile) &&
+        (profile.needsInitialLoad || !canPublishRole(profile.role))
+
+fun findProfile(state: SharedSyncState, profileKeyValue: String): ProfileRecord? =
+    state.profiles.firstOrNull {
+        profileKey(it.ownerEmail, it.datasetId) == profileKeyValue
     }
 
 @Serializable
@@ -51,6 +64,15 @@ data class ProfileRecord(
     val seenRevisionIds: List<String>? = null,
     val participantPermissionIds: Map<String, String>? = null,
     val lastSyncedAt: String? = null,
+    /** Profiles exist independently of encrypted sync. Older records are encrypted. */
+    val syncMode: String? = null,
+    /** App-owned labels for participant keys; envelopes intentionally omit email. */
+    val participantEmails: Map<String, String>? = null,
+    /**
+     * A joined writer must load the remote dataset before publishing so the
+     * prior profile's local working copy cannot leak into this dataset.
+     */
+    val needsInitialLoad: Boolean = false,
 )
 
 @Serializable

@@ -32,6 +32,16 @@ export type ProfileRecord = {
   seenRevisionIds?: string[];
   participantPermissionIds?: Record<string, string>;
   lastSyncedAt?: string;
+  /** Profiles exist independently of sync. Older records without this field are encrypted. */
+  syncMode?: "local" | "encrypted";
+  /** App-owned labels for sharing keys; encrypted envelopes intentionally contain no email. */
+  participantEmails?: Record<string, string>;
+  /**
+   * A newly joined writable profile must load its remote dataset before it may
+   * publish. This prevents the previously active profile's local working copy
+   * from being merged into the joined person's dataset.
+   */
+  needsInitialLoad?: boolean;
 };
 
 export type ActiveProfile = {
@@ -60,6 +70,31 @@ export type SharedSyncState = {
 
 export function canPublishRole(role: SharingRole): boolean {
   return role === "owner" || role === "admin" || role === "writer";
+}
+
+export function isLocalProfile(profile: ProfileRecord): boolean {
+  return profile.syncMode === "local";
+}
+
+export function isEncryptedProfile(profile: ProfileRecord): boolean {
+  return !isLocalProfile(profile);
+}
+
+export function shouldLoadRemoteBeforePublish(profile: ProfileRecord): boolean {
+  return isEncryptedProfile(profile) &&
+    (profile.needsInitialLoad === true || !canPublishRole(profile.role));
+}
+
+export function hasMeaningfulSharedData(payload: SharedSyncPayloadV1): boolean {
+  return (
+    plannerConfiguredFromPayload(payload as SyncPayloadV1) ||
+    payload.periodRecords.length > 0 ||
+    Object.keys(payload.calendarDayLogs).length > 0 ||
+    Object.keys(payload.voluntaryAbstinenceDates).length > 0 ||
+    Object.keys(payload.deletedPeriodStarts).length > 0 ||
+    Object.keys(payload.deletedVoluntaryAbstinenceDates).length > 0 ||
+    payload.ecJournal.value
+  );
 }
 
 export function extractSharedPayload(payload: SyncPayloadV1): SharedSyncPayloadV1 {

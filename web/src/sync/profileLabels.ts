@@ -1,4 +1,9 @@
-import { PRIMARY_DATASET_ID, type ProfileRecord, type SharedSyncState } from "./sharedTypes";
+import {
+  isLocalProfile,
+  PRIMARY_DATASET_ID,
+  type ProfileRecord,
+  type SharedSyncState,
+} from "./sharedTypes";
 
 const MAX_DATASET_ID_LENGTH = 40;
 
@@ -48,6 +53,9 @@ export function isOwnedProfile(state: SharedSyncState, profile: ProfileRecord): 
 }
 
 export function profileDisplayLabel(state: SharedSyncState, profile: ProfileRecord): string {
+  if (isLocalProfile(profile)) {
+    return profile.displayName?.trim() || "Local profile";
+  }
   if (isOwnedProfile(state, profile)) {
     if (profile.displayName?.trim()) return profile.displayName.trim();
     if (profile.datasetId === PRIMARY_DATASET_ID) return "My data";

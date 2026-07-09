@@ -2,6 +2,7 @@ package com.easybc.planner.sync.shared
 
 import com.easybc.planner.data.db.AppDatabase
 import com.easybc.planner.data.db.SyncMetadataEntity
+import com.easybc.planner.sync.SyncPayloadV1
 import com.keyneom.synckit.crypto.SyncKitJson
 import kotlinx.serialization.encodeToString
 
@@ -23,6 +24,38 @@ class SharedSyncRegistry(private val db: AppDatabase) {
 
     suspend fun clear() {
         db.syncMetadataDao().delete(META_KEY)
+    }
+
+    suspend fun saveLocalPayload(profileKeyValue: String, payload: SyncPayloadV1) {
+        db.syncMetadataDao().put(
+            SyncMetadataEntity(
+                "$LOCAL_PAYLOAD_PREFIX$profileKeyValue",
+                json.encodeToString(SyncPayloadV1.serializer(), payload),
+            ),
+        )
+    }
+
+    suspend fun loadLocalPayload(profileKeyValue: String): SyncPayloadV1? {
+        val raw = db.syncMetadataDao().get("$LOCAL_PAYLOAD_PREFIX$profileKeyValue")?.value
+            ?: return null
+        return runCatching {
+            json.decodeFromString(SyncPayloadV1.serializer(), raw)
+        }.getOrNull()
+    }
+
+    suspend fun deleteLocalPayload(profileKeyValue: String) {
+        db.syncMetadataDao().delete("$LOCAL_PAYLOAD_PREFIX$profileKeyValue")
+    }
+
+    suspend fun removeProfile(profileKeyValue: String): SharedSyncState {
+        val state = load() ?: error("No profile registry is available on this device.")
+        val next = state.copy(
+            profiles = state.profiles.filter {
+                profileKey(it.ownerEmail, it.datasetId) != profileKeyValue
+            },
+        )
+        save(next)
+        return next
     }
 
     suspend fun upsertProfile(profile: ProfileRecord): SharedSyncState {
@@ -47,13 +80,13 @@ class SharedSyncRegistry(private val db: AppDatabase) {
     }
 
     fun activeProfile(state: SharedSyncState): ProfileRecord =
-        state.profiles.firstOrNull {
-            profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
-        } ?: error("The active encrypted sync profile is missing.")
+        findProfile(state, state.activeProfileKey)
+            ?: error("The active encrypted sync profile is missing.")
 
     companion object {
         const val META_KEY = "shared_sync_state"
         const val CHECKPOINT_KEY = "sharing_sync_checkpoint"
+        private const val LOCAL_PAYLOAD_PREFIX = "local_profile_payload:"
     }
 
     suspend fun loadCheckpoint(): com.keyneom.synckit.sharing.checkpoint.SharingSyncCheckpoint {

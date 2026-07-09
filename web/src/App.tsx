@@ -78,11 +78,14 @@ import {
   canPublishRole,
   extractSharedPayload,
   findProfile,
+  isEncryptedProfile,
   sharedPayloadFingerprint,
   sharedPayloadToSyncPayload,
   type SharedSyncState,
 } from "./sync/sharedTypes";
+import { shouldOpenSyncSettings } from "./sync/sharedRoute";
 import {
+  ensureProfileState,
   listPendingKeyResponses,
   loadSharedSyncState,
   sharedSyncConfigFromEnv,
@@ -736,6 +739,11 @@ function optionsForWasm(
 
 type AppTab = "tracker" | "planner" | "history" | "settings";
 
+function initialAppTab(): AppTab {
+  if (typeof window === "undefined") return "tracker";
+  return shouldOpenSyncSettings(window.location.search) ? "settings" : "tracker";
+}
+
 export default function App() {
   const resultRef = useRef<HTMLElement | null>(null);
   const optionsFingerprintRef = useRef("");
@@ -745,7 +753,7 @@ export default function App() {
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmError, setWasmError] = useState<string | null>(null);
   const [storageReady, setStorageReady] = useState(false);
-  const [tab, setTab] = useState<AppTab>("tracker");
+  const [tab, setTab] = useState<AppTab>(initialAppTab);
   const initDate = useMemo(() => new Date(), []);
   const [viewYear, setViewYear] = useState(initDate.getFullYear());
   const [viewMonth, setViewMonth] = useState(initDate.getMonth());
@@ -776,7 +784,12 @@ export default function App() {
   const syncReadOnly = useMemo(() => {
     if (!sharedSyncState) return false;
     const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
-    return profile ? !canPublishRole(profile.role) : false;
+    return profile ? profile.needsInitialLoad === true || !canPublishRole(profile.role) : false;
+  }, [sharedSyncState]);
+  const activeEncryptedProfile = useMemo(() => {
+    if (!sharedSyncState) return null;
+    const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+    return profile && isEncryptedProfile(profile) && profile.fileId ? profile : null;
   }, [sharedSyncState]);
 
   const sortedStarts = useMemo(() => periodStartsFromRecords(periodRecords), [periodRecords]);
@@ -802,7 +815,6 @@ export default function App() {
       const s = hydratePersistedSession(raw, pr.length);
       setSession(s);
       setLocks(s.locks);
-      setSharedSyncState(savedSync ?? null);
       const loadedOptions: WasmOptions = {
         ...defaultOptions(),
         ...savedOptions,
@@ -810,6 +822,13 @@ export default function App() {
       };
       optionsFingerprintRef.current = JSON.stringify(portablePlannerOptions(loadedOptions));
       setOpts(loadedOptions);
+      const profileState =
+        savedSync ??
+        (await ensureProfileState(
+          currentRpId(),
+          buildSharedSyncPayload(loadedOptions, pr, s),
+        ));
+      setSharedSyncState(profileState);
       if (s.plannerConfigured) setPlanRegenerationPending(true);
       setStorageReady(true);
     })();
@@ -907,7 +926,7 @@ export default function App() {
 
   const runAutoSync = useCallback(
     async (reason: AutoSyncReason) => {
-      if (!sharedSyncState || !sharedSyncConfig) return;
+      if (!sharedSyncState || !sharedSyncConfig || !activeEncryptedProfile) return;
       if (syncReadOnly && reason === "change") return;
       if (!passkeysSupported()) {
         setAutoSyncNotice({
@@ -966,7 +985,13 @@ export default function App() {
         }
       }
     },
-    [applySyncedPayload, sharedSyncConfig, sharedSyncState, syncReadOnly],
+    [
+      activeEncryptedProfile,
+      applySyncedPayload,
+      sharedSyncConfig,
+      sharedSyncState,
+      syncReadOnly,
+    ],
   );
 
   useEffect(() => {
@@ -977,7 +1002,13 @@ export default function App() {
   }, [sharedSyncState]);
 
   useEffect(() => {
-    if (!storageReady || !wasmReady || !sharedSyncState || syncReadOnly) return;
+    if (
+      !storageReady ||
+      !wasmReady ||
+      !sharedSyncState ||
+      !activeEncryptedProfile ||
+      syncReadOnly
+    ) return;
     if (autoSyncFingerprintRef.current === "") {
       autoSyncFingerprintRef.current = localSyncFingerprint;
       const h = window.setTimeout(() => void runAutoSync("startup"), 1_500);
@@ -986,10 +1017,24 @@ export default function App() {
     if (autoSyncFingerprintRef.current === localSyncFingerprint) return;
     const h = window.setTimeout(() => void runAutoSync("change"), 1_800);
     return () => window.clearTimeout(h);
-  }, [localSyncFingerprint, runAutoSync, sharedSyncState, storageReady, syncReadOnly, wasmReady]);
+  }, [
+    activeEncryptedProfile,
+    localSyncFingerprint,
+    runAutoSync,
+    sharedSyncState,
+    storageReady,
+    syncReadOnly,
+    wasmReady,
+  ]);
 
   useEffect(() => {
-    if (!storageReady || !wasmReady || !sharedSyncState || !sharedSyncConfig) return;
+    if (
+      !storageReady ||
+      !wasmReady ||
+      !sharedSyncState ||
+      !sharedSyncConfig ||
+      !activeEncryptedProfile
+    ) return;
     let cancelled = false;
     let pollController: { stop(): void } | null = null;
 
@@ -1039,7 +1084,14 @@ export default function App() {
       cancelled = true;
       pollController?.stop();
     };
-  }, [runAutoSync, sharedSyncConfig, sharedSyncState, storageReady, wasmReady]);
+  }, [
+    activeEncryptedProfile,
+    runAutoSync,
+    sharedSyncConfig,
+    sharedSyncState,
+    storageReady,
+    wasmReady,
+  ]);
 
   const runPlan = useCallback(() => {
     if (!wasmReady) return;
@@ -1608,8 +1660,9 @@ export default function App() {
       {wasmError && <p className="warn">Planner failed to load: {wasmError}</p>}
       {sharedSyncState && syncReadOnly && (
         <p className="sync-readonly-banner" role="status">
-          Viewing a shared encrypted profile in read-only mode. Switch to your profile in Settings
-          to edit planner data, periods, or day logs.
+          {findProfile(sharedSyncState, sharedSyncState.activeProfileKey)?.needsInitialLoad
+            ? "This shared profile is waiting for its first remote load. Finish joining in Settings before editing."
+            : "Viewing a shared encrypted profile in read-only mode. Switch to your profile in Settings to edit planner data, periods, or day logs."}
         </p>
       )}
       {sharedSyncState && autoSyncNotice && (
@@ -2243,18 +2296,6 @@ export default function App() {
                 onApplyPayload={applySyncedPayload}
                 onSharedSyncStateChange={setSharedSyncState}
                 onSyncComplete={markSyncComplete}
-                onProfileSwitch={async (state) => {
-                  if (!sharedSyncConfig) return;
-                  const { loadActiveProfileDataset } = await import("./sync/sharedSync");
-                  const result = await loadActiveProfileDataset(sharedSyncConfig);
-                  const payload = sharedPayloadToSyncPayload(
-                    result.payload,
-                    session.androidPreferences,
-                  );
-                  await applySyncedPayload(payload);
-                  markSyncComplete(payload);
-                  setSharedSyncState(state);
-                }}
               />
               <section className="settings-platform-card">
                 <h3>Platform-specific settings</h3>
@@ -2262,8 +2303,8 @@ export default function App() {
                   Android keeps <strong>Device Calendar Export</strong>, reminder scheduling, and
                   <strong> Backup File</strong> export/import in its native settings screen. The web
                   app keeps browser-safe settings here and uses <strong>Encrypted Sync</strong>
-                  for shared planner, period, and logged-day data. Shared sync is web-only today;
-                  Android continues personal encrypted sync on your Google account.
+                  for planner, period, and logged-day data. Web and Android use the same profile,
+                  encrypted sync, and sharing model.
                 </p>
                 <p className="settings-links">
                   <a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy policy</a>

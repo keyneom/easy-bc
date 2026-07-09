@@ -48,6 +48,9 @@ fun AppNavigation(
     pendingReconcileDeepLink: Boolean = false,
     /** Called once we've navigated to the reconcile screen. */
     onReconcileDeepLinkConsumed: () -> Unit = {},
+    /** True when a sharing join/response link should open Encrypted Sync settings. */
+    pendingSettingsDeepLink: Boolean = false,
+    onSettingsDeepLinkConsumed: () -> Unit = {},
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -60,6 +63,15 @@ fun AppNavigation(
         if (pendingReconcileDeepLink) {
             navController.navigate("reconcile")
             onReconcileDeepLinkConsumed()
+        }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(pendingSettingsDeepLink) {
+        if (pendingSettingsDeepLink) {
+            navController.navigate(Screen.Settings.route) {
+                launchSingleTop = true
+            }
+            onSettingsDeepLinkConsumed()
         }
     }
 

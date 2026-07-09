@@ -1,29 +1,72 @@
 package com.easybc.planner.sync.shared
 
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+
 /**
- * Carries a shared-profile join link from a deep link (handled in MainActivity)
- * to the Settings join UI, so a join that can't complete immediately — e.g. the
- * shared folder isn't granted to this account's Drive token yet — lands the user
- * on the paste field pre-filled, with the "Grant folder access" recovery, rather
- * than dead-ending on a toast.
+ * Durable handoff for join/response links. Deep links can arrive before the
+ * Settings screen exists, and Android may kill the process while Google auth or
+ * the browser Picker is open, so these values cannot live only in memory.
  */
 object PendingSharedJoin {
-    @Volatile
-    var link: String? = null
-        private set
+    private const val PREFS_NAME = "easybc_pending_shared_links"
+    private const val JOIN_LINK = "join_link"
+    private const val RESPONSE_TO_ACCEPT = "response_to_accept"
+    private const val PRODUCED_RESPONSE = "produced_response"
+    private val _revision = MutableStateFlow(0L)
+    val revision: StateFlow<Long> = _revision
 
-    /** A response link a joiner produced, to display in Settings for copy/share. */
-    @Volatile
-    var responseLink: String? = null
+    private fun prefs(context: Context) = EncryptedSharedPreferences.create(
+        context.applicationContext,
+        PREFS_NAME,
+        MasterKey.Builder(context.applicationContext)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
 
-    fun set(value: String?) {
-        link = value?.takeIf { it.isNotBlank() }
+    fun setJoinLink(context: Context, value: String?) {
+        put(context, JOIN_LINK, value)
     }
 
-    /** Returns the pending link (if any) and clears it. */
-    fun consume(): String? {
-        val current = link
-        link = null
-        return current
+    fun joinLink(context: Context): String? = prefs(context).getString(JOIN_LINK, null)
+
+    fun clearJoinLink(context: Context) {
+        prefs(context).edit().remove(JOIN_LINK).apply()
+        changed()
+    }
+
+    fun setResponseToAccept(context: Context, value: String?) {
+        put(context, RESPONSE_TO_ACCEPT, value)
+    }
+
+    fun responseToAccept(context: Context): String? =
+        prefs(context).getString(RESPONSE_TO_ACCEPT, null)
+
+    fun clearResponseToAccept(context: Context) {
+        prefs(context).edit().remove(RESPONSE_TO_ACCEPT).apply()
+        changed()
+    }
+
+    fun setProducedResponse(context: Context, value: String?) {
+        put(context, PRODUCED_RESPONSE, value)
+    }
+
+    fun producedResponse(context: Context): String? =
+        prefs(context).getString(PRODUCED_RESPONSE, null)
+
+    private fun put(context: Context, key: String, value: String?) {
+        val edit = prefs(context).edit()
+        if (value.isNullOrBlank()) edit.remove(key) else edit.putString(key, value)
+        edit.apply()
+        changed()
+    }
+
+    private fun changed() {
+        _revision.value += 1
     }
 }

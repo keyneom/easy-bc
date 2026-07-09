@@ -4,7 +4,9 @@ import com.easybc.planner.sync.shared.ProfileRecord
 import com.easybc.planner.sync.shared.SharedSyncState
 import com.keyneom.synckit.sharing.SharingRole
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ProfileLabelsTest {
@@ -55,5 +57,49 @@ class ProfileLabelsTest {
       assertThrows(IllegalArgumentException::class.java) {
           slugifyDatasetId("primary")
       }
+  }
+
+  @Test
+  fun duplicatePrimaryDatasetIds_areScopedByOwner() {
+      val shared = ProfileRecord(
+          datasetId = PRIMARY_DATASET_ID,
+          ownerEmail = "other@example.com",
+          folderName = "EasyBC — other@example.com",
+          role = SharingRole.WRITER.name.lowercase(),
+          trustedOwnerKeyId = "key-2",
+          needsInitialLoad = true,
+      )
+      val value = state.copy(profiles = profiles + shared)
+      assertEquals(profiles[0], findProfile(value, "mom@example.com/primary"))
+      assertEquals(shared, findProfile(value, "other@example.com/primary"))
+      assertTrue(shouldLoadRemoteBeforePublish(shared))
+  }
+
+  @Test
+  fun meaningfulLocalData_requiresPreservationBeforeJoin() {
+      assertFalse(hasMeaningfulSharedData(emptySharedPayload()))
+      assertTrue(
+          hasMeaningfulSharedData(
+              emptySharedPayload().copy(
+                  planner = emptySharedPayload().planner.copy(configured = true),
+              ),
+          ),
+      )
+  }
+
+  @Test
+  fun localProfile_isNamedAndNeverRequiresRemoteLoad() {
+      val local = ProfileRecord(
+          datasetId = "profile",
+          ownerEmail = "local-123",
+          folderName = "",
+          displayName = "Offline journal",
+          role = SharingRole.OWNER.name.lowercase(),
+          trustedOwnerKeyId = "",
+          syncMode = "local",
+      )
+      assertTrue(isLocalProfile(local))
+      assertFalse(shouldLoadRemoteBeforePublish(local))
+      assertEquals("Offline journal", profileDisplayLabel(state.copy(profiles = listOf(local)), local))
   }
 }

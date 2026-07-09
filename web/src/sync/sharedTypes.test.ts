@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { WasmOptions } from "../App";
 import type { PersistedSession } from "../sessionUtils";
-import { buildSharedSyncPayload, extractSharedPayload, mergeSharedSyncPayloads } from "./sharedTypes";
+import {
+  buildSharedSyncPayload,
+  extractSharedPayload,
+  mergeSharedSyncPayloads,
+  hasMeaningfulSharedData,
+  isLocalProfile,
+  shouldLoadRemoteBeforePublish,
+} from "./sharedTypes";
 import type { PortablePlannerOptions, SyncPayloadV1 } from "./types";
 import { mergeSyncPayloads } from "./types";
 
@@ -91,5 +98,40 @@ describe("shared sync payload", () => {
       { ...recent, exportedAt: recent.exportedAt },
     );
     expect(sharedMerged.planner.value.ageYears).toBe(fullMerged.planner.value.ageYears);
+  });
+
+  it("forces a newly joined writer to load before publishing local data", () => {
+    expect(
+      shouldLoadRemoteBeforePublish({
+        datasetId: "primary",
+        ownerEmail: "leslie@example.com",
+        folderName: "EasyBC — leslie@example.com",
+        role: "writer",
+        trustedOwnerKeyId: "owner-key",
+        needsInitialLoad: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps local-only profiles outside encrypted sync", () => {
+    const profile = {
+      datasetId: "profile",
+      ownerEmail: "local-123",
+      folderName: "",
+      role: "owner" as const,
+      trustedOwnerKeyId: "",
+      syncMode: "local" as const,
+    };
+    expect(isLocalProfile(profile)).toBe(true);
+    expect(shouldLoadRemoteBeforePublish(profile)).toBe(false);
+  });
+
+  it("detects local data that must be preserved before joining", () => {
+    const payload = buildSharedSyncPayload(
+      options(32) as WasmOptions,
+      [{ start: "2026-06-01" }],
+      { ...session(), plannerConfigured: false },
+    );
+    expect(hasMeaningfulSharedData(payload)).toBe(true);
   });
 });

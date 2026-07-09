@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Plus } from "lucide-react";
+import { Cloud, HardDrive, Plus, Users } from "lucide-react";
 import { profileKey } from "../sync/sharedFolderName";
 import { profileDisplayLabel } from "../sync/profileLabels";
 import {
   activeProfileFromRecord,
   canPublishRole,
   findProfile,
+  isLocalProfile,
   type SharedSyncState,
 } from "../sync/sharedTypes";
 
@@ -29,9 +30,26 @@ export function ProfileSwitcher({
     return { key, record, active };
   });
 
+  const profileMeta = (record: (typeof profiles)[number]["record"]): string => {
+    if (isLocalProfile(record)) return "Local only · this device";
+    if (record.ownerEmail.toLowerCase() !== sharedSyncState.ownerEmail.toLowerCase()) {
+      return `Shared with you · ${record.role} · ${record.ownerEmail}`;
+    }
+    const participantCount = Object.keys(record.participantEmails ?? {}).length;
+    return participantCount > 0
+      ? `Shared encrypted · ${participantCount} ${participantCount === 1 ? "person" : "people"}`
+      : "Private encrypted · your devices";
+  };
+
   return (
-    <div className="profile-switcher" aria-label="Encrypted sync profiles">
-      <p className="eyebrow">Active profile</p>
+    <div className="profile-switcher" aria-label="Profiles">
+      <div className="profile-manager-heading">
+        <div>
+          <p className="eyebrow">Profile management</p>
+          <h4>Your profiles</h4>
+        </div>
+        <p>Each profile chooses its own storage and sharing. The choices do not affect other profiles.</p>
+      </div>
       <div className="profile-switcher-list">
         {profiles.map(({ key, record }) => (
           <button
@@ -45,13 +63,32 @@ export function ProfileSwitcher({
             disabled={disabled}
             onClick={() => onSwitchProfile(key)}
           >
-            <span className="profile-switcher-label">
-              {profileDisplayLabel(sharedSyncState, record)}
+            <span className="profile-switcher-icon" aria-hidden>
+              {isLocalProfile(record) ? (
+                <HardDrive />
+              ) : Object.keys(record.participantEmails ?? {}).length > 0 ||
+                record.ownerEmail.toLowerCase() !== sharedSyncState.ownerEmail.toLowerCase() ? (
+                <Users />
+              ) : (
+                <Cloud />
+              )}
             </span>
-            <span className="profile-switcher-meta">
-              {record.ownerEmail}
-              {!canPublishRole(record.role) ? " · read-only" : ""}
+            <span className="profile-switcher-copy">
+              <span className="profile-switcher-label">
+                {profileDisplayLabel(sharedSyncState, record)}
+              </span>
+              <span className="profile-switcher-meta">
+                {profileMeta(record)}
+                {record.needsInitialLoad
+                  ? " · waiting for owner"
+                  : !isLocalProfile(record) && !canPublishRole(record.role)
+                    ? " · read-only"
+                    : ""}
+              </span>
             </span>
+            {key === sharedSyncState.activeProfileKey && (
+              <span className="profile-active-badge">Active</span>
+            )}
           </button>
         ))}
       </div>
@@ -61,7 +98,7 @@ export function ProfileSwitcher({
             type="text"
             value={newProfileName}
             onChange={(event) => setNewProfileName(event.target.value)}
-            placeholder="New profile name (e.g. Daughter)"
+            placeholder="New local profile name"
             disabled={disabled}
             aria-label="New profile name"
           />
@@ -77,13 +114,23 @@ export function ProfileSwitcher({
             }}
           >
             <Plus aria-hidden />
-            Add profile
+            New local profile
           </button>
         </div>
       )}
       {(() => {
         const current = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
-        if (!current || canPublishRole(current.role)) return null;
+        if (!current) return null;
+        if (current.needsInitialLoad) {
+          return (
+            <p className="sync-notice sync-notice-info" role="status">
+              Waiting for the owner to accept this profile. After they finish, choose{" "}
+              <strong>Merge encrypted changes</strong> to load their data without merging
+              data from another profile.
+            </p>
+          );
+        }
+        if (canPublishRole(current.role)) return null;
         return (
           <p className="sync-notice sync-notice-info" role="status">
             Viewing <strong>{profileDisplayLabel(sharedSyncState, current)}</strong> in read-only

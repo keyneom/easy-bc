@@ -22,10 +22,6 @@ export function isSharedSyncConfigured(state: SharedSyncState | null | undefined
 export async function loadSharedSyncState(): Promise<SharedSyncState | null> {
   const saved = await idbGet<SharedSyncState>(KV_SHARED_SYNC_STATE);
   if (!saved || saved.schemaVersion !== SHARED_SYNC_STATE_VERSION) return null;
-  if (!isSharedSyncConfigured(saved)) {
-    await forgetSharedSyncState();
-    return null;
-  }
   return saved;
 }
 

@@ -6,18 +6,22 @@ import com.easybc.planner.sync.SYNC_RP_ID
 import com.easybc.planner.sync.SyncPayloadGateway
 import com.easybc.planner.sync.SyncPayloadV1
 import com.keyneom.synckit.crypto.SyncKitJson
+import com.keyneom.synckit.sharing.AcceptedDatasetResult
 import com.keyneom.synckit.sharing.InviteParticipantInput
 import com.keyneom.synckit.sharing.SharedBackupController
+import com.keyneom.synckit.sharing.SharingCrypto
 import com.keyneom.synckit.sharing.SharingCryptoOptions
 import com.keyneom.synckit.sharing.SharingDatasetGrantV1
 import com.keyneom.synckit.sharing.SharingJoinParamStyle
 import com.keyneom.synckit.sharing.SharingJoinParams
 import com.keyneom.synckit.sharing.SharingRole
+import com.keyneom.synckit.sharing.VerifySharedBackupOptions
 import com.keyneom.synckit.sharing.appendSharingJoinParams
 import com.keyneom.synckit.sharing.buildSharingJoinLinkV1
 import com.keyneom.synckit.sharing.buildSharingResponseLinkV1
 import com.keyneom.synckit.sharing.parseSharingJoinLinkV1
 import com.keyneom.synckit.sharing.parseSharingResponseLinkV1
+import com.keyneom.synckit.sharing.sharedBackupParticipants
 import com.keyneom.synckit.stores.GoogleDriveSharedBackupTransport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -25,6 +29,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 
 class SharedSyncCoordinator(
     private val context: Context,
@@ -42,6 +47,21 @@ class SharedSyncCoordinator(
 
     suspend fun loadState(): SharedSyncState? = registry.load()
 
+    suspend fun ensureProfileState(): SharedSyncState {
+        registry.load()?.let { return it }
+        val created = newLocalProfile("My data")
+        val key = profileKey(created.ownerEmail, created.datasetId)
+        val state = SharedSyncState(
+            rpId = SYNC_RP_ID,
+            ownerEmail = created.ownerEmail,
+            activeProfileKey = key,
+            profiles = listOf(created),
+        )
+        registry.save(state)
+        registry.saveLocalPayload(key, store.localPayload())
+        return state
+    }
+
     suspend fun isConfigured(): Boolean {
         val state = registry.load() ?: return false
         return state.profiles.any { !it.fileId.isNullOrBlank() }
@@ -49,9 +69,17 @@ class SharedSyncCoordinator(
 
     suspend fun clearIncompleteSetup() {
         val state = registry.load() ?: return
-        if (state.profiles.none { !it.fileId.isNullOrBlank() }) {
+        val retained = state.profiles.filter {
+            isLocalProfile(it) || !it.fileId.isNullOrBlank()
+        }
+        if (retained.isEmpty()) {
             registry.clear()
             registry.clearCheckpoint()
+        } else if (retained.size != state.profiles.size) {
+            val activeKey = state.activeProfileKey.takeIf { key ->
+                retained.any { profileKey(it.ownerEmail, it.datasetId) == key }
+            } ?: profileKey(retained.first().ownerEmail, retained.first().datasetId)
+            registry.save(state.copy(activeProfileKey = activeKey, profiles = retained))
         }
     }
 
@@ -62,23 +90,31 @@ class SharedSyncCoordinator(
         val folderName = easyBcSyncFolderName(ownerEmail)
         val identity = identityStore.getOrCreate()
         val previousState = registry.load()
+        val activeBeforeSetup = previousState?.let {
+            findProfile(it, it.activeProfileKey)
+        }
+        val preservedLocalProfiles = previousState?.profiles.orEmpty().filter {
+            isLocalProfile(it) &&
+                profileKey(it.ownerEmail, it.datasetId) != previousState?.activeProfileKey
+        }
+        val connectedProfile = ProfileRecord(
+            datasetId = PRIMARY_DATASET_ID,
+            ownerEmail = ownerEmail,
+            folderName = folderName,
+            displayName = activeBeforeSetup?.displayName,
+            role = SharingRole.OWNER.name.lowercase(),
+            trustedOwnerKeyId = identity.publicKey.keyId,
+            syncMode = "encrypted",
+        )
         val provisional = SharedSyncState(
             rpId = SYNC_RP_ID,
             ownerEmail = ownerEmail,
             activeProfileKey = profileKey(ownerEmail, PRIMARY_DATASET_ID),
-            profiles = listOf(
-                ProfileRecord(
-                    datasetId = PRIMARY_DATASET_ID,
-                    ownerEmail = ownerEmail,
-                    folderName = folderName,
-                    role = SharingRole.OWNER.name.lowercase(),
-                    trustedOwnerKeyId = identity.publicKey.keyId,
-                ),
-            ),
+            profiles = preservedLocalProfiles + connectedProfile,
         )
         return try {
             registry.save(provisional)
-            val controller = controllerFor(provisional, PRIMARY_DATASET_ID)
+            val controller = controllerFor(provisional, connectedProfile)
             val storage = controller.ensureStorage()
             val local = sharedPayload(store.localPayload())
             // Adopt an existing primary dataset (interrupted setup, reinstall,
@@ -111,12 +147,17 @@ class SharedSyncCoordinator(
                 fileId = created.fileId,
                 lastRevisionId = created.revisionId,
                 lastSyncedAt = java.time.Instant.now().toString(),
+                displayName = connectedProfile.displayName,
+                syncMode = "encrypted",
             )
             val state = provisional.copy(
                 activeProfileKey = profileKey(ownerEmail, PRIMARY_DATASET_ID),
-                profiles = listOf(profile),
+                profiles = preservedLocalProfiles + profile,
             )
             registry.save(state)
+            if (activeBeforeSetup != null && isLocalProfile(activeBeforeSetup)) {
+                registry.deleteLocalPayload(previousState!!.activeProfileKey)
+            }
             store.apply(created.value.withLocalAndroidPreferences(store.localPayload()))
             store.rememberSync(created.fileId, profile.lastSyncedAt!!)
             SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
@@ -136,12 +177,15 @@ class SharedSyncCoordinator(
         rememberAccess(accessToken)
         val state = registry.load() ?: error("Shared sync is not configured on this device.")
         val profile = registry.activeProfile(state)
-        val controller = controllerFor(state, profile.datasetId)
+        require(!isLocalProfile(profile)) {
+            "This profile is local only. Connect encrypted sync before syncing it."
+        }
+        val controller = controllerFor(state, profile)
         val local = sharedPayload(store.localPayload())
-        val result = if (canPublishRole(profile.role)) {
-            controller.syncDataset(profile.datasetId, local)
-        } else {
+        val result = if (shouldLoadRemoteBeforePublish(profile)) {
             controller.loadDataset(profile.datasetId)
+        } else {
+            controller.syncDataset(profile.datasetId, local)
         }
         store.apply(result.value.withLocalAndroidPreferences(store.localPayload()))
         val syncedAt = java.time.Instant.now().toString()
@@ -149,6 +193,7 @@ class SharedSyncCoordinator(
             fileId = result.fileId,
             lastRevisionId = result.revisionId,
             lastSyncedAt = syncedAt,
+            needsInitialLoad = false,
         )
         val next = registry.upsertProfile(nextProfile)
         store.rememberSync(result.fileId, syncedAt)
@@ -167,7 +212,7 @@ class SharedSyncCoordinator(
         require(canAdministerRole(profile.role)) { "Only owners/admins can invite participants." }
         val sharingRole = sharingRoleFromString(role)
         require(sharingRole != SharingRole.OWNER) { "Cannot invite as owner." }
-        val controller = controllerFor(state, profile.datasetId)
+        val controller = controllerFor(state, profile)
         val invited = controller.inviteParticipant(
             InviteParticipantInput(
                 emailAddress = emailAddress.trim(),
@@ -204,17 +249,21 @@ class SharedSyncCoordinator(
         require(canAdministerRole(profile.role)) { "Only owners/admins can invite participants." }
         val sharingRole = sharingRoleFromString(role)
         require(sharingRole != SharingRole.OWNER) { "Cannot invite as owner." }
-        val controller = controllerFor(state, profile.datasetId)
+        val controller = controllerFor(state, profile)
         val invited = controller.inviteParticipantForLink(
             emailAddress = emailAddress.trim(),
             requestedGrants = listOf(SharingDatasetGrantV1(profile.datasetId, sharingRole)),
         )
-        pendingInvites.save(invited.invitation, emailAddress.trim())
+        pendingInvites.save(
+            invited.invitation,
+            emailAddress.trim(),
+            profileKey(profile.ownerEmail, profile.datasetId),
+        )
         return buildSharingJoinLinkV1(
             EASY_BC_JOIN_LANDING_URL,
             invited.invitation,
             invited.files,
-        ) + "&owner=${enc(state.ownerEmail)}"
+        ) + "&owner=${enc(profile.ownerEmail)}"
     }
 
     /**
@@ -227,9 +276,15 @@ class SharedSyncCoordinator(
         rememberAccess(accessToken)
         val parsed = parseSharingJoinLinkV1(joinLinkUrl)
             ?: throw IllegalArgumentException("That join link is missing its invitation details.")
+        val localBeforeJoin = sharedPayload(store.localPayload())
+        var existing = registry.load()
+        ensureDatasetFilesVisible(accessToken, parsed.files.map { it.fileId })
         val ownerEmail = android.net.Uri.parse(joinLinkUrl).getQueryParameter("owner")
             ?: fetchGoogleAccountEmail(accessToken)
         val selfEmail = fetchGoogleAccountEmail(accessToken)
+        if (existing == null && hasMeaningfulSharedData(localBeforeJoin)) {
+            existing = setup(accessToken)
+        }
         val grant = parsed.invitation.requestedGrants.firstOrNull()
             ?: error("Invitation has no dataset grants.")
         val joinProfile = ProfileRecord(
@@ -239,9 +294,21 @@ class SharedSyncCoordinator(
             role = grant.role.name.lowercase(),
             trustedOwnerKeyId = parsed.invitation.trustedOwnerKeyId,
             appFolderId = parsed.invitation.appFolderId,
+            needsInitialLoad = true,
         )
         val profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId)
-        val existing = registry.load()
+        existing?.let {
+            val active = registry.activeProfile(it)
+            if (isLocalProfile(active)) {
+                registry.saveLocalPayload(it.activeProfileKey, store.localPayload())
+            } else if (
+                !active.fileId.isNullOrBlank() &&
+                canPublishRole(active.role) &&
+                !active.needsInitialLoad
+            ) {
+                existing = sync(accessToken)
+            }
+        }
         val state = if (existing == null) {
             SharedSyncState(
                 rpId = SYNC_RP_ID,
@@ -260,9 +327,23 @@ class SharedSyncCoordinator(
             )
         }
         registry.save(state)
-        val controller = controllerFor(state, joinProfile.datasetId)
-        val response = controller.submitKeyResponseFromInvitation(parsed.invitation, parsed.files)
-        return buildSharingResponseLinkV1(EASY_BC_JOIN_LANDING_URL, response)
+        return try {
+            val controller = controllerFor(state, joinProfile)
+            val response = controller.submitKeyResponseFromInvitation(parsed.invitation, parsed.files)
+            store.apply(
+                emptySharedPayload().withLocalAndroidPreferences(store.localPayload()),
+            )
+            SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
+            buildSharingResponseLinkV1(EASY_BC_JOIN_LANDING_URL, response)
+        } catch (error: Exception) {
+            if (existing == null) {
+                registry.clear()
+                registry.clearCheckpoint()
+            } else {
+                registry.save(existing!!)
+            }
+            throw error
+        }
     }
 
     /**
@@ -280,11 +361,33 @@ class SharedSyncCoordinator(
         val state = registry.load() ?: error("Shared sync is not configured on this device.")
         val datasetId = pending.invitation.requestedGrants.firstOrNull()?.datasetId
             ?: PRIMARY_DATASET_ID
-        val controller = controllerFor(state, datasetId)
-        controller.acceptKeyResponseFromPayload(
+        val profile = pending.profileKey
+            ?.let { findProfile(state, it) }
+            ?: state.profiles.firstOrNull {
+                it.datasetId == datasetId &&
+                    it.trustedOwnerKeyId == pending.invitation.trustedOwnerKeyId &&
+                    canAdministerRole(it.role)
+            }
+            ?: throw IllegalArgumentException(
+                "The profile that created this invitation is no longer available.",
+            )
+        val controller = controllerFor(state, profile)
+        val results = controller.acceptKeyResponseFromPayload(
             pending.invitation,
             parsed.response,
             pending.recipientEmail,
+        )
+        requireAllAccepted(results)
+        val refreshed = registry.load() ?: state
+        val acceptedProfile = findProfile(
+            refreshed,
+            profileKey(profile.ownerEmail, profile.datasetId),
+        ) ?: profile
+        registry.upsertProfile(
+            acceptedProfile.copy(
+                participantEmails = acceptedProfile.participantEmails.orEmpty() +
+                    (parsed.response.keyId to pending.recipientEmail),
+            ),
         )
         pendingInvites.delete(parsed.response.exchangeId)
     }
@@ -343,9 +446,26 @@ class SharedSyncCoordinator(
             role = grant.role.name.lowercase(),
             trustedOwnerKeyId = invitation.trustedOwnerKeyId,
             appFolderId = ownerFolderId,
+            needsInitialLoad = true,
         )
         val profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId)
-        val existing = registry.load()
+        val localBeforeJoin = sharedPayload(store.localPayload())
+        var existing = registry.load()
+        if (existing == null && hasMeaningfulSharedData(localBeforeJoin)) {
+            existing = setup(accessToken)
+        }
+        existing?.let {
+            val active = registry.activeProfile(it)
+            if (isLocalProfile(active)) {
+                registry.saveLocalPayload(it.activeProfileKey, store.localPayload())
+            } else if (
+                !active.fileId.isNullOrBlank() &&
+                canPublishRole(active.role) &&
+                !active.needsInitialLoad
+            ) {
+                existing = sync(accessToken)
+            }
+        }
         val state = if (existing == null) {
             SharedSyncState(
                 rpId = SYNC_RP_ID,
@@ -364,10 +484,21 @@ class SharedSyncCoordinator(
             )
         }
         registry.save(state)
-        val controller = controllerFor(state, joinProfile.datasetId)
-        controller.submitKeyResponse(invitationFileId)
-        SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
-        return state
+        return try {
+            val controller = controllerFor(state, joinProfile)
+            controller.submitKeyResponse(invitationFileId)
+            store.apply(emptySharedPayload().withLocalAndroidPreferences(store.localPayload()))
+            SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
+            state
+        } catch (error: Exception) {
+            if (existing == null) {
+                registry.clear()
+                registry.clearCheckpoint()
+            } else {
+                registry.save(existing!!)
+            }
+            throw error
+        }
     }
 
     suspend fun acceptKeyResponse(
@@ -380,21 +511,33 @@ class SharedSyncCoordinator(
         val state = registry.load() ?: error("Shared sync is not configured on this device.")
         val profile = registry.activeProfile(state)
         require(canAdministerRole(profile.role)) { "Only owners/admins can accept participants." }
-        val controller = controllerFor(state, profile.datasetId)
+        val controller = controllerFor(state, profile)
         val transport = EasyBcSharedTransport.forProfile(state, profile, driveAuth)
         val invitation = transport.readInvitation(invitationFileId)
         val response = transport.readKeyResponse(
             responseFileId,
             invitation.recipientDrivePermissionId,
         )
-        controller.acceptKeyResponse(
+        val results = controller.acceptKeyResponse(
             invitation = invitation,
             responseFileId = responseFileId,
             recipientEmailAddress = recipientEmailAddress.trim(),
         )
+        requireAllAccepted(results)
         controller.reconcileDrivePermissions(
             datasetId = profile.datasetId,
             participantEmails = mapOf(response.response.keyId to recipientEmailAddress.trim()),
+        )
+        val refreshed = registry.load() ?: state
+        val current = findProfile(
+            refreshed,
+            profileKey(profile.ownerEmail, profile.datasetId),
+        ) ?: profile
+        registry.upsertProfile(
+            current.copy(
+                participantEmails = current.participantEmails.orEmpty() +
+                    (response.response.keyId to recipientEmailAddress.trim()),
+            ),
         )
     }
 
@@ -403,7 +546,7 @@ class SharedSyncCoordinator(
         val state = registry.load() ?: return emptyList()
         val profile = registry.activeProfile(state)
         if (!canAdministerRole(profile.role)) return emptyList()
-        val controller = controllerFor(state, profile.datasetId)
+        val controller = controllerFor(state, profile)
         val invitations = controller.listExchanges(null, "invitation")
             .associate { it.exchangeId to it.fileId }
         return controller.listExchanges(null, "key-response").mapNotNull { response ->
@@ -416,14 +559,135 @@ class SharedSyncCoordinator(
         }
     }
 
+    suspend fun listActiveParticipants(accessToken: String): List<ProfileParticipant> {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: return emptyList()
+        val profile = registry.activeProfile(state)
+        if (isLocalProfile(profile) || profile.fileId.isNullOrBlank()) return emptyList()
+        val stored = EasyBcSharedTransport.forProfile(state, profile, driveAuth)
+            .readDataset(profile.fileId)
+        SharingCrypto.verifySharedBackupEnvelopeV1(
+            stored.envelope,
+            VerifySharedBackupOptions(trustedOwnerKeyId = profile.trustedOwnerKeyId),
+        )
+        val currentKeyId = identityStore.getOrCreate().publicKey.keyId
+        return sharedBackupParticipants(stored.envelope).map { participant ->
+            ProfileParticipant(
+                keyId = participant.keyId,
+                role = participant.role.name.lowercase(),
+                emailAddress = profile.participantEmails?.get(participant.keyId),
+                isCurrentDevice = participant.keyId == currentKeyId,
+            )
+        }
+    }
+
+    suspend fun updateParticipantRole(
+        accessToken: String,
+        keyId: String,
+        emailAddress: String,
+        role: String,
+    ): List<ProfileParticipant> {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile)) { "That profile is local only." }
+        require(canAdministerRole(profile.role)) { "Only owners/admins can change participant access." }
+        val sharingRole = sharingRoleFromString(role)
+        require(sharingRole != SharingRole.OWNER) { "Owner transfer is not supported." }
+        val trimmedEmail = emailAddress.trim()
+        require(trimmedEmail.isNotEmpty()) {
+            "EasyBC needs the participant email to update their Drive access."
+        }
+        val controller = controllerFor(state, profile)
+        controller.setDatasetRole(
+            datasetId = profile.datasetId,
+            keyId = keyId,
+            role = sharingRole,
+            emailAddress = trimmedEmail,
+        )
+        registry.upsertProfile(
+            profile.copy(
+                participantEmails = profile.participantEmails.orEmpty() +
+                    (keyId to trimmedEmail),
+            ),
+        )
+        return listActiveParticipants(accessToken)
+    }
+
+    suspend fun revokeParticipant(
+        accessToken: String,
+        keyId: String,
+        emailAddress: String,
+    ): List<ProfileParticipant> {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile)) { "That profile is local only." }
+        require(canAdministerRole(profile.role)) { "Only owners/admins can remove participants." }
+        val trimmedEmail = emailAddress.trim()
+        require(trimmedEmail.isNotEmpty()) {
+            "EasyBC needs the participant email to remove their Drive access."
+        }
+        val controller = controllerFor(state, profile)
+        controller.revokeDatasetKey(
+            datasetId = profile.datasetId,
+            keyId = keyId,
+            emailAddress = trimmedEmail,
+        )
+        val participantEmails = profile.participantEmails.orEmpty().filterKeys { it != keyId }
+        registry.upsertProfile(profile.copy(participantEmails = participantEmails))
+        return listActiveParticipants(accessToken)
+    }
+
     suspend fun setActiveProfile(profileKeyValue: String): SharedSyncState =
         registry.setActiveProfile(profileKeyValue)
+
+    suspend fun switchActiveProfile(
+        accessToken: String?,
+        profileKeyValue: String,
+    ): SharedSyncState {
+        accessToken?.let(::rememberAccess)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val targetBeforeSwitch = findProfile(state, profileKeyValue)
+            ?: error("That profile is not available on this device.")
+        if (!isLocalProfile(targetBeforeSwitch)) {
+            requireNotNull(accessToken) {
+                "Google authorization is required to open an encrypted profile."
+            }
+        }
+        val previousProfileKey = state.activeProfileKey
+        val current = registry.activeProfile(state)
+        if (isLocalProfile(current)) {
+            registry.saveLocalPayload(state.activeProfileKey, store.localPayload())
+        } else if (
+            !current.fileId.isNullOrBlank() &&
+            canPublishRole(current.role) &&
+            !current.needsInitialLoad
+        ) {
+            sync(requireNotNull(accessToken) { "Google authorization is required to switch encrypted profiles." })
+        }
+        val next = registry.setActiveProfile(profileKeyValue)
+        val target = registry.activeProfile(next)
+        if (isLocalProfile(target)) {
+            val local = registry.loadLocalPayload(profileKeyValue) ?: emptySharedPayload()
+            store.apply(local.withLocalAndroidPreferences(store.localPayload()))
+            registry.clearCheckpoint()
+            return next
+        }
+        return try {
+            loadActiveProfile(requireNotNull(accessToken))
+        } catch (error: Exception) {
+            registry.setActiveProfile(previousProfileKey)
+            throw error
+        }
+    }
 
     suspend fun loadActiveProfile(accessToken: String): SharedSyncState {
         rememberAccess(accessToken)
         val state = registry.load() ?: error("Shared sync is not configured on this device.")
         val profile = registry.activeProfile(state)
-        val controller = controllerFor(state, profile.datasetId)
+        require(!isLocalProfile(profile)) { "This profile is stored only on this device." }
+        val controller = controllerFor(state, profile)
         val loaded = controller.loadDataset(profile.datasetId)
         store.apply(loaded.value.withLocalAndroidPreferences(store.localPayload()))
         val syncedAt = java.time.Instant.now().toString()
@@ -431,6 +695,7 @@ class SharedSyncCoordinator(
             fileId = loaded.fileId,
             lastRevisionId = loaded.revisionId,
             lastSyncedAt = syncedAt,
+            needsInitialLoad = false,
         )
         store.rememberSync(loaded.fileId, syncedAt)
         return registry.upsertProfile(nextProfile)
@@ -446,7 +711,7 @@ class SharedSyncCoordinator(
         val appFolderId = primary.appFolderId
             ?: error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.")
         val datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles)
-        val controller = controllerFor(state, primary.datasetId)
+        val controller = controllerFor(state, primary)
         val created = controller.createDataset(datasetId, emptySharedPayload())
         val syncedAt = java.time.Instant.now().toString()
         val newProfile = ProfileRecord(
@@ -471,6 +736,144 @@ class SharedSyncCoordinator(
         return registry.load() ?: error("Shared sync is not configured on this device.")
     }
 
+    suspend fun connectActiveLocalProfile(accessToken: String): SharedSyncState {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("No profile registry is available on this device.")
+        val active = registry.activeProfile(state)
+        require(isLocalProfile(active)) { "This profile already uses encrypted sync." }
+        val primary = findOwnedPrimaryProfile(state) ?: return setup(accessToken)
+        val appFolderId = primary.appFolderId
+            ?: error("Your encrypted sync folder is not ready yet. Sync once, then try again.")
+        val displayName = active.displayName?.trim().orEmpty().ifEmpty { "Profile" }
+        val datasetId = uniqueOwnedDatasetId(displayName, state.ownerEmail, state.profiles)
+        val created = controllerFor(state, primary).createDataset(
+            datasetId,
+            sharedPayload(store.localPayload()),
+        )
+        val syncedAt = java.time.Instant.now().toString()
+        val connected = ProfileRecord(
+            datasetId = datasetId,
+            ownerEmail = state.ownerEmail,
+            folderName = primary.folderName,
+            displayName = displayName,
+            role = SharingRole.OWNER.name.lowercase(),
+            trustedOwnerKeyId = primary.trustedOwnerKeyId,
+            appFolderId = appFolderId,
+            fileId = created.fileId,
+            lastRevisionId = created.revisionId,
+            lastSyncedAt = syncedAt,
+            syncMode = "encrypted",
+        )
+        val connectedKey = profileKey(connected.ownerEmail, connected.datasetId)
+        val next = state.copy(
+            activeProfileKey = connectedKey,
+            profiles = state.profiles.filter {
+                profileKey(it.ownerEmail, it.datasetId) != state.activeProfileKey
+            } + connected,
+        )
+        registry.save(next)
+        registry.deleteLocalPayload(state.activeProfileKey)
+        registry.clearCheckpoint()
+        store.apply(created.value.withLocalAndroidPreferences(store.localPayload()))
+        store.rememberSync(created.fileId, syncedAt)
+        SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
+        return next
+    }
+
+    suspend fun createLocalProfile(accessToken: String?, displayName: String): SharedSyncState {
+        val trimmed = displayName.trim()
+        require(trimmed.isNotEmpty()) { "Enter a profile name." }
+        var state = ensureProfileState()
+        val current = registry.activeProfile(state)
+        if (isLocalProfile(current)) {
+            registry.saveLocalPayload(state.activeProfileKey, store.localPayload())
+        } else if (
+            !current.fileId.isNullOrBlank() &&
+            canPublishRole(current.role) &&
+            !current.needsInitialLoad
+        ) {
+            state = sync(
+                requireNotNull(accessToken) {
+                    "Google authorization is required before leaving an encrypted profile."
+                },
+            )
+        }
+        val profile = newLocalProfile(trimmed)
+        val key = profileKey(profile.ownerEmail, profile.datasetId)
+        state = state.copy(
+            activeProfileKey = key,
+            profiles = state.profiles + profile,
+        )
+        val empty = emptySharedPayload()
+        registry.save(state)
+        registry.saveLocalPayload(key, empty)
+        registry.clearCheckpoint()
+        store.apply(empty.withLocalAndroidPreferences(store.localPayload()))
+        return state
+    }
+
+    suspend fun renameProfile(profileKeyValue: String, displayName: String): SharedSyncState {
+        val trimmed = displayName.trim()
+        require(trimmed.isNotEmpty()) { "Enter a profile name." }
+        val state = registry.load() ?: error("No profile registry is available on this device.")
+        val profile = findProfile(state, profileKeyValue)
+            ?: error("That profile is not available on this device.")
+        return registry.upsertProfile(profile.copy(displayName = trimmed))
+    }
+
+    suspend fun disconnectActiveProfileToLocal(): SharedSyncState {
+        val state = registry.load() ?: error("No profile registry is available on this device.")
+        val active = registry.activeProfile(state)
+        require(!isLocalProfile(active)) { "This profile is already local only." }
+        val localProfile = newLocalProfile(active.displayName ?: "Local copy")
+        val localKey = profileKey(localProfile.ownerEmail, localProfile.datasetId)
+        val next = state.copy(
+            activeProfileKey = localKey,
+            profiles = state.profiles.filter {
+                profileKey(it.ownerEmail, it.datasetId) != state.activeProfileKey
+            } + localProfile,
+        )
+        registry.save(next)
+        registry.saveLocalPayload(localKey, store.localPayload())
+        registry.clearCheckpoint()
+        return next
+    }
+
+    suspend fun deleteProfile(
+        accessToken: String?,
+        profileKeyValue: String,
+        deleteEverywhere: Boolean,
+    ): SharedSyncState {
+        var state = registry.load() ?: error("No profile registry is available on this device.")
+        require(state.profiles.size > 1) {
+            "Create or join another profile before deleting the only profile."
+        }
+        val profile = findProfile(state, profileKeyValue)
+            ?: error("That profile is not available on this device.")
+        if (state.activeProfileKey == profileKeyValue) {
+            val fallback = state.profiles.first {
+                profileKey(it.ownerEmail, it.datasetId) != profileKeyValue
+            }
+            state = switchActiveProfile(
+                accessToken,
+                profileKey(fallback.ownerEmail, fallback.datasetId),
+            )
+        }
+        if (deleteEverywhere) {
+            require(!isLocalProfile(profile) && profile.role.equals("owner", true)) {
+                "Only the owner can delete an encrypted profile everywhere."
+            }
+            rememberAccess(
+                requireNotNull(accessToken) {
+                    "Google authorization is required to delete an encrypted profile."
+                },
+            )
+            controllerFor(state, profile).deleteDataset(profile.datasetId)
+        }
+        registry.deleteLocalPayload(profileKeyValue)
+        return registry.removeProfile(profileKeyValue)
+    }
+
     suspend fun forget() {
         identityStore.clear()
         driveAuth.clear()
@@ -480,38 +883,41 @@ class SharedSyncCoordinator(
         SharingSyncScheduler.cancel(context.applicationContext)
     }
 
-    /**
-     * Delete every dataset in this account's own EasyBC folder (including
-     * orphans from interrupted setups), forget local state, and set up fresh
-     * with this device's data. Never touches folders shared BY others: the
-     * owned-profile transport always targets the folder named with this
-     * account's email.
-     */
+    /** Replace only the selected owned encrypted profile with this device's data. */
     suspend fun reset(accessToken: String): SharedSyncState {
         rememberAccess(accessToken)
-        runCatching {
-            val ownerEmail = fetchGoogleAccountEmail(accessToken)
-            val provisional = SharedSyncState(
-                rpId = SYNC_RP_ID,
-                ownerEmail = ownerEmail,
-                activeProfileKey = profileKey(ownerEmail, PRIMARY_DATASET_ID),
-                profiles = listOf(
-                    ProfileRecord(
-                        datasetId = PRIMARY_DATASET_ID,
-                        ownerEmail = ownerEmail,
-                        folderName = easyBcSyncFolderName(ownerEmail),
-                        role = SharingRole.OWNER.name.lowercase(),
-                        trustedOwnerKeyId = identityStore.getOrCreate().publicKey.keyId,
-                    ),
-                ),
-            )
-            val controller = controllerFor(provisional, PRIMARY_DATASET_ID)
-            for (dataset in controller.listDatasets()) {
-                runCatching { controller.deleteDataset(dataset.datasetId) }
-            }
+        var state = registry.load() ?: error("No profile registry is available on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile) && profile.role.equals("owner", true)) {
+            "Only an owned encrypted profile can be reset."
         }
-        forget()
-        return setup(accessToken)
+        profile.fileId?.let {
+            EasyBcSharedTransport.forProfile(state, profile, driveAuth).deleteDataset(it)
+        }
+        val cleared = profile.copy(
+            fileId = null,
+            lastRevisionId = null,
+            seenRevisionIds = null,
+            participantPermissionIds = emptyMap(),
+            participantEmails = emptyMap(),
+            lastSyncedAt = null,
+        )
+        state = registry.upsertProfile(cleared)
+        val created = controllerFor(state, cleared).createDataset(
+            profile.datasetId,
+            sharedPayload(store.localPayload()),
+        )
+        val syncedAt = java.time.Instant.now().toString()
+        val restored = cleared.copy(
+            fileId = created.fileId,
+            lastRevisionId = created.revisionId,
+            lastSyncedAt = syncedAt,
+        )
+        val next = registry.upsertProfile(restored)
+        store.apply(created.value.withLocalAndroidPreferences(store.localPayload()))
+        store.rememberSync(created.fileId, syncedAt)
+        SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
+        return next
     }
 
     suspend fun transportForPolling(): GoogleDriveSharedBackupTransport? {
@@ -524,12 +930,21 @@ class SharedSyncCoordinator(
         driveAuth.remember(accessToken)
     }
 
+    private fun requireAllAccepted(results: List<AcceptedDatasetResult>) {
+        val failures = results.filter { it.status != "accepted" }
+        if (failures.isEmpty()) return
+        val detail = failures.joinToString("; ") {
+            "${it.datasetId}: ${it.error?.message ?: "failed"}"
+        }
+        throw IllegalStateException(
+            "The recipient was not added to every dataset ($detail). Try accepting again.",
+        )
+    }
+
     private suspend fun controllerFor(
         state: SharedSyncState,
-        datasetId: String,
+        profile: ProfileRecord,
     ): SharedBackupController<SyncPayloadV1> {
-        val profile = state.profiles.firstOrNull { it.datasetId == datasetId }
-            ?: registry.activeProfile(state)
         val scopeKey = profileKey(profile.ownerEmail, profile.datasetId)
         return SharedBackupController(
             appId = EASY_BC_APP_ID,
@@ -569,6 +984,32 @@ class SharedSyncCoordinator(
             email
         }
 
+    private suspend fun ensureDatasetFilesVisible(
+        accessToken: String,
+        fileIds: List<String>,
+    ) = withContext(Dispatchers.IO) {
+        require(fileIds.isNotEmpty()) { "The join link does not list any shared dataset files." }
+        for (fileId in fileIds.distinct()) {
+            val connection = (URL(
+                "https://www.googleapis.com/drive/v3/files/${enc(fileId)}" +
+                    "?fields=id,name&supportsAllDrives=true",
+            ).openConnection() as HttpURLConnection)
+            try {
+                connection.setRequestProperty("Authorization", "Bearer $accessToken")
+                val code = connection.responseCode
+                if (code !in 200..299) {
+                    throw IllegalArgumentException(
+                        "EasyBC cannot read the shared sync file yet. Tap \"Grant shared file " +
+                            "access\", select the *.sync-kit.json file with this same Google " +
+                            "account, then tap Join shared profile again.",
+                    )
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+
     // Diagnostic parity with sharedSync.ts#probeDriveVisibility: with
     // drive.file, another account's shares can be invisible to our token (404)
     // even after a Picker grant. Probing files.get for both the shared folder
@@ -603,6 +1044,17 @@ class SharedSyncCoordinator(
     private fun sharedPayload(payload: SyncPayloadV1): SyncPayloadV1 =
         payload.copy(androidPreferences = null)
 
+    private fun newLocalProfile(displayName: String): ProfileRecord =
+        ProfileRecord(
+            datasetId = "profile",
+            ownerEmail = "local-${UUID.randomUUID()}",
+            folderName = "",
+            displayName = displayName.trim().ifEmpty { "My data" },
+            role = SharingRole.OWNER.name.lowercase(),
+            trustedOwnerKeyId = "",
+            syncMode = "local",
+        )
+
     private fun SyncPayloadV1.withLocalAndroidPreferences(local: SyncPayloadV1): SyncPayloadV1 =
         copy(androidPreferences = local.androidPreferences)
 
@@ -613,5 +1065,12 @@ class SharedSyncCoordinator(
         val responseFileId: String,
         val invitationFileId: String,
         val exchangeId: String,
+    )
+
+    data class ProfileParticipant(
+        val keyId: String,
+        val role: String,
+        val emailAddress: String?,
+        val isCurrentDevice: Boolean,
     )
 }

@@ -25,8 +25,8 @@ android {
         applicationId = "com.easybc.planner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 46
-        versionName = "0.1.45"
+        versionCode = 47
+        versionName = "0.1.46"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
@@ -86,7 +86,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     // Encrypted snapshot sync (crypto, Drive appData store, passkey PRF, controller).
-    implementation("com.keyneom:sync-kit-android:0.2.0-rc.9")
+    implementation("com.keyneom:sync-kit-android:0.2.0-rc.10")
 
     // User-consented OAuth access to Drive (appData + shared drive.file).
     implementation("com.google.android.gms:play-services-auth:21.6.0")

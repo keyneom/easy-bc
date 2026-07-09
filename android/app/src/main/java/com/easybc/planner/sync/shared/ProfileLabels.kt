@@ -45,6 +45,9 @@ fun isOwnedProfile(state: SharedSyncState, profile: ProfileRecord): Boolean =
         profile.role.equals(SharingRole.OWNER.name, ignoreCase = true)
 
 fun profileDisplayLabel(state: SharedSyncState, profile: ProfileRecord): String {
+    if (isLocalProfile(profile)) {
+        return profile.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Local profile"
+    }
     if (!isOwnedProfile(state, profile)) return profile.folderName
     profile.displayName?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
     if (profile.datasetId == PRIMARY_DATASET_ID) return "My data"

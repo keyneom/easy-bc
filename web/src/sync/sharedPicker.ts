@@ -1,5 +1,6 @@
 import { GoogleDriveFolderPicker } from "@keyneom/sync-kit/stores/google-drive/picker";
 import type { Authorization } from "@keyneom/sync-kit/core";
+import type { SharingDatasetFileV1 } from "@keyneom/sync-kit/sharing";
 
 export function createEasyBcFolderPicker(title?: string): GoogleDriveFolderPicker | null {
   const developerKey = import.meta.env.VITE_GOOGLE_API_KEY?.trim() ?? "";
@@ -21,6 +22,7 @@ export function createEasyBcFolderPicker(title?: string): GoogleDriveFolderPicke
  */
 export async function pickSharedDatasetFiles(
   authorization: Authorization,
+  expectedFiles: SharingDatasetFileV1[] = [],
 ): Promise<Array<{ fileId: string; name?: string }>> {
   const picker = createEasyBcFolderPicker("Select the shared EasyBC file(s)");
   if (!picker) {
@@ -31,9 +33,28 @@ export async function pickSharedDatasetFiles(
   document.body.dataset.pickerOpen = "true";
   try {
     const picked = await picker.pickFiles(authorization, { multiSelect: true });
-    return picked.map((file) => ({ fileId: file.fileId, name: file.name }));
+    const selected = picked.map((file) => ({ fileId: file.fileId, name: file.name }));
+    validatePickedDatasetFiles(expectedFiles, selected);
+    return selected;
   } finally {
     delete document.body.dataset.pickerOpen;
+  }
+}
+
+export function validatePickedDatasetFiles(
+  expectedFiles: Array<{ fileId: string }>,
+  selectedFiles: Array<{ fileId: string }>,
+): void {
+  if (selectedFiles.length === 0) {
+    throw new Error("Select the shared EasyBC sync file to continue.");
+  }
+  const selectedIds = new Set(selectedFiles.map((file) => file.fileId));
+  const missing = expectedFiles.filter((file) => !selectedIds.has(file.fileId));
+  if (missing.length > 0) {
+    throw new Error(
+      `Select all ${expectedFiles.length} file${expectedFiles.length === 1 ? "" : "s"} ` +
+        "listed in the invitation. The selected files did not match this share.",
+    );
   }
 }
 

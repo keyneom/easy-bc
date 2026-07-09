@@ -24,8 +24,12 @@ class PendingInviteStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    fun save(invitation: SharingInvitationV1, recipientEmail: String) {
-        val record = Pending(invitation, recipientEmail)
+    fun save(
+        invitation: SharingInvitationV1,
+        recipientEmail: String,
+        profileKey: String,
+    ) {
+        val record = Pending(invitation, recipientEmail, profileKey)
         prefs.edit()
             .putString(invitation.exchangeId, json.encodeToString(Pending.serializer(), record))
             .apply()
@@ -44,6 +48,8 @@ class PendingInviteStore(context: Context) {
     data class Pending(
         val invitation: SharingInvitationV1,
         val recipientEmail: String,
+        /** Optional for v0.1.45 records already persisted before this field existed. */
+        val profileKey: String? = null,
     )
 
     companion object {

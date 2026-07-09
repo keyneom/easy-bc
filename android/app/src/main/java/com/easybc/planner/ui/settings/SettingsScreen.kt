@@ -338,13 +338,21 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     val legacyPresent by vm.legacySyncPresent.collectAsState()
     val joinUrl by vm.joinUrl.collectAsState()
     val responseLink by vm.responseLink.collectAsState()
+    val profileParticipants by vm.profileParticipants.collectAsState()
     var responseLinkInput by remember { mutableStateOf("") }
     var deepLinkResponse by remember { mutableStateOf<String?>(null) }
     val clipboard = LocalClipboardManager.current
     var pendingOperation by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var pendingProfileKey by remember { mutableStateOf<String?>(null) }
     var pendingProfileDisplayName by remember { mutableStateOf<String?>(null) }
+    var pendingProfileDeleteKey by remember { mutableStateOf<String?>(null) }
+    var pendingProfileParticipantsRefresh by remember { mutableStateOf(false) }
+    var pendingParticipantRoleChange by remember { mutableStateOf<Triple<String, String, String>?>(null) }
+    var pendingParticipantRevoke by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var participantRevokeConfirm by remember { mutableStateOf<Pair<String, String>?>(null) }
     var newProfileName by remember { mutableStateOf("") }
+    var profileName by remember { mutableStateOf("") }
+    var profileActionConfirm by remember { mutableStateOf<String?>(null) }
     var pendingInvite by remember { mutableStateOf<Pair<String, String>?>(null) }
     var pendingJoin by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingLinkJoin by remember { mutableStateOf<String?>(null) }
@@ -353,15 +361,24 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     var confirming by remember { mutableStateOf<CloudSyncOperation?>(null) }
     var inviteEmail by remember { mutableStateOf("") }
     var inviteRole by remember { mutableStateOf("viewer") }
+    val pendingLinkRevision by com.easybc.planner.sync.shared.PendingSharedJoin.revision.collectAsState()
 
-    // A legacy join link stashed by the deep-link handler pre-fills the paste
-    // field; a response link produced by a deep-link join is shown for copy.
-    LaunchedEffect(Unit) {
-        com.easybc.planner.sync.shared.PendingSharedJoin.consume()?.let { joinLinkInput = it }
-        com.easybc.planner.sync.shared.PendingSharedJoin.responseLink?.let {
-            deepLinkResponse = it
-            com.easybc.planner.sync.shared.PendingSharedJoin.responseLink = null
-        }
+    // Deep links are stored durably because Android may kill the process while
+    // Google auth or the browser Picker is open.
+    LaunchedEffect(pendingLinkRevision) {
+        val pending = com.easybc.planner.sync.shared.PendingSharedJoin
+        pending.joinLink(activity)?.let { joinLinkInput = it }
+        pending.responseToAccept(activity)?.let { responseLinkInput = it }
+        pending.producedResponse(activity)?.let { deepLinkResponse = it }
+    }
+
+    LaunchedEffect(sharedState?.activeProfileKey) {
+        val state = sharedState ?: return@LaunchedEffect
+        val profile = state.profiles.firstOrNull {
+            com.easybc.planner.sync.shared.profileKey(it.ownerEmail, it.datasetId) ==
+                state.activeProfileKey
+        } ?: return@LaunchedEffect
+        profileName = com.easybc.planner.sync.shared.profileDisplayLabel(state, profile)
     }
 
     val resolutionLauncher = rememberLauncherForActivityResult(
@@ -370,6 +387,10 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         val operation = pendingOperation
         val profileKey = pendingProfileKey
         val profileDisplayName = pendingProfileDisplayName
+        val profileDeleteKey = pendingProfileDeleteKey
+        val refreshParticipants = pendingProfileParticipantsRefresh
+        val participantRoleChange = pendingParticipantRoleChange
+        val participantRevoke = pendingParticipantRevoke
         val invite = pendingInvite
         val join = pendingJoin
         val linkJoin = pendingLinkJoin
@@ -377,6 +398,10 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         pendingOperation = null
         pendingProfileKey = null
         pendingProfileDisplayName = null
+        pendingProfileDeleteKey = null
+        pendingProfileParticipantsRefresh = false
+        pendingParticipantRoleChange = null
+        pendingParticipantRevoke = null
         pendingInvite = null
         pendingJoin = null
         pendingLinkJoin = null
@@ -389,9 +414,20 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             .onSuccess { token ->
                 when {
                     profileDisplayName != null -> {
-                        vm.createOwnedProfile(token, profileDisplayName)
+                        vm.createLocalProfile(token, profileDisplayName)
                         newProfileName = ""
                     }
+                    profileDeleteKey != null -> vm.deleteProfile(token, profileDeleteKey, false)
+                    refreshParticipants -> vm.refreshProfileParticipants(token)
+                    participantRoleChange != null ->
+                        vm.updateParticipantRole(
+                            token,
+                            participantRoleChange.first,
+                            participantRoleChange.second,
+                            participantRoleChange.third,
+                        )
+                    participantRevoke != null ->
+                        vm.revokeParticipant(token, participantRevoke.first, participantRevoke.second)
                     profileKey != null -> vm.switchProfile(token, profileKey)
                     invite != null -> vm.inviteParticipant(token, invite.first, invite.second)
                     join != null -> vm.joinSharedSync(token, join.first, join.second, join.third)
@@ -487,6 +523,46 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
 
+    fun authorizeAndChangeParticipantRole(keyId: String, email: String, role: String) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized ->
+                        vm.updateParticipantRole(step.accessToken, keyId, email, role)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingParticipantRoleChange = Triple(keyId, email, role)
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndRevokeParticipant(keyId: String, email: String) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized ->
+                        vm.revokeParticipant(step.accessToken, keyId, email)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingParticipantRevoke = keyId to email
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
     Text(
         "Encrypt planner settings, period records, and day logs in your own Google Drive folder " +
             "(EasyBC — you@email). Share read or write access with others by email. " +
@@ -527,10 +603,20 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     Spacer(Modifier.height(8.dp))
 
     val busy = status is SettingsViewModel.SyncStatus.Running
-    if (sharedConfigured) {
-        sharedState?.let { state ->
+    val selectedProfile = vm.activeProfile()
+    val selectedIsLocal = selectedProfile?.let {
+        com.easybc.planner.sync.shared.isLocalProfile(it)
+    } == true
+    sharedState?.let { state ->
         Spacer(Modifier.height(8.dp))
-        Text("Profiles", style = MaterialTheme.typography.labelLarge)
+        Text("Profile management", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Each profile can stay local, sync privately across your devices, or be shared. " +
+                "Storage and sharing choices are independent for every profile.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.height(8.dp))
         state.profiles.forEach { profile ->
             val key = com.easybc.planner.sync.shared.profileKey(profile.ownerEmail, profile.datasetId)
             val active = key == state.activeProfileKey
@@ -540,6 +626,15 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                     if (active || busy) return@OutlinedButton
                     scope.launch {
                         try {
+                            val current = vm.activeProfile()
+                            if (
+                                com.easybc.planner.sync.shared.isLocalProfile(profile) &&
+                                current != null &&
+                                com.easybc.planner.sync.shared.isLocalProfile(current)
+                            ) {
+                                vm.switchProfile(null, key)
+                                return@launch
+                            }
                             when (val step = vm.beginCloudAuthorization(activity)) {
                                 is AuthorizationStep.Authorized ->
                                     vm.switchProfile(step.accessToken, key)
@@ -563,20 +658,71 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                         append(if (active) "● " else "○ ")
                         append(label)
                         append(" · ")
-                        append(profile.ownerEmail)
-                        if (!com.easybc.planner.sync.shared.canPublishRole(profile.role)) {
+                        append(
+                            when {
+                                com.easybc.planner.sync.shared.isLocalProfile(profile) ->
+                                    "Local only · this device"
+                                !profile.ownerEmail.equals(state.ownerEmail, ignoreCase = true) ->
+                                    "Shared with you · ${profile.role}"
+                                profile.participantEmails.orEmpty().isNotEmpty() ->
+                                    "Shared encrypted · ${profile.participantEmails.orEmpty().size} people"
+                                else -> "Private encrypted · your devices"
+                            },
+                        )
+                        if (profile.needsInitialLoad) {
+                            append(" · waiting for owner")
+                        } else if (!com.easybc.planner.sync.shared.canPublishRole(profile.role)) {
                             append(" · read-only")
                         }
                     },
                 )
             }
         }
-        if (vm.isReadOnlyActiveProfile()) {
+        if (vm.isReadOnlyActiveProfile() && vm.activeProfile()?.needsInitialLoad != true) {
             Text(
                 "Viewing a shared profile in read-only mode.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        vm.activeProfile()?.takeIf { it.needsInitialLoad }?.let {
+            Text(
+                "Waiting for the owner to accept this profile. After they finish, tap " +
+                    "Merge encrypted changes to load their data without merging another profile.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        vm.activeProfile()?.let { profile ->
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = profileName,
+                onValueChange = { profileName = it },
+                label = { Text("Profile name") },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedButton(
+                onClick = { vm.renameProfile(state.activeProfileKey, profileName) },
+                enabled = !busy && profileName.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Rename profile") }
+            if (com.easybc.planner.sync.shared.isLocalProfile(profile)) {
+                if (state.profiles.size > 1) {
+                    TextButton(
+                        onClick = { profileActionConfirm = "delete-local" },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Delete local profile") }
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { profileActionConfirm = "disconnect" },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Keep local copy & disconnect") }
+            }
         }
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
@@ -595,9 +741,15 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 if (name.isEmpty() || busy) return@OutlinedButton
                 scope.launch {
                     try {
+                        val active = vm.activeProfile()
+                        if (active == null || com.easybc.planner.sync.shared.isLocalProfile(active)) {
+                            vm.createLocalProfile(null, name)
+                            newProfileName = ""
+                            return@launch
+                        }
                         when (val step = vm.beginCloudAuthorization(activity)) {
                             is AuthorizationStep.Authorized -> {
-                                vm.createOwnedProfile(step.accessToken, name)
+                                vm.createLocalProfile(step.accessToken, name)
                                 newProfileName = ""
                             }
                             is AuthorizationStep.NeedsResolution -> {
@@ -615,12 +767,11 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             enabled = !busy && newProfileName.trim().isNotEmpty(),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Add profile")
-        }
+            Text("New local profile")
         }
     }
     Spacer(modifier = Modifier.height(8.dp))
-    if (sharedConfigured) {
+    if (sharedConfigured && !selectedIsLocal) {
         Button(
             onClick = { authorizeAndRun(CloudSyncOperation.SYNC) },
             enabled = !busy,
@@ -630,7 +781,104 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
             Spacer(Modifier.width(8.dp))
             Text("Merge encrypted changes")
         }
-        if (sharedState != null && vm.activeProfile()?.role == "owner") {
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                scope.launch {
+                    try {
+                        when (val step = vm.beginCloudAuthorization(activity)) {
+                            is AuthorizationStep.Authorized ->
+                                vm.refreshProfileParticipants(step.accessToken)
+                            is AuthorizationStep.NeedsResolution -> {
+                                pendingProfileParticipantsRefresh = true
+                                resolutionLauncher.launch(
+                                    IntentSenderRequest.Builder(
+                                        step.pendingIntent.intentSender,
+                                    ).build(),
+                                )
+                            }
+                        }
+                    } catch (error: Exception) {
+                        vm.cloudError(error.message ?: "Google authorization failed.")
+                    }
+                }
+            },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Refresh people with access") }
+        if (profileParticipants.isNotEmpty()) {
+            Text("People with access", style = MaterialTheme.typography.labelLarge)
+            profileParticipants.forEach { participant ->
+                Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                    val participantEmail = participant.emailAddress
+                    Text(
+                        buildString {
+                            append(
+                                participantEmail
+                                    ?: if (participant.isCurrentDevice) "You (this identity)"
+                                    else "Key ${participant.keyId.take(10)}…",
+                            )
+                            append(" · ")
+                            append(participant.role)
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    if (
+                        participant.role != "owner" &&
+                        !participant.isCurrentDevice &&
+                        (vm.activeProfile()?.role == "owner" || vm.activeProfile()?.role == "admin")
+                    ) {
+                        if (participantEmail.isNullOrBlank()) {
+                            Text(
+                                "Email is unknown on this device, so EasyBC cannot safely update the Drive ACL here.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if (participant.role != "viewer") {
+                                    TextButton(
+                                        onClick = {
+                                            authorizeAndChangeParticipantRole(
+                                                participant.keyId,
+                                                participantEmail,
+                                                "viewer",
+                                            )
+                                        },
+                                        enabled = !busy,
+                                    ) { Text("Make viewer") }
+                                }
+                                if (participant.role != "writer") {
+                                    TextButton(
+                                        onClick = {
+                                            authorizeAndChangeParticipantRole(
+                                                participant.keyId,
+                                                participantEmail,
+                                                "writer",
+                                            )
+                                        },
+                                        enabled = !busy,
+                                    ) { Text("Make writer") }
+                                }
+                                TextButton(
+                                    onClick = {
+                                        participantRevokeConfirm = participant.keyId to participantEmail
+                                    },
+                                    enabled = !busy,
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.error,
+                                    ),
+                                ) { Text("Remove") }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (
+            sharedState != null &&
+            (vm.activeProfile()?.role == "owner" || vm.activeProfile()?.role == "admin")
+        ) {
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = inviteEmail,
@@ -708,17 +956,22 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (vm.activeProfile()?.role == "owner") {
             OutlinedButton(
                 onClick = { confirming = CloudSyncOperation.RESET },
                 enabled = !busy,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
             ) { Text("Reset encrypted sync") }
-            OutlinedButton(
-                onClick = { confirming = CloudSyncOperation.DELETE },
-                enabled = !busy,
-                modifier = Modifier.weight(1f),
-            ) { Text("Stop syncing on this device") }
+        }
+    } else if (selectedIsLocal) {
+        Button(
+            onClick = { authorizeAndRun(CloudSyncOperation.SETUP) },
+            enabled = !busy,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(Icons.Default.Key, null)
+            Spacer(Modifier.width(8.dp))
+            Text("Enable private encrypted sync")
         }
     } else if (legacyPresent) {
         // This device still has legacy snapshot metadata: migrating is the
@@ -775,8 +1028,9 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     Spacer(Modifier.height(8.dp))
     Text("Join a shared profile", style = MaterialTheme.typography.labelLarge)
     Text(
-        "Paste a join link someone sent you. EasyBC grants access to the shared file(s), " +
-            "then gives you a response link to send back so the owner can finish adding you.",
+        "Paste a join link someone sent you. First grant access to the shared " +
+            "*.sync-kit.json file in the browser, then join here. EasyBC keeps it separate " +
+            "from every other profile on this device and saves existing local data as My data.",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -788,6 +1042,24 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
     )
+    TextButton(
+        onClick = {
+            val grantUrl = android.net.Uri.parse(joinLinkInput.trim())
+                .buildUpon()
+                .appendQueryParameter("grant-files", "1")
+                .build()
+                .toString()
+            if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
+                clipboard.setText(AnnotatedString(grantUrl))
+                vm.cloudError(
+                    "No browser was available. The file-access link was copied; paste it " +
+                        "into Chrome, select the shared sync file, then return here.",
+                )
+            }
+        },
+        enabled = !busy && joinLinkInput.isNotBlank(),
+        modifier = Modifier.fillMaxWidth(),
+    ) { Text("Grant shared file access (opens browser)") }
     OutlinedButton(
         onClick = { authorizeAndJoinLink(joinLinkInput.trim()) },
         enabled = !busy && joinLinkInput.isNotBlank(),
@@ -847,6 +1119,104 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+
+    participantRevokeConfirm?.let { target ->
+        AlertDialog(
+            onDismissRequest = { participantRevokeConfirm = null },
+            title = { Text("Remove this participant?") },
+            text = {
+                Text(
+                    "EasyBC will remove this participant from future encrypted revisions and remove " +
+                        "their direct Google Drive access to this profile file. This cannot remove " +
+                        "copies they already downloaded.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        participantRevokeConfirm = null
+                        authorizeAndRevokeParticipant(target.first, target.second)
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                ) { Text("Remove") }
+            },
+            dismissButton = {
+                TextButton(onClick = { participantRevokeConfirm = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    profileActionConfirm?.let { action ->
+        AlertDialog(
+            onDismissRequest = { profileActionConfirm = null },
+            title = {
+                Text(if (action == "disconnect") "Disconnect this profile?" else "Delete this profile?")
+            },
+            text = {
+                Text(
+                    if (action == "disconnect") {
+                        "EasyBC will keep the current data as a local-only profile on this device. " +
+                            "The encrypted cloud copy and other participants are not changed."
+                    } else {
+                        "This local-only profile will be deleted from this device. This cannot be undone."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val key = sharedState?.activeProfileKey
+                        if (action == "disconnect") {
+                            vm.disconnectActiveProfileToLocal()
+                        } else if (key != null) {
+                            val state = sharedState
+                            val fallbackEncrypted = state?.profiles?.any {
+                                com.easybc.planner.sync.shared.profileKey(
+                                    it.ownerEmail,
+                                    it.datasetId,
+                                ) != key && !com.easybc.planner.sync.shared.isLocalProfile(it)
+                            } == true && state.profiles.none {
+                                com.easybc.planner.sync.shared.profileKey(
+                                    it.ownerEmail,
+                                    it.datasetId,
+                                ) != key && com.easybc.planner.sync.shared.isLocalProfile(it)
+                            }
+                            if (!fallbackEncrypted) {
+                                vm.deleteProfile(null, key, false)
+                            } else {
+                                scope.launch {
+                                    try {
+                                        when (val step = vm.beginCloudAuthorization(activity)) {
+                                            is AuthorizationStep.Authorized ->
+                                                vm.deleteProfile(step.accessToken, key, false)
+                                            is AuthorizationStep.NeedsResolution -> {
+                                                pendingProfileDeleteKey = key
+                                                resolutionLauncher.launch(
+                                                    IntentSenderRequest.Builder(
+                                                        step.pendingIntent.intentSender,
+                                                    ).build(),
+                                                )
+                                            }
+                                        }
+                                    } catch (error: Exception) {
+                                        vm.cloudError(
+                                            error.message ?: "Google authorization failed.",
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        profileActionConfirm = null
+                    },
+                ) { Text(if (action == "disconnect") "Keep local copy" else "Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { profileActionConfirm = null }) { Text("Cancel") }
+            },
+        )
+    }
 
     confirming?.let { operation ->
         AlertDialog(

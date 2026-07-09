@@ -4,7 +4,6 @@ import android.app.Activity
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
-import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,13 +19,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.easybc.planner.notify.ReminderScheduler
 import com.easybc.planner.sync.CloudAutoSyncSession
-import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.shared.SharedSyncCoordinator
 import com.easybc.planner.sync.shared.parseSharedJoinLink
 import com.easybc.planner.ui.navigation.AppNavigation
 import com.easybc.planner.ui.theme.EasyBCTheme
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +43,7 @@ class MainActivity : ComponentActivity() {
      * things in sync across recompositions.
      */
     private val initialReconcileRequest = mutableStateOf(false)
+    private val initialSettingsRequest = mutableStateOf(false)
     private var pendingCloudAutoSyncAuthorization: CancellableContinuation<Intent?>? = null
     private val cloudAutoSyncScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -73,20 +71,24 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         initialReconcileRequest.value = shouldRouteToReconcile(intent)
+        initialSettingsRequest.value = shouldRouteToSyncSettings(intent)
+        handleSharedSyncJoinIntent(intent)
 
         setContent {
             EasyBCTheme {
                 var pendingReconcile by remember { initialReconcileRequest }
+                var pendingSettings by remember { initialSettingsRequest }
                 Surface(modifier = Modifier.fillMaxSize()) {
                     AppNavigation(
                         pendingReconcileDeepLink = pendingReconcile,
                         onReconcileDeepLinkConsumed = { pendingReconcile = false },
+                        pendingSettingsDeepLink = pendingSettings,
+                        onSettingsDeepLinkConsumed = { pendingSettings = false },
                     )
                 }
             }
         }
         cloudAutoSyncSession.start(cloudAutoSyncScope)
-        handleSharedSyncJoinIntent(intent)
     }
 
     override fun onStart() {
@@ -103,8 +105,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         if (shouldRouteToReconcile(intent)) {
             initialReconcileRequest.value = true
+        }
+        if (shouldRouteToSyncSettings(intent)) {
+            initialSettingsRequest.value = true
         }
         handleSharedSyncJoinIntent(intent)
     }
@@ -113,7 +119,10 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return
         // Grant URLs are meant for the browser's Google Picker page; if our
         // App Link captured one anyway, forward it instead of joining.
-        if (data.getQueryParameter("grant-folder") == "1") {
+        if (
+            data.getQueryParameter("grant-folder") == "1" ||
+            data.getQueryParameter("grant-files") == "1"
+        ) {
             if (com.easybc.planner.util.launchGrantInBrowser(this, data.toString())) {
                 Toast.makeText(
                     this,
@@ -135,55 +144,29 @@ class MainActivity : ComponentActivity() {
         if (!isResponseLink && !isJoinLink) {
             // Legacy exchange-file join link: leave to the Settings paste flow.
             if (parseSharedJoinLink(data) != null) {
-                com.easybc.planner.sync.shared.PendingSharedJoin.set(url)
+                com.easybc.planner.sync.shared.PendingSharedJoin.setJoinLink(this, url)
                 Toast.makeText(
                     this,
-                    "Open Settings → Encrypted Cloud Sync to finish joining.",
+                    "Join link ready in Settings → Encrypted Cloud Sync.",
                     Toast.LENGTH_LONG,
                 ).show()
             }
             return
         }
-        cloudAutoSyncScope.launch {
-            runCatching {
-                val app = application as EasyBCApp
-                val store = SyncPayloadStore(app.database)
-                val sharedSync = SharedSyncCoordinator(app, app.database, store)
-                val auth = GoogleAuthorization()
-                val token = when (val step = auth.begin(this@MainActivity)) {
-                    is com.easybc.planner.sync.AuthorizationStep.Authorized -> step.accessToken
-                    is com.easybc.planner.sync.AuthorizationStep.NeedsResolution -> {
-                        val result = resolveCloudAutoSyncAuthorization(step.pendingIntent)
-                        auth.finish(this@MainActivity, result)
-                    }
-                }
-                if (isResponseLink) {
-                    sharedSync.acceptResponseFromLink(token, url)
-                    "accept"
-                } else {
-                    com.easybc.planner.sync.shared.PendingSharedJoin.responseLink =
-                        sharedSync.joinFromLink(token, url)
-                    "join"
-                }
-            }.onSuccess { kind ->
-                Toast.makeText(
-                    this@MainActivity,
-                    if (kind == "accept") {
-                        "Recipient added. They can now sync this shared profile."
-                    } else {
-                        "Access granted. Open Settings → Encrypted Cloud Sync to copy the " +
-                            "response link to send back."
-                    },
-                    Toast.LENGTH_LONG,
-                ).show()
-            }.onFailure { error ->
-                Log.e("EasyBcSync", "Shared sync link failed", error)
-                Toast.makeText(
-                    this@MainActivity,
-                    error.message ?: "Shared sync link failed (${error.javaClass.simpleName}).",
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
+        if (isResponseLink) {
+            com.easybc.planner.sync.shared.PendingSharedJoin.setResponseToAccept(this, url)
+            Toast.makeText(
+                this,
+                "Response link ready. Review it in Settings to finish sharing.",
+                Toast.LENGTH_LONG,
+            ).show()
+        } else {
+            com.easybc.planner.sync.shared.PendingSharedJoin.setJoinLink(this, url)
+            Toast.makeText(
+                this,
+                "Join link ready. Grant file access, then join from Settings.",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
@@ -196,6 +179,13 @@ class MainActivity : ComponentActivity() {
 
     private fun shouldRouteToReconcile(intent: Intent?): Boolean =
         intent?.getBooleanExtra(ReminderScheduler.EXTRA_OPEN_RECONCILE, false) == true
+
+    private fun shouldRouteToSyncSettings(intent: Intent?): Boolean {
+        val data = intent?.data ?: return false
+        return data.getQueryParameter("sk-inv") != null ||
+            data.getQueryParameter("sk-resp") == "1" ||
+            parseSharedJoinLink(data) != null
+    }
 
     private suspend fun resolveCloudAutoSyncAuthorization(pendingIntent: PendingIntent): Intent? =
         suspendCancellableCoroutine { continuation ->

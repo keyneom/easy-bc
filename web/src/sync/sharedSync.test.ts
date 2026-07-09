@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { sharedSyncConfigFromEnv } from "./sharedSync";
+import { assertAcceptedDatasetResults, sharedSyncConfigFromEnv } from "./sharedSync";
 
 describe("sharedSyncConfigFromEnv", () => {
   afterEach(() => {
@@ -19,5 +19,21 @@ describe("sharedSyncConfigFromEnv", () => {
       googleAudience: "123.apps.googleusercontent.com",
       allowedOrigins: [],
     });
+  });
+});
+
+describe("assertAcceptedDatasetResults", () => {
+  it("keeps a pending invite retryable when any dataset failed", () => {
+    expect(() =>
+      assertAcceptedDatasetResults([
+        { datasetId: "primary", status: "failed", error: new Error("Drive write failed") },
+      ]),
+    ).toThrow(/primary: Drive write failed/);
+  });
+
+  it("accepts an all-success result", () => {
+    expect(() =>
+      assertAcceptedDatasetResults([{ datasetId: "primary", status: "accepted" }]),
+    ).not.toThrow();
   });
 });

@@ -14,6 +14,8 @@ import {
   buildSharingJoinLinkV1,
   buildSharingResponseLinkV1,
   createSharingChangeDetectorFromTransport,
+  sharedBackupParticipants,
+  type SharedBackupParticipantV1,
   type SharingChangeDetector,
   type SharingDatasetFileV1,
   type SharingInvitationV1,
@@ -54,7 +56,11 @@ import {
   canPublishRole,
   EASY_BC_APP_ID,
   findProfile,
+  hasMeaningfulSharedData,
+  isEncryptedProfile,
+  isLocalProfile,
   PRIMARY_DATASET_ID,
+  shouldLoadRemoteBeforePublish,
   type ProfileRecord,
   type SharedSyncPayloadV1,
   type SharedSyncState,
@@ -88,6 +94,7 @@ let cachedState: SharedSyncState | null = null;
 let operationQueue: Promise<unknown> = Promise.resolve();
 let activeOperationCount = 0;
 const tokenExpiresAtByProfile = new Map<string, number>();
+const LOCAL_PROFILE_PAYLOAD_PREFIX = "profilePayload:";
 
 const GOOGLE_SCOPES = `${GOOGLE_DRIVE_FILE_SCOPE} ${GOOGLE_DRIVE_APPDATA_SCOPE}`;
 const sharedAuthCache = new IndexedDbAuthorizationCache({
@@ -204,6 +211,66 @@ async function getCachedState(): Promise<SharedSyncState | null> {
   return cachedState ?? refreshCachedState();
 }
 
+function localProfilePayloadKey(profileKeyValue: string): string {
+  return `${LOCAL_PROFILE_PAYLOAD_PREFIX}${profileKeyValue}`;
+}
+
+async function saveLocalProfilePayload(
+  profileKeyValue: string,
+  payload: SharedSyncPayloadV1,
+): Promise<void> {
+  await idbSet(localProfilePayloadKey(profileKeyValue), payload);
+}
+
+async function loadLocalProfilePayload(
+  profileKeyValue: string,
+): Promise<SharedSyncPayloadV1> {
+  return (
+    (await idbGet<SharedSyncPayloadV1>(localProfilePayloadKey(profileKeyValue))) ??
+    createEmptySharedSyncPayload()
+  );
+}
+
+function newLocalProfile(displayName: string): { key: string; profile: ProfileRecord } {
+  const id = crypto.randomUUID();
+  const ownerEmail = `local-${id}`;
+  const datasetId = "profile";
+  return {
+    key: profileKey(ownerEmail, datasetId),
+    profile: {
+      datasetId,
+      ownerEmail,
+      folderName: "",
+      displayName: displayName.trim() || "My data",
+      role: "owner",
+      trustedOwnerKeyId: "",
+      syncMode: "local",
+    },
+  };
+}
+
+export async function ensureProfileState(
+  rpId: string,
+  local: SharedSyncPayloadV1,
+): Promise<SharedSyncState> {
+  const existing = await getCachedState();
+  if (existing) return existing;
+  const created = newLocalProfile("My data");
+  const state: SharedSyncState = {
+    schemaVersion: 1,
+    rpId,
+    ownerEmail: created.profile.ownerEmail,
+    activeProfileKey: created.key,
+    profiles: [created.profile],
+  };
+  cachedState = state;
+  await Promise.all([
+    saveSharedSyncState(state),
+    saveLocalProfilePayload(created.key, local),
+  ]);
+  return state;
+}
+
 function profileForActive(state: SharedSyncState): ProfileRecord {
   const profile = findProfile(state, state.activeProfileKey);
   if (!profile) throw new Error("The active encrypted sync profile is missing.");
@@ -302,6 +369,38 @@ function buildController(
   });
 }
 
+function createRuntimeForProfile(
+  config: SharedSyncConfig,
+  state: SharedSyncState,
+  profileKeyValue: string,
+  local: SharedSyncPayloadV1,
+): Runtime {
+  const profile = findProfile(state, profileKeyValue);
+  if (!profile) throw new Error("The encrypted sync profile is missing.");
+  const { authorizationProvider, googleIdentity } = createProviders(
+    config,
+    profileKeyValue,
+  );
+  const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+    authorizationProvider.authorize(),
+  );
+  return {
+    config,
+    state,
+    local,
+    identityProvider,
+    authorizationProvider,
+    controller: buildController(
+      state,
+      profile,
+      config,
+      identityProvider,
+      authorizationProvider,
+      googleIdentity,
+    ),
+  };
+}
+
 async function ensureRuntime(
   config: SharedSyncConfig,
   local: SharedSyncPayloadV1,
@@ -318,29 +417,7 @@ async function ensureRuntime(
     return runtime;
   }
   disposeRuntime();
-  const profile = profileForActive(state);
-  const { authorizationProvider, googleIdentity } = createProviders(
-    config,
-    state.activeProfileKey,
-  );
-  const identityProvider = createSharingIdentityProvider(config.rpId, () =>
-    authorizationProvider.authorize(),
-  );
-  runtime = {
-    config,
-    state,
-    local,
-    identityProvider,
-    authorizationProvider,
-    controller: buildController(
-      state,
-      profile,
-      config,
-      identityProvider,
-      authorizationProvider,
-      googleIdentity,
-    ),
-  };
+  runtime = createRuntimeForProfile(config, state, state.activeProfileKey, local);
   return runtime;
 }
 
@@ -355,63 +432,57 @@ export async function resetSharedSync(
 ): Promise<{ state: SharedSyncState; result: SharedSyncRunResult }> {
   return serialized(async () => {
     disposeRuntime();
-    const bootstrapProfileId = "__easybc-bootstrap__";
-    const bootstrap = createProviders(config, bootstrapProfileId);
-    const authorization = await authorizeAndRemember(
-      bootstrap.authorizationProvider,
-      bootstrapProfileId,
-    );
-    const ownerEmail = await fetchGoogleAccountEmail(authorization.accessToken);
-    const activeProfileId = profileKey(ownerEmail, PRIMARY_DATASET_ID);
-    const { authorizationProvider, googleIdentity } =
-      activeProfileId === bootstrapProfileId
-        ? bootstrap
-        : createProviders(config, activeProfileId);
-    if (activeProfileId !== bootstrapProfileId) {
-      await sharedAuthCache.save({
-        profileId: activeProfileId,
-        accessToken: authorization.accessToken,
-        expiresAt: authorization.expiresAt ?? Date.now() + 3_600_000,
-      });
-      rememberTokenExpiry(activeProfileId, authorization.expiresAt);
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = profileForActive(state);
+    if (isLocalProfile(profile) || profile.role !== "owner") {
+      throw new Error("Only an owned encrypted profile can be reset.");
     }
+    const { authorizationProvider, googleIdentity } = createProviders(
+      config,
+      state.activeProfileKey,
+    );
     const identityProvider = createSharingIdentityProvider(config.rpId, () =>
       authorizationProvider.authorize(),
     );
-    await identityProvider.getOrCreate();
-    const identity = await identityProvider.get();
-    const provisional: SharedSyncState = {
-      schemaVersion: 1,
-      rpId: config.rpId,
-      ownerEmail,
-      activeProfileKey: profileKey(ownerEmail, PRIMARY_DATASET_ID),
-      profiles: [
-        {
-          datasetId: PRIMARY_DATASET_ID,
-          ownerEmail,
-          folderName: easyBcSyncFolderName(ownerEmail),
-          role: "owner",
-          trustedOwnerKeyId: identity.publicKey.keyId,
-        },
-      ],
-    };
+    const controller = buildController(
+      state,
+      profile,
+      config,
+      identityProvider,
+      authorizationProvider,
+      googleIdentity,
+    );
     try {
-      const controller = buildController(
-        provisional,
-        provisional.profiles[0],
-        config,
-        identityProvider,
-        authorizationProvider,
-        googleIdentity,
-      );
-      for (const dataset of await controller.listDatasets()) {
-        await controller.deleteDataset(dataset.datasetId).catch(() => undefined);
-      }
-    } catch {
-      // Best-effort Drive cleanup; setup recreates from local data.
+      await controller.deleteDataset(profile.datasetId);
+      const created = await controller.createDataset(profile.datasetId, local);
+      const syncedAt = new Date().toISOString();
+      const nextProfile: ProfileRecord = {
+        ...profile,
+        fileId: created.fileId,
+        lastRevisionId: created.revisionId,
+        lastSyncedAt: syncedAt,
+        participantPermissionIds: {},
+        participantEmails: {},
+        needsInitialLoad: false,
+      };
+      const refreshed = (await refreshCachedState()) ?? state;
+      const nextState = upsertProfile(refreshed, nextProfile);
+      cachedState = nextState;
+      await saveSharedSyncState(nextState);
+      return {
+        state: nextState,
+        result: {
+          payload: created.value,
+          syncedAt,
+          revisionId: created.revisionId,
+          profileKey: state.activeProfileKey,
+        },
+      };
+    } finally {
+      identityProvider.clear();
+      disposeRuntime();
     }
-    await forgetSharedSync();
-    return setupSharedSync(config, local);
   });
 }
 
@@ -448,27 +519,39 @@ export async function setupSharedSync(
     );
     await identityProvider.getOrCreate();
     const identity = await identityProvider.get();
+    const activeBeforeSetup = previousState
+      ? findProfile(previousState, previousState.activeProfileKey)
+      : undefined;
+    const preservedLocalProfiles =
+      previousState?.profiles.filter(
+        (profile) =>
+          isLocalProfile(profile) &&
+          profileKey(profile.ownerEmail, profile.datasetId) !== previousState.activeProfileKey,
+      ) ?? [];
+    const connectedProfile: ProfileRecord = {
+      datasetId: PRIMARY_DATASET_ID,
+      ownerEmail,
+      folderName,
+      ...(activeBeforeSetup?.displayName
+        ? { displayName: activeBeforeSetup.displayName }
+        : {}),
+      role: "owner",
+      trustedOwnerKeyId: identity.publicKey.keyId,
+      syncMode: "encrypted",
+    };
     const provisional: SharedSyncState = {
       schemaVersion: 1,
       rpId: config.rpId,
       ownerEmail,
       activeProfileKey: profileKey(ownerEmail, PRIMARY_DATASET_ID),
-      profiles: [
-        {
-          datasetId: PRIMARY_DATASET_ID,
-          ownerEmail,
-          folderName,
-          role: "owner",
-          trustedOwnerKeyId: identity.publicKey.keyId,
-        },
-      ],
+      profiles: [...preservedLocalProfiles, connectedProfile],
     };
     try {
       cachedState = provisional;
       await saveSharedSyncState(provisional);
       const controller = buildController(
         provisional,
-        provisional.profiles[0],
+        connectedProfile,
         config,
         identityProvider,
         authorizationProvider,
@@ -496,7 +579,7 @@ export async function setupSharedSync(
             return controller.syncDataset(PRIMARY_DATASET_ID, local);
           })()
         : await controller.createDataset(PRIMARY_DATASET_ID, local);
-      const nextState = createInitialSharedSyncState({
+      const encryptedState = createInitialSharedSyncState({
         rpId: config.rpId,
         ownerEmail,
         folderName,
@@ -505,8 +588,23 @@ export async function setupSharedSync(
         fileId: created.fileId,
         lastRevisionId: created.revisionId,
       });
-      cachedState = nextState;
+      const nextState: SharedSyncState = {
+        ...encryptedState,
+        profiles: [
+          ...preservedLocalProfiles,
+          {
+            ...encryptedState.profiles[0],
+            ...(connectedProfile.displayName
+              ? { displayName: connectedProfile.displayName }
+              : {}),
+            syncMode: "encrypted",
+          },
+        ],
+      };
       await saveSharedSyncState(nextState);
+      if (activeBeforeSetup && isLocalProfile(activeBeforeSetup)) {
+        await idbDelete(localProfilePayloadKey(previousState!.activeProfileKey));
+      }
       runtime = {
         config,
         state: nextState,
@@ -545,21 +643,18 @@ export async function syncActiveDataset(
   return serialized(async () => {
     const active = await ensureRuntime(config, local);
     const profile = profileForActive(active.state);
-    if (!canPublishRole(profile.role)) {
-      const loaded = await active.controller.loadDataset(profile.datasetId);
-      return {
-        payload: loaded.value,
-        syncedAt: new Date().toISOString(),
-        revisionId: loaded.revisionId,
-        profileKey: active.state.activeProfileKey,
-      };
+    if (isLocalProfile(profile)) {
+      throw new Error("This profile is local only. Connect encrypted sync before syncing it.");
     }
-    const result = await active.controller.syncDataset(profile.datasetId, local);
+    const result = shouldLoadRemoteBeforePublish(profile)
+      ? await active.controller.loadDataset(profile.datasetId)
+      : await active.controller.syncDataset(profile.datasetId, local);
     const updatedProfile: ProfileRecord = {
       ...profile,
       fileId: result.fileId,
       lastRevisionId: result.revisionId,
       lastSyncedAt: new Date().toISOString(),
+      needsInitialLoad: false,
     };
     const nextState = upsertProfile(active.state, updatedProfile);
     cachedState = nextState;
@@ -581,6 +676,9 @@ export async function loadActiveProfileDataset(
     const state = await getCachedState();
     if (!state) throw new Error("Encrypted sync is not set up on this device.");
     const profile = profileForActive(state);
+    if (isLocalProfile(profile)) {
+      throw new Error("This profile is stored only on this device.");
+    }
     const active = await ensureRuntime(config, {} as SharedSyncPayloadV1);
     const loaded = await active.controller.loadDataset(profile.datasetId);
     const updatedProfile: ProfileRecord = {
@@ -588,6 +686,7 @@ export async function loadActiveProfileDataset(
       fileId: loaded.fileId,
       lastRevisionId: loaded.revisionId,
       lastSyncedAt: new Date().toISOString(),
+      needsInitialLoad: false,
     };
     const nextState = upsertProfile(state, updatedProfile);
     cachedState = nextState;
@@ -613,6 +712,358 @@ export async function setActiveProfileKey(profileKeyValue: string): Promise<Shar
   await clearSharingSyncCheckpoint();
   disposeRuntime();
   return next;
+}
+
+export type ManagedProfileResult = {
+  state: SharedSyncState;
+  payload: SharedSyncPayloadV1;
+};
+
+async function preserveCurrentProfile(
+  config: SharedSyncConfig | null,
+  state: SharedSyncState,
+  local: SharedSyncPayloadV1,
+): Promise<SharedSyncState> {
+  const current = profileForActive(state);
+  if (isLocalProfile(current)) {
+    await saveLocalProfilePayload(state.activeProfileKey, local);
+    return state;
+  }
+  if (!current.fileId || !canPublishRole(current.role) || current.needsInitialLoad) {
+    return state;
+  }
+  if (!config) {
+    throw new Error("Encrypted sync authorization is required before leaving this profile.");
+  }
+  const currentRuntime = createRuntimeForProfile(
+    config,
+    state,
+    state.activeProfileKey,
+    local,
+  );
+  try {
+    await currentRuntime.controller.syncDataset(current.datasetId, local);
+    return (await refreshCachedState()) ?? state;
+  } finally {
+    currentRuntime.identityProvider.clear();
+  }
+}
+
+export async function switchManagedProfile(
+  config: SharedSyncConfig | null,
+  profileKeyValue: string,
+  local: SharedSyncPayloadV1,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    disposeRuntime();
+    let state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const requestedTarget = findProfile(state, profileKeyValue);
+    if (!requestedTarget) {
+      throw new Error("That profile is not available on this device.");
+    }
+    if (isEncryptedProfile(requestedTarget) && !config) {
+      throw new Error("Encrypted sync is not configured in this build.");
+    }
+    const previousProfileKey = state.activeProfileKey;
+    state = await preserveCurrentProfile(config, state, local);
+    state = { ...state, activeProfileKey: profileKeyValue };
+    cachedState = state;
+    await saveSharedSyncState(state);
+    await clearSharingSyncCheckpoint();
+
+    const target = findProfile(state, profileKeyValue)!;
+    if (isLocalProfile(target)) {
+      disposeRuntime();
+      return {
+        state,
+        payload: await loadLocalProfilePayload(profileKeyValue),
+      };
+    }
+    const targetRuntime = createRuntimeForProfile(
+      config!,
+      state,
+      profileKeyValue,
+      createEmptySharedSyncPayload(),
+    );
+    try {
+      const loaded = await targetRuntime.controller.loadDataset(target.datasetId);
+      const nextProfile: ProfileRecord = {
+        ...target,
+        fileId: loaded.fileId,
+        lastRevisionId: loaded.revisionId,
+        lastSyncedAt: new Date().toISOString(),
+        needsInitialLoad: false,
+      };
+      state = upsertProfile((await refreshCachedState()) ?? state, nextProfile);
+      cachedState = state;
+      await saveSharedSyncState(state);
+      return { state, payload: loaded.value };
+    } catch (error) {
+      const rollback = { ...state, activeProfileKey: previousProfileKey };
+      cachedState = rollback;
+      await saveSharedSyncState(rollback);
+      throw error;
+    } finally {
+      targetRuntime.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
+export async function createLocalProfile(
+  config: SharedSyncConfig | null,
+  displayName: string,
+  local: SharedSyncPayloadV1,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    const trimmed = displayName.trim();
+    if (!trimmed) throw new Error("Enter a profile name.");
+    let state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    state = await preserveCurrentProfile(config, state, local);
+    const created = newLocalProfile(trimmed);
+    state = {
+      ...state,
+      activeProfileKey: created.key,
+      profiles: [...state.profiles, created.profile],
+    };
+    const payload = createEmptySharedSyncPayload();
+    cachedState = state;
+    await Promise.all([
+      saveSharedSyncState(state),
+      saveLocalProfilePayload(created.key, payload),
+      clearSharingSyncCheckpoint(),
+    ]);
+    disposeRuntime();
+    return { state, payload };
+  });
+}
+
+export async function renameManagedProfile(
+  profileKeyValue: string,
+  displayName: string,
+): Promise<SharedSyncState> {
+  return serialized(async () => {
+    const trimmed = displayName.trim();
+    if (!trimmed) throw new Error("Enter a profile name.");
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = findProfile(state, profileKeyValue);
+    if (!profile) throw new Error("That profile is not available on this device.");
+    const next = upsertProfile(state, { ...profile, displayName: trimmed });
+    cachedState = next;
+    await saveSharedSyncState(next);
+    return next;
+  });
+}
+
+export async function disconnectProfileToLocal(
+  profileKeyValue: string,
+  local: SharedSyncPayloadV1,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    if (state.activeProfileKey !== profileKeyValue) {
+      throw new Error("Switch to this profile before keeping a local copy.");
+    }
+    const profile = findProfile(state, profileKeyValue);
+    if (!profile || isLocalProfile(profile)) {
+      throw new Error("This profile is already local only.");
+    }
+    const created = newLocalProfile(profile.displayName || "Local copy");
+    const next: SharedSyncState = {
+      ...state,
+      activeProfileKey: created.key,
+      profiles: state.profiles.filter(
+        (entry) => profileKey(entry.ownerEmail, entry.datasetId) !== profileKeyValue,
+      ).concat(created.profile),
+    };
+    cachedState = next;
+    await Promise.all([
+      saveSharedSyncState(next),
+      saveLocalProfilePayload(created.key, local),
+      sharedAuthCache.delete(profileKeyValue),
+      clearSharingSyncCheckpoint(),
+    ]);
+    disposeRuntime();
+    return { state: next, payload: local };
+  });
+}
+
+export async function deleteManagedProfile(
+  config: SharedSyncConfig | null,
+  profileKeyValue: string,
+  local: SharedSyncPayloadV1,
+  deleteEverywhere: boolean,
+): Promise<ManagedProfileResult> {
+  let state = await getCachedState();
+  if (!state) throw new Error("No profile registry is available on this device.");
+  if (state.profiles.length <= 1) {
+    throw new Error("Create or join another profile before deleting the only profile.");
+  }
+  let payload = local;
+  if (state.activeProfileKey === profileKeyValue) {
+    const fallback = state.profiles.find(
+      (profile) => profileKey(profile.ownerEmail, profile.datasetId) !== profileKeyValue,
+    )!;
+    const switched = await switchManagedProfile(
+      config,
+      profileKey(fallback.ownerEmail, fallback.datasetId),
+      local,
+    );
+    state = switched.state;
+    payload = switched.payload;
+  }
+  return serialized(async () => {
+    const profile = findProfile(state!, profileKeyValue);
+    if (!profile) throw new Error("That profile is not available on this device.");
+    if (deleteEverywhere) {
+      if (!config || isLocalProfile(profile) || profile.role !== "owner") {
+        throw new Error("Only the owner can delete an encrypted profile everywhere.");
+      }
+      const deletionRuntime = createRuntimeForProfile(
+        config,
+        state!,
+        profileKeyValue,
+        createEmptySharedSyncPayload(),
+      );
+      try {
+        await deletionRuntime.controller.deleteDataset(profile.datasetId);
+      } finally {
+        deletionRuntime.identityProvider.clear();
+      }
+    }
+    const next = {
+      ...state!,
+      profiles: state!.profiles.filter(
+        (entry) => profileKey(entry.ownerEmail, entry.datasetId) !== profileKeyValue,
+      ),
+    };
+    cachedState = next;
+    await Promise.all([
+      saveSharedSyncState(next),
+      idbDelete(localProfilePayloadKey(profileKeyValue)),
+      sharedAuthCache.delete(profileKeyValue),
+    ]);
+    disposeRuntime();
+    return { state: next, payload };
+  });
+}
+
+export type ManagedParticipant = {
+  keyId: string;
+  role: SharedBackupParticipantV1["role"];
+  emailAddress?: string;
+  isCurrentDevice: boolean;
+};
+
+export async function listProfileParticipants(
+  config: SharedSyncConfig,
+  profileKeyValue: string,
+): Promise<ManagedParticipant[]> {
+  const state = await getCachedState();
+  if (!state) return [];
+  const profile = findProfile(state, profileKeyValue);
+  if (!profile?.fileId || isLocalProfile(profile)) return [];
+  const providers = createProviders(config, profileKeyValue);
+  const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+    providers.authorizationProvider.authorize(),
+  );
+  try {
+    const [stored, identity] = await Promise.all([
+      buildTransport(state, profile, providers.authorizationProvider).readDataset(profile.fileId),
+      identityProvider.getOrCreate(),
+    ]);
+    return sharedBackupParticipants(stored.envelope).map((participant) => ({
+      keyId: participant.keyId,
+      role: participant.role,
+      ...(profile.participantEmails?.[participant.keyId]
+        ? { emailAddress: profile.participantEmails[participant.keyId] }
+        : {}),
+      isCurrentDevice: participant.keyId === identity.publicKey.keyId,
+    }));
+  } finally {
+    identityProvider.clear();
+  }
+}
+
+export async function updateParticipantRole(
+  config: SharedSyncConfig,
+  input: {
+    profileKey: string;
+    keyId: string;
+    emailAddress: string;
+    role: Exclude<SharingRole, "owner">;
+  },
+): Promise<SharedSyncState> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = findProfile(state, input.profileKey);
+    if (!profile || isLocalProfile(profile)) throw new Error("That encrypted profile is missing.");
+    const scoped = createRuntimeForProfile(config, state, input.profileKey, createEmptySharedSyncPayload());
+    try {
+      await scoped.controller.setDatasetRole({
+        datasetId: profile.datasetId,
+        keyId: input.keyId,
+        role: input.role,
+        emailAddress: input.emailAddress,
+      });
+      const refreshed = (await refreshCachedState()) ?? state;
+      const current = findProfile(refreshed, input.profileKey) ?? profile;
+      const next = upsertProfile(refreshed, {
+        ...current,
+        participantEmails: {
+          ...current.participantEmails,
+          [input.keyId]: input.emailAddress,
+        },
+      });
+      cachedState = next;
+      await saveSharedSyncState(next);
+      return next;
+    } finally {
+      scoped.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
+export async function revokeParticipant(
+  config: SharedSyncConfig,
+  profileKeyValue: string,
+  keyId: string,
+): Promise<SharedSyncState> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = findProfile(state, profileKeyValue);
+    if (!profile || isLocalProfile(profile)) throw new Error("That encrypted profile is missing.");
+    const scoped = createRuntimeForProfile(config, state, profileKeyValue, createEmptySharedSyncPayload());
+    try {
+      const revokeInput: Parameters<typeof scoped.controller.revokeDatasetKey>[0] & {
+        emailAddress?: string;
+      } = {
+        datasetId: profile.datasetId,
+        keyId,
+      };
+      const emailAddress = profile.participantEmails?.[keyId]?.trim();
+      if (emailAddress) revokeInput.emailAddress = emailAddress;
+      await scoped.controller.revokeDatasetKey(revokeInput);
+      const refreshed = (await refreshCachedState()) ?? state;
+      const current = findProfile(refreshed, profileKeyValue) ?? profile;
+      const participantEmails = { ...current.participantEmails };
+      delete participantEmails[keyId];
+      const next = upsertProfile(refreshed, { ...current, participantEmails });
+      cachedState = next;
+      await saveSharedSyncState(next);
+      return next;
+    } finally {
+      scoped.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
 }
 
 export async function createOwnedProfile(
@@ -677,6 +1128,86 @@ export async function createOwnedProfile(
   });
 }
 
+export async function connectActiveLocalProfile(
+  config: SharedSyncConfig,
+  local: SharedSyncPayloadV1,
+): Promise<{ state: SharedSyncState; result: SharedSyncRunResult }> {
+  const state = await getCachedState();
+  if (!state) throw new Error("No profile registry is available on this device.");
+  const active = profileForActive(state);
+  if (!isLocalProfile(active)) {
+    throw new Error("This profile already uses encrypted sync.");
+  }
+  const primary = findOwnedPrimaryProfile(state);
+  if (!primary?.appFolderId) {
+    return setupSharedSync(config, local);
+  }
+  return serialized(async () => {
+    disposeRuntime();
+    const displayName = active.displayName?.trim() || "Profile";
+    const datasetId = uniqueOwnedDatasetId(displayName, state.ownerEmail, state.profiles);
+    const primaryKey = profileKey(primary.ownerEmail, primary.datasetId);
+    const { authorizationProvider, googleIdentity } = createProviders(config, primaryKey);
+    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+      authorizationProvider.authorize(),
+    );
+    const controller = buildController(
+      state,
+      primary,
+      config,
+      identityProvider,
+      authorizationProvider,
+      googleIdentity,
+    );
+    try {
+      const created = await controller.createDataset(datasetId, local);
+      const syncedAt = new Date().toISOString();
+      const connected: ProfileRecord = {
+        datasetId,
+        ownerEmail: state.ownerEmail,
+        folderName: primary.folderName,
+        displayName,
+        role: "owner",
+        trustedOwnerKeyId: primary.trustedOwnerKeyId,
+        appFolderId: primary.appFolderId,
+        fileId: created.fileId,
+        lastRevisionId: created.revisionId,
+        lastSyncedAt: syncedAt,
+        syncMode: "encrypted",
+      };
+      const connectedKey = profileKey(connected.ownerEmail, connected.datasetId);
+      const next: SharedSyncState = {
+        ...state,
+        activeProfileKey: connectedKey,
+        profiles: state.profiles
+          .filter(
+            (profile) =>
+              profileKey(profile.ownerEmail, profile.datasetId) !== state.activeProfileKey,
+          )
+          .concat(connected),
+      };
+      cachedState = next;
+      await Promise.all([
+        saveSharedSyncState(next),
+        idbDelete(localProfilePayloadKey(state.activeProfileKey)),
+        clearSharingSyncCheckpoint(),
+      ]);
+      return {
+        state: next,
+        result: {
+          payload: created.value,
+          syncedAt,
+          revisionId: created.revisionId,
+          profileKey: connectedKey,
+        },
+      };
+    } finally {
+      identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
 export async function inviteToDataset(
   config: SharedSyncConfig,
   input: {
@@ -722,6 +1253,7 @@ const pendingInviteKey = (exchangeId: string) => `sharing-pending-invite-${excha
 type PendingInvite = {
   invitation: SharingInvitationV1;
   recipientEmail: string;
+  profileKey?: string;
 };
 
 /**
@@ -742,7 +1274,11 @@ export async function inviteToDatasetLink(
     const state = await getCachedState();
     if (!state) throw new Error("Encrypted sync is not set up on this device.");
     const active = await ensureRuntime(config, {} as SharedSyncPayloadV1);
-    const datasetId = input.datasetId ?? PRIMARY_DATASET_ID;
+    const activeProfile = profileForActive(state);
+    const datasetId = input.datasetId ?? activeProfile.datasetId;
+    if (datasetId !== activeProfile.datasetId) {
+      throw new Error("Switch to the profile you want to share before inviting someone.");
+    }
     const invited = await active.controller.inviteParticipantForLink({
       emailAddress: input.emailAddress,
       requestedGrants: [{ datasetId, role: input.role }],
@@ -750,6 +1286,7 @@ export async function inviteToDatasetLink(
     await idbSet(pendingInviteKey(invited.invitation.exchangeId), {
       invitation: invited.invitation,
       recipientEmail: input.emailAddress,
+      profileKey: state.activeProfileKey,
     } satisfies PendingInvite);
     const landingUrl =
       typeof window !== "undefined"
@@ -762,7 +1299,7 @@ export async function inviteToDatasetLink(
     });
     // sync-kit sharing is email-agnostic; carry the owner email (app param) so
     // the joiner can label the profile.
-    const joinLink = `${baseLink}&owner=${encodeURIComponent(state.ownerEmail)}`;
+    const joinLink = `${baseLink}&owner=${encodeURIComponent(activeProfile.ownerEmail)}`;
     return { joinLink, exchangeId: invited.invitation.exchangeId };
   });
 }
@@ -778,10 +1315,47 @@ export async function submitJoinFromLink(
     invitation: SharingInvitationV1;
     files: SharingDatasetFileV1[];
     ownerEmail: string;
+    local: SharedSyncPayloadV1;
   },
-): Promise<{ responseLink: string }> {
+): Promise<{
+  responseLink: string;
+  state: SharedSyncState;
+  initialPayload: SharedSyncPayloadV1;
+}> {
+  let createdOwnedProfile = false;
+  if (!(await getCachedState()) && hasMeaningfulSharedData(input.local)) {
+    await setupSharedSync(config, input.local);
+    createdOwnedProfile = true;
+  }
   return serialized(async () => {
     disposeRuntime();
+    let previousState = await getCachedState();
+    if (previousState && !createdOwnedProfile) {
+      const currentProfile = profileForActive(previousState);
+      if (isLocalProfile(currentProfile)) {
+        await saveLocalProfilePayload(previousState.activeProfileKey, input.local);
+      } else if (
+        currentProfile.fileId &&
+        canPublishRole(currentProfile.role) &&
+        !currentProfile.needsInitialLoad
+      ) {
+        const preservationRuntime = createRuntimeForProfile(
+          config,
+          previousState,
+          previousState.activeProfileKey,
+          input.local,
+        );
+        try {
+          await preservationRuntime.controller.syncDataset(
+            currentProfile.datasetId,
+            input.local,
+          );
+          previousState = (await refreshCachedState()) ?? previousState;
+        } finally {
+          preservationRuntime.identityProvider.clear();
+        }
+      }
+    }
     const bootstrapProfileId = "__easybc-bootstrap__";
     const bootstrap = createProviders(config, bootstrapProfileId);
     const authorization = await authorizeAndRemember(
@@ -789,7 +1363,8 @@ export async function submitJoinFromLink(
       bootstrapProfileId,
     );
     // Grant the app drive.file access to the shared dataset file(s).
-    await pickSharedDatasetFiles(authorization);
+    await pickSharedDatasetFiles(authorization, input.files);
+    const selfEmail = await fetchGoogleAccountEmail(authorization.accessToken);
 
     const folderName = easyBcSyncFolderName(input.ownerEmail);
     const grant = input.invitation.requestedGrants[0];
@@ -800,6 +1375,7 @@ export async function submitJoinFromLink(
       appFolderId: input.invitation.appFolderId,
       role: grant?.role ?? "viewer",
       trustedOwnerKeyId: input.invitation.trustedOwnerKeyId,
+      needsInitialLoad: true,
     };
     const profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId);
     const { authorizationProvider, googleIdentity } = createProviders(config, profileKeyValue);
@@ -809,19 +1385,18 @@ export async function submitJoinFromLink(
       expiresAt: authorization.expiresAt ?? Date.now() + 3_600_000,
     });
     rememberTokenExpiry(profileKeyValue, authorization.expiresAt);
-    let state = await getCachedState();
-    state = {
+    let state: SharedSyncState = {
       schemaVersion: 1,
       rpId: config.rpId,
-      ownerEmail: state?.ownerEmail ?? input.ownerEmail,
-      ...(state ?? {}),
+      ownerEmail: previousState?.ownerEmail ?? selfEmail,
+      ...(previousState ?? {}),
       selectedAppFolderId: input.invitation.appFolderId,
       activeProfileKey: profileKeyValue,
       profiles: upsertProfile(
-        state ?? {
+        previousState ?? {
           schemaVersion: 1,
           rpId: config.rpId,
-          ownerEmail: input.ownerEmail,
+          ownerEmail: selfEmail,
           activeProfileKey: profileKeyValue,
           profiles: [],
         },
@@ -830,35 +1405,68 @@ export async function submitJoinFromLink(
     };
     cachedState = state;
     await saveSharedSyncState(state);
-    const identityProvider = createSharingIdentityProvider(config.rpId, () =>
-      authorizationProvider.authorize(),
+    try {
+      const identityProvider = createSharingIdentityProvider(config.rpId, () =>
+        authorizationProvider.authorize(),
+      );
+      await identityProvider.getOrCreate();
+      const controller = buildController(
+        state,
+        joinProfile,
+        config,
+        identityProvider,
+        authorizationProvider,
+        googleIdentity,
+      );
+      const response = await controller.submitKeyResponseFromInvitation(
+        input.invitation,
+        input.files,
+      );
+      state = (await refreshCachedState()) ?? state;
+      runtime = {
+        config,
+        state,
+        local: {} as SharedSyncPayloadV1,
+        identityProvider,
+        authorizationProvider,
+        controller,
+      };
+      const landingUrl =
+        typeof window !== "undefined"
+          ? `${window.location.origin}${window.location.pathname}`
+          : "https://keyneom.github.io/easy-bc/";
+      return {
+        responseLink: buildSharingResponseLinkV1({ landingUrl, response }),
+        state,
+        initialPayload: createEmptySharedSyncPayload(),
+      };
+    } catch (error) {
+      if (previousState) {
+        cachedState = previousState;
+        await saveSharedSyncState(previousState);
+      } else {
+        cachedState = null;
+        await forgetSharedSyncState();
+      }
+      disposeRuntime();
+      throw error;
+    }
+  });
+}
+
+export async function grantSharedDatasetFilesFromLink(
+  config: SharedSyncConfig,
+  files: SharingDatasetFileV1[],
+): Promise<void> {
+  return serialized(async () => {
+    disposeRuntime();
+    const bootstrapProfileId = "__easybc-bootstrap__";
+    const bootstrap = createProviders(config, bootstrapProfileId);
+    const authorization = await authorizeAndRemember(
+      bootstrap.authorizationProvider,
+      bootstrapProfileId,
     );
-    await identityProvider.getOrCreate();
-    const controller = buildController(
-      state,
-      joinProfile,
-      config,
-      identityProvider,
-      authorizationProvider,
-      googleIdentity,
-    );
-    const response = await controller.submitKeyResponseFromInvitation(
-      input.invitation,
-      input.files,
-    );
-    runtime = {
-      config,
-      state,
-      local: {} as SharedSyncPayloadV1,
-      identityProvider,
-      authorizationProvider,
-      controller,
-    };
-    const landingUrl =
-      typeof window !== "undefined"
-        ? `${window.location.origin}${window.location.pathname}`
-        : "https://keyneom.github.io/easy-bc/";
-    return { responseLink: buildSharingResponseLinkV1({ landingUrl, response }) };
+    await pickSharedDatasetFiles(authorization, files);
   });
 }
 
@@ -872,7 +1480,6 @@ export async function acceptResponseFromLink(
   input: { response: SharingPublicKeyResponseV1 },
 ): Promise<void> {
   return serialized(async () => {
-    const active = await ensureRuntime(config, {} as SharedSyncPayloadV1);
     const pending = await idbGet<PendingInvite>(
       pendingInviteKey(input.response.exchangeId),
     );
@@ -881,13 +1488,67 @@ export async function acceptResponseFromLink(
         "No pending invitation matches this response. Send a fresh invite link.",
       );
     }
-    await active.controller.acceptKeyResponseFromPayload({
-      invitation: pending.invitation,
-      response: input.response,
-      recipientEmailAddress: pending.recipientEmail,
-    });
-    await idbDelete(pendingInviteKey(input.response.exchangeId));
+    const state = await getCachedState();
+    if (!state) throw new Error("Encrypted sync is not set up on this device.");
+    const datasetId = pending.invitation.requestedGrants[0]?.datasetId;
+    const fallbackProfile = state.profiles.find(
+      (profile) =>
+        profile.datasetId === datasetId &&
+        profile.trustedOwnerKeyId === pending.invitation.trustedOwnerKeyId &&
+        (profile.role === "owner" || profile.role === "admin"),
+    );
+    const profileKeyValue =
+      pending.profileKey ??
+      (fallbackProfile
+        ? profileKey(fallbackProfile.ownerEmail, fallbackProfile.datasetId)
+        : state.activeProfileKey);
+    const scopedRuntime = createRuntimeForProfile(
+      config,
+      state,
+      profileKeyValue,
+      {} as SharedSyncPayloadV1,
+    );
+    try {
+      const results = await scopedRuntime.controller.acceptKeyResponseFromPayload({
+        invitation: pending.invitation,
+        response: input.response,
+        recipientEmailAddress: pending.recipientEmail,
+      });
+      assertAcceptedDatasetResults(results);
+      const refreshed = (await refreshCachedState()) ?? state;
+      const acceptedProfile = findProfile(refreshed, profileKeyValue);
+      if (acceptedProfile) {
+        const next = upsertProfile(refreshed, {
+          ...acceptedProfile,
+          participantEmails: {
+            ...acceptedProfile.participantEmails,
+            [input.response.keyId]: pending.recipientEmail,
+          },
+        });
+        cachedState = next;
+        await saveSharedSyncState(next);
+      }
+      disposeRuntime();
+      await idbDelete(pendingInviteKey(input.response.exchangeId));
+    } finally {
+      scopedRuntime.identityProvider.clear();
+    }
   });
+}
+
+export function assertAcceptedDatasetResults(
+  results: Array<{ datasetId: string; status: string; error?: unknown }>,
+): void {
+  const failures = results.filter((result) => result.status !== "accepted");
+  if (failures.length === 0) return;
+  const detail = failures
+    .map((failure) => {
+      const message =
+        failure.error instanceof Error ? failure.error.message : String(failure.error ?? "failed");
+      return `${failure.datasetId}: ${message}`;
+    })
+    .join("; ");
+  throw new Error(`The recipient was not added to every dataset (${detail}). Try accepting again.`);
 }
 
 export async function listPendingKeyResponses(
@@ -928,16 +1589,28 @@ export async function acceptPendingKeyResponse(
       input.responseFileId,
       invitation.recipientDrivePermissionId,
     );
-    await active.controller.acceptKeyResponse({
+    const results = await active.controller.acceptKeyResponse({
       invitation,
       responseFileId: input.responseFileId,
       recipientEmailAddress: input.recipientEmailAddress,
     });
+    assertAcceptedDatasetResults(results);
     const profile = profileForActive(active.state);
     await active.controller.reconcileDrivePermissions({
       datasetId: profile.datasetId,
       participantEmails: { [response.response.keyId]: input.recipientEmailAddress },
     });
+    const refreshed = (await refreshCachedState()) ?? active.state;
+    const current = findProfile(refreshed, refreshed.activeProfileKey) ?? profile;
+    const next = upsertProfile(refreshed, {
+      ...current,
+      participantEmails: {
+        ...current.participantEmails,
+        [response.response.keyId]: input.recipientEmailAddress,
+      },
+    });
+    cachedState = next;
+    await saveSharedSyncState(next);
   });
 }
 
@@ -1006,6 +1679,7 @@ export async function submitJoinResponse(
       appFolderId: input.ownerFolderId,
       role: grant?.role ?? input.role ?? "viewer",
       trustedOwnerKeyId: invitation.trustedOwnerKeyId,
+      needsInitialLoad: true,
     };
     const profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId);
     const { authorizationProvider, googleIdentity } = createProviders(config, profileKeyValue);

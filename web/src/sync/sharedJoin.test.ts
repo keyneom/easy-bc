@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { easyBcSyncFolderName, profileKey, sanitizeOwnerLabel } from "./sharedFolderName";
-import { parseJoinLinkParams } from "./sharedJoin";
+import { parseJoinLinkParams, stripJoinLinkParams } from "./sharedJoin";
 
 describe("shared folder naming", () => {
   it("builds owner-scoped folder names", () => {
@@ -14,6 +14,15 @@ describe("shared folder naming", () => {
       "alice@example.com/primary",
     );
     expect(sanitizeOwnerLabel(" Alice@Example.com ")).toBe("alice@example.com");
+  });
+
+  it("clears link-carried invitation and response parameters", () => {
+    const result = stripJoinLinkParams(
+      new URL(
+        "https://example.com/?sk-inv=invite&sk-files=files&sk-resp=1&sk-kr=response&grant-files=1&owner=a",
+      ),
+    );
+    expect(result.search).toBe("");
   });
 });
 

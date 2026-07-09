@@ -7,8 +7,9 @@ import android.util.Log
 import com.easybc.planner.BuildConfig
 import com.easybc.planner.data.PlannerRepository
 import com.easybc.planner.sync.shared.SharedSyncCoordinator
-import com.easybc.planner.sync.shared.canPublishRole
+import com.easybc.planner.sync.shared.isLocalProfile
 import com.easybc.planner.sync.shared.profileKey
+import com.easybc.planner.sync.shared.shouldLoadRemoteBeforePublish
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.combine
@@ -88,7 +89,15 @@ class CloudAutoSyncSession(
     }
 
     private suspend fun isEnabled(): Boolean =
-        sharedSync.isConfigured() || store.fileId() != null
+        activeSharedSyncEnabled() || store.fileId() != null
+
+    private suspend fun activeSharedSyncEnabled(): Boolean {
+        val state = sharedSync.loadState() ?: return false
+        val profile = state.profiles.firstOrNull {
+            profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
+        } ?: return false
+        return !isLocalProfile(profile) && !profile.fileId.isNullOrBlank()
+    }
 
     private suspend fun isReadOnlyActiveProfile(): Boolean {
         val state = sharedSync.loadState() ?: return false
@@ -96,7 +105,7 @@ class CloudAutoSyncSession(
         val profile = state.profiles.firstOrNull {
             profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
         } ?: return false
-        return !canPublishRole(profile.role)
+        return shouldLoadRemoteBeforePublish(profile)
     }
 
     private suspend fun syncIfChanged(force: Boolean = false) = syncMutex.withLock {
@@ -106,7 +115,7 @@ class CloudAutoSyncSession(
         lastSyncedFingerprint = fingerprint
 
         val token = accessToken()
-        if (sharedSync.isConfigured()) {
+        if (activeSharedSyncEnabled()) {
             sharedSync.sync(token)
         } else if (store.fileId() != null) {
             try {
