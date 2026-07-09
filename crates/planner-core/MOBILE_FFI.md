@@ -10,7 +10,7 @@ Run these commands from the repository root:
 # macOS release dylib
 cargo build -p planner-core --features ffi --release
 
-# Android arm64 (requires cargo-ndk 4.1.2 and NDK 27.0.12077973)
+# Android arm64 (requires cargo-ndk 4.1.2 and NDK 27.3.13750724)
 ANDROID_NDK_HOME=/path/to/android-ndk ./scripts/android-build-native.sh
 ```
 

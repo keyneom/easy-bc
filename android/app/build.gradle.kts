@@ -20,13 +20,13 @@ val releaseSigningEnabled = listOf(
 android {
     namespace = "com.easybc.planner"
     compileSdk = 35
-    ndkVersion = "27.0.12077973"
+    ndkVersion = "27.3.13750724"
     defaultConfig {
         applicationId = "com.easybc.planner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 47
-        versionName = "0.1.46"
+        versionCode = 48
+        versionName = "0.1.47"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {

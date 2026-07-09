@@ -57,14 +57,15 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Install Android NDK
+        shell: bash
+        run: ./scripts/ci-ensure-ndk.sh
       - name: Build native planner from source
         shell: bash
         run: |
           set -euo pipefail
           rustup show active-toolchain
           cargo install cargo-ndk --version 4.1.2 --locked
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973"
-          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
           ./scripts/android-build-native.sh
       - name: Build Android app
         working-directory: android
