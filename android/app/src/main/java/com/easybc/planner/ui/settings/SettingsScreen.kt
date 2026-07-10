@@ -405,6 +405,7 @@ private fun hubFormatTime(hour: Int, minute: Int): String {
     return "%d:%02d %s".format(h12, minute, if (hour < 12) "AM" else "PM")
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     val activity = LocalContext.current as ComponentActivity
@@ -432,7 +433,10 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     var newProfileName by remember { mutableStateOf("") }
     var profileName by remember { mutableStateOf("") }
     var profileActionConfirm by remember { mutableStateOf<String?>(null) }
-    var pendingInvite by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var pendingInvite by remember {
+        mutableStateOf<Triple<String, String, Map<String, String>?>?>(null)
+    }
+    var invitePresetId by remember { mutableStateOf("cycle-only") }
     var pendingJoin by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingLinkJoin by remember { mutableStateOf<String?>(null) }
     var pendingLinkAccept by remember { mutableStateOf<String?>(null) }
@@ -508,7 +512,8 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                     participantRevoke != null ->
                         vm.revokeParticipant(token, participantRevoke.first, participantRevoke.second)
                     profileKey != null -> vm.switchProfile(token, profileKey)
-                    invite != null -> vm.inviteParticipant(token, invite.first, invite.second)
+                    invite != null ->
+                        vm.inviteParticipant(token, invite.first, invite.second, invite.third)
                     join != null -> vm.joinSharedSync(token, join.first, join.second, join.third)
                     linkJoin != null -> vm.joinFromLink(token, linkJoin)
                     linkAccept != null -> vm.acceptResponseLink(token, linkAccept)
@@ -764,6 +769,49 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        // Split profiles: exactly what this device can see, per dataset part.
+        vm.activeProfile()
+            ?.takeIf {
+                com.easybc.planner.sync.shared.isSplitProfile(it) &&
+                    !com.easybc.planner.sync.shared.isLocalProfile(it)
+            }
+            ?.let { split ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (split.role == "owner") "What this profile stores" else "What you can see",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Spacer(Modifier.height(4.dp))
+                com.easybc.planner.sync.shared.DATASET_PARTS.forEach { part ->
+                    val role = com.easybc.planner.sync.shared.partRole(split, part)
+                    com.easybc.planner.ui.kit.EbDatasetRow(
+                        dataset = when (part) {
+                            com.easybc.planner.sync.shared.PART_CYCLE ->
+                                com.easybc.planner.ui.kit.EbDataset.CYCLE
+                            com.easybc.planner.sync.shared.PART_INTIMACY ->
+                                com.easybc.planner.ui.kit.EbDataset.INTIMACY
+                            com.easybc.planner.sync.shared.PART_SENSITIVE ->
+                                com.easybc.planner.ui.kit.EbDataset.SENSITIVE
+                            else -> com.easybc.planner.ui.kit.EbDataset.PLAN
+                        },
+                        title = com.easybc.planner.sync.shared.datasetPartLabel(part),
+                        summary = when {
+                            role == null -> "Not shared with you"
+                            role == "owner" -> "Yours"
+                            com.easybc.planner.sync.shared.canPublishRole(role) -> "You can edit"
+                            else -> "View only"
+                        },
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                }
+                if (com.easybc.planner.sync.shared.restrictedParts(split).isNotEmpty()) {
+                    Text(
+                        "Sections that aren't shared with you stay hidden across the app.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         vm.activeProfile()?.takeIf { it.needsInitialLoad }?.let {
             Text(
                 "Waiting for the owner to accept this profile. After they finish, tap " +
@@ -898,7 +946,12 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                                     else "Key ${participant.keyId.take(10)}…",
                             )
                             append(" · ")
-                            append(participant.role)
+                            append(
+                                participant.datasetRoles?.entries?.joinToString(" · ") { entry ->
+                                    "${com.easybc.planner.sync.shared.datasetPartLabel(entry.key)} " +
+                                        "(${entry.value})"
+                                } ?: participant.role,
+                            )
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -966,28 +1019,62 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = { inviteRole = "viewer" },
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                ) { Text(if (inviteRole == "viewer") "● Viewer" else "Viewer") }
-                OutlinedButton(
-                    onClick = { inviteRole = "writer" },
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                ) { Text(if (inviteRole == "writer") "● Writer" else "Writer") }
+            val inviteProfileIsSplit = vm.activeProfile()
+                ?.let { com.easybc.planner.sync.shared.isSplitProfile(it) } == true
+            if (inviteProfileIsSplit) {
+                Text("What can they see?", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    com.easybc.planner.sync.shared.SHARING_PRESETS.forEach { preset ->
+                        FilterChip(
+                            selected = invitePresetId == preset.id,
+                            onClick = { invitePresetId = preset.id },
+                            label = { Text(preset.label, style = MaterialTheme.typography.labelSmall) },
+                        )
+                    }
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { inviteRole = "viewer" },
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (inviteRole == "viewer") "● Viewer" else "Viewer") }
+                    OutlinedButton(
+                        onClick = { inviteRole = "writer" },
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                    ) { Text(if (inviteRole == "writer") "● Writer" else "Writer") }
+                }
+                Text(
+                    "This profile predates per-dataset sharing — invites cover everything in it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             OutlinedButton(
                 onClick = {
                     if (inviteEmail.isBlank()) return@OutlinedButton
+                    val presetGrants = if (inviteProfileIsSplit) {
+                        com.easybc.planner.sync.shared.SHARING_PRESETS
+                            .firstOrNull { it.id == invitePresetId }?.grants
+                    } else {
+                        null
+                    }
+                    val effectiveRole = presetGrants
+                        ?.let { com.easybc.planner.sync.shared.highestGrantedRole(it) }
+                        ?: inviteRole
                     scope.launch {
                         try {
                             when (val step = vm.beginCloudAuthorization(activity)) {
                                 is AuthorizationStep.Authorized ->
-                                    vm.inviteParticipant(step.accessToken, inviteEmail, inviteRole)
+                                    vm.inviteParticipant(
+                                        step.accessToken,
+                                        inviteEmail,
+                                        effectiveRole,
+                                        presetGrants,
+                                    )
                                 is AuthorizationStep.NeedsResolution -> {
-                                    pendingInvite = inviteEmail to inviteRole
+                                    pendingInvite = Triple(inviteEmail, effectiveRole, presetGrants)
                                     resolutionLauncher.launch(
                                         IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
                                     )

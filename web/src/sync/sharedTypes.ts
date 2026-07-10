@@ -1,4 +1,9 @@
 import type { SharingRole } from "@keyneom/sync-kit/sharing";
+import {
+  DATASET_PARTS,
+  type DatasetGrants,
+  type DatasetPart,
+} from "./datasets";
 import { parseProfileKey, profileKey as buildProfileKey } from "./sharedFolderName";
 import type { WasmOptions } from "../App";
 import type { PersistedSession } from "../sessionUtils";
@@ -42,7 +47,54 @@ export type ProfileRecord = {
    * from being merged into the joined person's dataset.
    */
   needsInitialLoad?: boolean;
+  /**
+   * Split profiles: role per dataset part (docs/sync-kit-multi-file-datasets.md).
+   * Absent = legacy single-file profile — everything lives in `datasetId` and
+   * `role` applies to all of it.
+   */
+  datasetGrants?: DatasetGrants;
+  /**
+   * Split profiles: sync-kit registry state for companion dataset files,
+   * keyed by full dataset id ("<base>.cycle", …). The base dataset keeps
+   * using the top-level fileId/lastRevisionId fields.
+   */
+  datasetRecords?: Record<string, CompanionDatasetRecord>;
 };
+
+export type CompanionDatasetRecord = {
+  fileId?: string;
+  lastRevisionId?: string;
+  seenRevisionIds?: string[];
+  participantPermissionIds?: Record<string, string>;
+};
+
+/* ---------- Split-profile helpers ---------- */
+
+export function isSplitProfile(profile: ProfileRecord): boolean {
+  return profile.datasetGrants !== undefined;
+}
+
+/** Parts this device can read. Legacy profiles grant everything at profile.role. */
+export function grantedParts(profile: ProfileRecord): DatasetPart[] {
+  if (!profile.datasetGrants) return [...DATASET_PARTS];
+  return DATASET_PARTS.filter((part) => profile.datasetGrants![part] !== undefined);
+}
+
+/** Parts this device cannot read — the UI shows these as restricted. */
+export function restrictedParts(profile: ProfileRecord): DatasetPart[] {
+  if (!profile.datasetGrants) return [];
+  return DATASET_PARTS.filter((part) => profile.datasetGrants![part] === undefined);
+}
+
+export function partRole(profile: ProfileRecord, part: DatasetPart): SharingRole | undefined {
+  if (!profile.datasetGrants) return profile.role;
+  return profile.datasetGrants[part];
+}
+
+export function partIsWritable(profile: ProfileRecord, part: DatasetPart): boolean {
+  const role = partRole(profile, part);
+  return role !== undefined && canPublishRole(role);
+}
 
 export type ActiveProfile = {
   key: string;

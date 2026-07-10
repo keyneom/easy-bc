@@ -3,6 +3,7 @@ import type {
   SharedDatasetRegistryRecord,
 } from "@keyneom/sync-kit/sharing/controller";
 import { idbDelete, idbGet, idbSet, KV_SHARED_SYNC_STATE } from "../idbStore";
+import { partForDatasetId } from "./datasets";
 import { parseProfileKey, profileKey } from "./sharedFolderName";
 import {
   defaultOwnedProfileKey,
@@ -77,8 +78,21 @@ export class ProfileScopedSharedBackupRegistry implements SharedBackupRegistry {
 
   async get(datasetId: string): Promise<SharedDatasetRegistryRecord | null> {
     const profile = await this.scopedProfile();
-    if (!profile || profile.datasetId !== datasetId) return null;
-    return registryRecordFromProfile(profile);
+    if (!profile) return null;
+    if (profile.datasetId === datasetId) return registryRecordFromProfile(profile);
+    // Companion dataset of a split profile ("<base>.cycle", …).
+    const companion = profile.datasetRecords?.[datasetId];
+    if (!companion) return null;
+    return {
+      datasetId,
+      trustedOwnerKeyId: profile.trustedOwnerKeyId,
+      ...(companion.fileId ? { fileId: companion.fileId } : {}),
+      ...(companion.lastRevisionId ? { lastRevisionId: companion.lastRevisionId } : {}),
+      ...(companion.seenRevisionIds ? { seenRevisionIds: companion.seenRevisionIds } : {}),
+      ...(companion.participantPermissionIds
+        ? { participantPermissionIds: companion.participantPermissionIds }
+        : {}),
+    };
   }
 
   async set(record: SharedDatasetRegistryRecord): Promise<void> {
@@ -86,6 +100,43 @@ export class ProfileScopedSharedBackupRegistry implements SharedBackupRegistry {
     if (!state) throw new Error("Shared sync is not configured on this device.");
     const key = this.scopeProfileKey;
     const existing = findProfile(state, key);
+    const { ownerEmail, datasetId: scopedDatasetId } = parseProfileKey(key);
+    if (record.datasetId !== scopedDatasetId) {
+      if (existing && partForDatasetId(scopedDatasetId, record.datasetId) !== null) {
+        // Companion dataset of a split profile: its state stays inside the
+        // scoped profile record and never surfaces as a profile of its own.
+        const next = upsertProfile(state, {
+          ...existing,
+          datasetRecords: {
+            ...(existing.datasetRecords ?? {}),
+            [record.datasetId]: {
+              ...(record.fileId ? { fileId: record.fileId } : {}),
+              ...(record.lastRevisionId ? { lastRevisionId: record.lastRevisionId } : {}),
+              ...(record.seenRevisionIds ? { seenRevisionIds: record.seenRevisionIds } : {}),
+              ...(record.participantPermissionIds
+                ? { participantPermissionIds: record.participantPermissionIds }
+                : {}),
+            },
+          },
+        });
+        await saveSharedSyncState(next);
+        return;
+      }
+      // A different owned dataset created through this scope (e.g. a second
+      // profile created via the primary controller): record it on ITS OWN
+      // profile record — never onto the scoped profile.
+      const foreignKey = profileKey(ownerEmail, record.datasetId);
+      const foreign = findProfile(state, foreignKey);
+      const base: ProfileRecord = foreign ?? {
+        ownerEmail,
+        datasetId: record.datasetId,
+        folderName: existing?.folderName ?? "",
+        role: "owner",
+        trustedOwnerKeyId: record.trustedOwnerKeyId,
+      };
+      await saveSharedSyncState(upsertProfile(state, applyRegistryRecord(base, record)));
+      return;
+    }
     const base: ProfileRecord = existing ?? {
       ...parseProfileKey(key),
       folderName: "",
@@ -100,7 +151,14 @@ export class ProfileScopedSharedBackupRegistry implements SharedBackupRegistry {
   async delete(datasetId: string): Promise<void> {
     const state = await this.getState();
     if (!state) return;
-    const { ownerEmail } = parseProfileKey(this.scopeProfileKey);
+    const { ownerEmail, datasetId: scopedDatasetId } = parseProfileKey(this.scopeProfileKey);
+    if (datasetId !== scopedDatasetId) {
+      const profile = findProfile(state, this.scopeProfileKey);
+      if (!profile?.datasetRecords?.[datasetId]) return;
+      const { [datasetId]: _removed, ...rest } = profile.datasetRecords;
+      await saveSharedSyncState(upsertProfile(state, { ...profile, datasetRecords: rest }));
+      return;
+    }
     await saveSharedSyncState({
       ...state,
       profiles: state.profiles.filter(

@@ -30,6 +30,14 @@ fun DayDetailSheet(
     activeActions: Set<RecommendedAction>,
     /** If true, auto-expand the optional Body Signals section. */
     signalsDefaultExpanded: Boolean,
+    /**
+     * Dataset parts of the active shared profile this device may not edit
+     * ("cycle" / "intimacy" / "sensitive" — docs/sync-kit-multi-file-datasets.md).
+     * Editing controls for a restricted part are hidden: the data doesn't
+     * exist locally and would never publish, so offering the controls would
+     * only fabricate divergence.
+     */
+    restricted: Set<String> = emptySet(),
     onDismiss: () -> Unit,
     onLogPeriodStart: () -> Unit,
     onClearPeriodStart: () -> Unit,
@@ -220,7 +228,9 @@ fun DayDetailSheet(
 
             HorizontalDivider()
 
-            // Log what actually happened
+            // Log what actually happened — hidden when the intimacy log
+            // isn't shared with this device.
+            if ("intimacy" !in restricted) {
             Text(
                 text = "Log what happened",
                 style = MaterialTheme.typography.titleSmall,
@@ -302,10 +312,13 @@ fun DayDetailSheet(
                 events = cell.events,
                 onLogEvent = onLogEvent,
                 onDeleteEvent = onDeleteEvent,
+                allowSensitive = "sensitive" !in restricted,
             )
 
             HorizontalDivider()
+            }
 
+            if ("cycle" !in restricted) {
             // ── Period logging ──
             Text(
                 text = "Period tracking",
@@ -371,6 +384,15 @@ fun DayDetailSheet(
                 defaultExpanded = signalsDefaultExpanded,
                 onSave = onLogObservations,
             )
+            }
+
+            if (restricted.isNotEmpty()) {
+                Text(
+                    text = "Sections that aren't shared with you on this profile are hidden.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             if (cell.dayLog != null && cell.dayLog.actualAction.isNotBlank()) {
                 Text(
@@ -450,6 +472,7 @@ private fun formatRiskPercent(value: Double): String {
 
 @Composable
 private fun DayEventsSection(
+    allowSensitive: Boolean = true,
     events: List<DayEventEntity>,
     onLogEvent: (kind: String, ecType: String?, hoursFromAct: Double?) -> Unit,
     onDeleteEvent: (DayEventEntity) -> Unit,
@@ -508,10 +531,12 @@ private fun DayEventsSection(
                 onClick = { addingKind = "unplanned_unprotected" },
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("+ Unplanned unprotected") }
-            OutlinedButton(
-                onClick = { addingKind = "plan_b_taken" },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("+ Emergency contraception") }
+            if (allowSensitive) {
+                OutlinedButton(
+                    onClick = { addingKind = "plan_b_taken" },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("+ Emergency contraception") }
+            }
         }
     } else {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {

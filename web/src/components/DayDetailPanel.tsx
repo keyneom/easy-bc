@@ -78,6 +78,13 @@ type Props = {
   activeActions: PlannerAction[];
   riskRows?: MethodRiskRow[];
   onUpdateDayLog: (patch: Partial<CalendarDayLog>) => void;
+  /**
+   * Dataset parts of the active shared profile that were NOT shared with this
+   * device (docs/sync-kit-multi-file-datasets.md). Editing controls for a
+   * restricted part are hidden — the data doesn't exist locally and would
+   * never publish, so offering the controls would only fabricate divergence.
+   */
+  restricted?: { cycle?: boolean; intimacy?: boolean; sensitive?: boolean };
 };
 
 export function DayDetailPanel({
@@ -95,6 +102,7 @@ export function DayDetailPanel({
   activeActions,
   riskRows,
   onUpdateDayLog,
+  restricted = {},
 }: Props) {
   const [addingEvent, setAddingEvent] = useState<AddEventKind | null>(null);
   const [ecType, setEcType] = useState<EcType>("levonorgestrel");
@@ -231,6 +239,14 @@ export function DayDetailPanel({
       ) : null}
       <p className="hint compact">{estimate?.notes}</p>
 
+      {restricted.intimacy ? (
+        <section className="day-log-section day-log-restricted">
+          <h4>Log what happened</h4>
+          <p className="hint compact">
+            The intimacy log isn't shared with you on this profile.
+          </p>
+        </section>
+      ) : (
       <section className="day-log-section">
         <h4>Log what happened</h4>
         <div className="action-log-row" role="group" aria-label="Actual action">
@@ -328,9 +344,11 @@ export function DayDetailPanel({
               >
                 + Unplanned unprotected
               </button>
-              <button type="button" className="ghost" onClick={() => setAddingEvent("plan_b_taken")}>
-                + Emergency contraception
-              </button>
+              {!restricted.sensitive && (
+                <button type="button" className="ghost" onClick={() => setAddingEvent("plan_b_taken")}>
+                  + Emergency contraception
+                </button>
+              )}
             </div>
           ) : (
             <div className="day-events-form">
@@ -390,7 +408,9 @@ export function DayDetailPanel({
           )}
         </div>
       </section>
+      )}
 
+      {!restricted.cycle && (
       <details className="body-signals">
         <summary>Body signals <span>Optional</span></summary>
         <div className="body-signal-grid">
@@ -449,20 +469,29 @@ export function DayDetailPanel({
           </label>
         </div>
       </details>
+      )}
 
+      {(!restricted.cycle || !restricted.intimacy) && (
       <div className="day-panel-actions">
         <h4>Period tracking</h4>
-        <button type="button" onClick={onMarkPeriodStart}>
-          {isBleeding ? "Confirm period started on this day" : "Mark period start"}
-        </button>
-        <button type="button" className="ghost" onClick={onMarkPeriodEnd}>
-          {isBleeding ? "Confirm period ended on this day" : "Last bleeding day was this day"}
-        </button>
-        <label className="credit-toggle">
-          <input type="checkbox" checked={hasCredit} onChange={onToggleCredit} />
-          Voluntary abstinence credit (day I could have had sex but abstained)
-        </label>
+        {!restricted.cycle && (
+          <>
+            <button type="button" onClick={onMarkPeriodStart}>
+              {isBleeding ? "Confirm period started on this day" : "Mark period start"}
+            </button>
+            <button type="button" className="ghost" onClick={onMarkPeriodEnd}>
+              {isBleeding ? "Confirm period ended on this day" : "Last bleeding day was this day"}
+            </button>
+          </>
+        )}
+        {!restricted.intimacy && (
+          <label className="credit-toggle">
+            <input type="checkbox" checked={hasCredit} onChange={onToggleCredit} />
+            Voluntary abstinence credit (day I could have had sex but abstained)
+          </label>
+        )}
       </div>
+      )}
       {isBleeding && <p className="hint compact">This date falls in a logged bleeding range.</p>}
     </div>
     </div>

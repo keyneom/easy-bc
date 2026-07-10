@@ -52,12 +52,24 @@ import {
 } from "@keyneom/sync-kit/sharing";
 import { profileDisplayLabel } from "../sync/profileLabels";
 import {
+  DATASET_PART_LABELS,
+  DATASET_PART_SUMMARIES,
+  DATASET_PARTS,
+  highestGrantedRole,
+  SHARING_PRESETS,
+} from "../sync/datasets";
+import {
   buildSharedSyncPayload,
+  canPublishRole,
   findProfile,
   isLocalProfile,
+  isSplitProfile,
+  partRole,
+  restrictedParts,
   sharedPayloadToSyncPayload,
   type SharedSyncState,
 } from "../sync/sharedTypes";
+import { EbDatasetRow, EbPresetChip } from "../ui/Kit";
 import type { SyncPayloadV1 } from "../sync/types";
 
 type Props = {
@@ -87,6 +99,8 @@ export function SyncSettings({
   const [notice, setNotice] = useState<Notice>(null);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Exclude<SharingRole, "owner">>("viewer");
+  // Split profiles invite via presets; "cycle-only" is the safe default.
+  const [invitePreset, setInvitePreset] = useState<string>("cycle-only");
   const [lastJoinUrl, setLastJoinUrl] = useState<string | null>(null);
   const [joinLinkInput, setJoinLinkInput] = useState("");
   const [responseLink, setResponseLink] = useState<string | null>(null);
@@ -201,9 +215,14 @@ export function SyncSettings({
     if (!config || !inviteEmail.trim()) return;
     setBusy("invite");
     try {
+      const preset = SHARING_PRESETS.find((entry) => entry.id === invitePreset);
+      const splitActive = activeProfile ? isSplitProfile(activeProfile) : false;
       const invited = await inviteToDatasetLink(config, {
         emailAddress: inviteEmail.trim(),
-        role: inviteRole,
+        role: splitActive && preset
+          ? (highestGrantedRole(preset.grants) as Exclude<SharingRole, "owner">)
+          : inviteRole,
+        ...(splitActive && preset ? { grants: preset.grants } : {}),
       });
       setLastJoinUrl(invited.joinLink);
       setNotice({
@@ -734,6 +753,39 @@ export function SyncSettings({
         </div>
       )}
 
+      {sharedSyncState && activeProfile && !activeIsLocal && isSplitProfile(activeProfile) && (
+        <div className="dataset-access-panel">
+          <p className="eyebrow">
+            {activeProfile.role === "owner" ? "What this profile stores" : "What you can see"}
+          </p>
+          {DATASET_PARTS.map((part) => {
+            const role = partRole(activeProfile, part);
+            return (
+              <EbDatasetRow
+                key={part}
+                dataset={part}
+                title={DATASET_PART_LABELS[part]}
+                summary={
+                  role === undefined
+                    ? "Not shared with you"
+                    : role === "owner"
+                      ? DATASET_PART_SUMMARIES[part]
+                      : canPublishRole(role)
+                        ? "You can edit"
+                        : "View only"
+                }
+              />
+            );
+          })}
+          {restrictedParts(activeProfile).length > 0 && (
+            <p className="field-hint">
+              Sections that aren't shared with you stay hidden across the app — the owner
+              controls them.
+            </p>
+          )}
+        </div>
+      )}
+
       {!config && (
         <p className="sync-notice sync-notice-info">
           Encrypted sync needs a web OAuth client ID before these controls can be used.
@@ -872,13 +924,36 @@ export function SyncSettings({
               placeholder="person@example.com"
             />
           </label>
-          <label className="field">
-            <span>Access</span>
-            <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as typeof inviteRole)}>
-              <option value="viewer">Viewer (read-only)</option>
-              <option value="writer">Writer (can edit and sync)</option>
-            </select>
-          </label>
+          {activeProfile && isSplitProfile(activeProfile) ? (
+            <div className="field">
+              <span>What can they see?</span>
+              <div className="invite-presets">
+                {SHARING_PRESETS.map((preset) => (
+                  <EbPresetChip
+                    key={preset.id}
+                    selected={invitePreset === preset.id}
+                    onClick={() => setInvitePreset(preset.id)}
+                  >
+                    {preset.label}
+                  </EbPresetChip>
+                ))}
+              </div>
+              <span className="field-hint">
+                {SHARING_PRESETS.find((preset) => preset.id === invitePreset)?.description}
+              </span>
+            </div>
+          ) : (
+            <label className="field">
+              <span>Access</span>
+              <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value as typeof inviteRole)}>
+                <option value="viewer">Viewer (read-only)</option>
+                <option value="writer">Writer (can edit and sync)</option>
+              </select>
+              <span className="field-hint">
+                This profile predates per-dataset sharing — invites cover everything in it.
+              </span>
+            </label>
+          )}
           <button type="button" disabled={unavailable || busy !== null || !inviteEmail.trim()} onClick={() => void runInvite()}>
             <UserPlus aria-hidden />
             {busy === "invite" ? "Inviting…" : "Invite by email"}
@@ -906,7 +981,14 @@ export function SyncSettings({
                       (participant.isCurrentDevice ? "You (this identity)" : "Unknown participant")}
                   </strong>
                   <span>
-                    {participant.role}
+                    {participant.datasetRoles
+                      ? DATASET_PARTS.filter((part) => participant.datasetRoles?.[part])
+                          .map(
+                            (part) =>
+                              `${DATASET_PART_LABELS[part]} (${participant.datasetRoles![part]})`,
+                          )
+                          .join(" · ")
+                      : participant.role}
                     {!participant.emailAddress && !participant.isCurrentDevice
                       ? ` · key ${participant.keyId.slice(0, 10)}…`
                       : ""}

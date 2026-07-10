@@ -401,6 +401,38 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
      */
     fun resetToCurrentMonth() {
         _currentMonth.value = YearMonth.now()
+        refreshRestrictedDayParts()
+    }
+
+    /**
+     * Dataset parts of the active shared profile this device cannot edit
+     * (missing grant, or a read-only grant) — drives the day-sheet gating
+     * (docs/sync-kit-multi-file-datasets.md). Empty for local, legacy, and
+     * fully-writable profiles.
+     */
+    private val _restrictedDayParts = MutableStateFlow<Set<String>>(emptySet())
+    val restrictedDayParts: StateFlow<Set<String>> = _restrictedDayParts
+
+    private fun refreshRestrictedDayParts() {
+        viewModelScope.launch {
+            val registry = com.easybc.planner.sync.shared.SharedSyncRegistry(app.database)
+            val state = registry.load() ?: return@launch run { _restrictedDayParts.value = emptySet() }
+            val profile = com.easybc.planner.sync.shared.findProfile(state, state.activeProfileKey)
+            if (profile == null ||
+                com.easybc.planner.sync.shared.isLocalProfile(profile) ||
+                !com.easybc.planner.sync.shared.isSplitProfile(profile)
+            ) {
+                _restrictedDayParts.value = emptySet()
+                return@launch
+            }
+            _restrictedDayParts.value = listOf(
+                com.easybc.planner.sync.shared.PART_CYCLE,
+                com.easybc.planner.sync.shared.PART_INTIMACY,
+                com.easybc.planner.sync.shared.PART_SENSITIVE,
+            ).filter { part ->
+                !com.easybc.planner.sync.shared.partIsWritable(profile, part)
+            }.toSet()
+        }
     }
 
     fun logPeriodStart(date: LocalDate) {

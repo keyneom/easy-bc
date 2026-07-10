@@ -318,10 +318,12 @@ fun CalendarScreen(
             }
 
             val signalsDefaultExpanded by vm.hasEverLoggedObservations.collectAsState()
+            val restrictedDayParts by vm.restrictedDayParts.collectAsState()
             DayDetailSheet(
                 cell = selectedDetail!!,
                 activeActions = activeActions,
                 signalsDefaultExpanded = signalsDefaultExpanded,
+                restricted = restrictedDayParts,
                 onDismiss = { vm.dismissDayDetail() },
                 onLogPeriodStart = { vm.logPeriodStart(selectedDetail!!.date) },
                 onClearPeriodStart = { vm.clearPeriodStart(selectedDetail!!.date) },

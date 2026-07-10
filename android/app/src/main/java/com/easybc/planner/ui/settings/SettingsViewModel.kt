@@ -355,11 +355,17 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         )
     }
 
-    fun inviteParticipant(accessToken: String, email: String, role: String) {
+    fun inviteParticipant(
+        accessToken: String,
+        email: String,
+        role: String,
+        /** Split profiles: dataset part -> role (the invite presets). */
+        grants: Map<String, String>? = null,
+    ) {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
-                val url = sharedSync.inviteForLink(accessToken, email.trim(), role)
+                val url = sharedSync.inviteForLink(accessToken, email.trim(), role, grants)
                 _joinUrl.value = url
                 _cloudStatus.value = SyncStatus.Success(
                     "Shared the folder with $email. Send them the join link; they'll send back a " +

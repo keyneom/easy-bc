@@ -1,6 +1,28 @@
 # EasyBC on sync-kit rc.11: multi-dataset sharing & topology migration
 
 Updated 2026-07-10 for **sync-kit 0.2.0-rc.11 ("sharing control datasets")**.
+
+## Implementation status (v0.1.50, 2026-07-10)
+
+The multi-file split is **implemented on both platforms** for profiles
+created from v0.1.50 on (fresh setup, new owned profiles, connect-local,
+and every Reset): four files per profile (`<base>` = plan, `<base>.cycle`,
+`<base>.intimacy`, `<base>.sensitive`), each with its own content key and
+ACL. Model: `web/src/sync/datasets.ts` ↔ `sync/shared/EasyBcDatasets.kt`
+(round-trip unit-tested, EC events route to `sensitive`, incidents to
+`intimacy`, body signals to `cycle`, day logs split field-level). Invites on
+split profiles use the presets (per-part `requestedGrants`); joiners store
+per-part grants and sync exactly the granted files; a partial writer only
+ever publishes projections of its granted parts, so non-granted sections
+can never leak into a shared file's ciphertext. Role changes and revocation
+apply per file; Android adopting a web-created split folder detects the
+companions and group-syncs. Partial access is structural in the UI: hidden
+day-sheet sections, "what you can see" dataset rows, and a calendar banner.
+
+**Legacy profiles** (created before v0.1.50) keep their single file and
+all-or-nothing sharing; migrating them to the split layout is exactly the
+hard-cutover topology migration below and waits on the control-dataset
+integration.
 This replaces the earlier speculative proposal that lived in this file; rc.11
 settled the protocol differently (and better). The authoritative protocol doc
 is `sync-kit/docs/sharing-control-datasets.md`; this file records what EasyBC

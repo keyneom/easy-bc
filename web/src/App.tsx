@@ -83,12 +83,17 @@ import {
   canPublishRole,
   extractSharedPayload,
   findProfile,
+  grantedParts,
   isEncryptedProfile,
   isLocalProfile,
+  isSplitProfile,
+  partIsWritable,
+  restrictedParts,
   sharedPayloadFingerprint,
   sharedPayloadToSyncPayload,
   type SharedSyncState,
 } from "./sync/sharedTypes";
+import { DATASET_PART_LABELS, type DatasetPart } from "./sync/datasets";
 import { profileDisplayLabel } from "./sync/profileLabels";
 import { shouldOpenSyncSettings } from "./sync/sharedRoute";
 import {
@@ -865,6 +870,31 @@ export default function App() {
     const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
     return profile ? profile.needsInitialLoad === true || !canPublishRole(profile.role) : false;
   }, [sharedSyncState]);
+  // Split shared profiles: which dataset parts this device was NOT granted,
+  // and which granted parts are read-only. Drives the partial-access banner
+  // and the day-panel editing gates.
+  const activeDatasetAccess = useMemo(() => {
+    if (!sharedSyncState) return null;
+    const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+    if (!profile || !isSplitProfile(profile)) return null;
+    const missing = restrictedParts(profile);
+    const granted = grantedParts(profile).map((part) => ({
+      part,
+      writable: partIsWritable(profile, part),
+    }));
+    return { missing, granted, partial: missing.length > 0 };
+  }, [sharedSyncState]);
+  const dayPanelRestricted = useMemo(() => {
+    if (!activeDatasetAccess) return undefined;
+    const blocked = (part: DatasetPart) =>
+      activeDatasetAccess.missing.includes(part) ||
+      activeDatasetAccess.granted.some((entry) => entry.part === part && !entry.writable);
+    return {
+      cycle: blocked("cycle"),
+      intimacy: blocked("intimacy"),
+      sensitive: blocked("sensitive"),
+    };
+  }, [activeDatasetAccess]);
   const activeEncryptedProfile = useMemo(() => {
     if (!sharedSyncState) return null;
     const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
@@ -1744,6 +1774,18 @@ export default function App() {
             : "Viewing a shared encrypted profile in read-only mode. Switch to your profile in Settings to edit planner data, periods, or day logs."}
         </p>
       )}
+      {sharedSyncState && !syncReadOnly && activeDatasetAccess?.partial && (
+        <p className="sync-readonly-banner" role="status">
+          This shared profile includes{" "}
+          {activeDatasetAccess.granted
+            .map(
+              (entry) =>
+                `${DATASET_PART_LABELS[entry.part]}${entry.writable ? "" : " (view only)"}`,
+            )
+            .join(", ")}
+          . Sections that weren't shared with you stay hidden.
+        </p>
+      )}
       {sharedSyncState && autoSyncNotice && (
         <p className={`auto-sync-banner auto-sync-${autoSyncNotice.kind}`} role="status">
           <RefreshCw
@@ -1828,6 +1870,7 @@ export default function App() {
               <DayDetailPanel
                 iso={selectedDayIso}
                 onClose={() => setSelectedDayIso(null)}
+                restricted={dayPanelRestricted}
                 estimate={selectedEstimate}
                 plannerMeta={selectedDayIso ? plannerMetaForDate(selectedDayIso) : null}
                 isBleeding={

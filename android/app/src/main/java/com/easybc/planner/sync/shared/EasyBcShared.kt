@@ -73,6 +73,26 @@ data class ProfileRecord(
      * prior profile's local working copy cannot leak into this dataset.
      */
     val needsInitialLoad: Boolean = false,
+    /**
+     * Split profiles: lowercase role per dataset part (plan/cycle/intimacy/
+     * sensitive — docs/sync-kit-multi-file-datasets.md). Null = legacy
+     * single-file profile; everything lives in `datasetId` at `role`.
+     */
+    val datasetGrants: Map<String, String>? = null,
+    /**
+     * Split profiles: sync-kit registry state for companion dataset files,
+     * keyed by full dataset id ("<base>.cycle", …). The base dataset keeps
+     * using the top-level fileId/lastRevisionId fields.
+     */
+    val datasetRecords: Map<String, CompanionDatasetRecord>? = null,
+)
+
+@Serializable
+data class CompanionDatasetRecord(
+    val fileId: String? = null,
+    val lastRevisionId: String? = null,
+    val seenRevisionIds: List<String>? = null,
+    val participantPermissionIds: Map<String, String>? = null,
 )
 
 @Serializable
