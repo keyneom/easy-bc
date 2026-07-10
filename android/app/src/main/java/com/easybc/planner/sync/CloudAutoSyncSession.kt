@@ -114,7 +114,10 @@ class CloudAutoSyncSession(
         if (!force && fingerprint == lastSyncedFingerprint) return@withLock
         lastSyncedFingerprint = fingerprint
 
-        val token = accessToken()
+        // A join/response link flow owns the auth UI right now; wait so the
+        // user never gets an unexplained second auth prompt (docs/join-flow.md).
+        InteractiveAuthGate.awaitNoDeepLinkFlow()
+        val token = InteractiveAuthGate.run { accessToken() }
         if (activeSharedSyncEnabled()) {
             sharedSync.sync(token)
         } else if (store.fileId() != null) {

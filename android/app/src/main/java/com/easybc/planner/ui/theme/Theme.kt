@@ -1,11 +1,15 @@
 package com.easybc.planner.ui.theme
 
 import android.app.Activity
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
@@ -13,6 +17,27 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+
+/*
+ * Brand palette, sampled from the launcher logo:
+ *   pink #FFB6CC · blush #FFE0EC · raspberry #7B2D5F · plum #3E1E3C
+ * Tokens are documented in docs/ui-kit.md and mirrored in web/src/ui/tokens.css.
+ * Keep the two token sources in sync when editing.
+ */
+val BrandPink = Color(0xFFFFB6CC)
+val BrandBlush = Color(0xFFFFE0EC)
+val BrandRaspberry = Color(0xFF7B2D5F)
+val BrandPlum = Color(0xFF3E1E3C)
+
+/** User-facing theme preference; SYSTEM follows the OS setting. */
+enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
+/**
+ * Whether the app is currently rendering its dark theme. Unlike
+ * isSystemInDarkTheme() this respects an explicit in-app ThemeMode override,
+ * so indicator helpers (period/action backgrounds) stay in step with it.
+ */
+val LocalEbDarkTheme = staticCompositionLocalOf { false }
 
 // Action colors — consistent in light and dark
 val ActionUnprotected = Color(0xFF4CAF50)
@@ -41,43 +66,57 @@ val RiskMedium = Color(0xFFFFA726)
 val RiskHigh = Color(0xFFEF5350)
 
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF00897B),
+    primary = BrandRaspberry,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFB2DFDB),
-    onPrimaryContainer = Color(0xFF00251E),
-    secondary = Color(0xFF5C6BC0),
+    primaryContainer = BrandBlush,
+    onPrimaryContainer = BrandPlum,
+    secondary = Color(0xFF915F7D),
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFC5CAE9),
-    tertiary = Color(0xFFFFB300),
-    onTertiary = Color.Black,
-    background = Color(0xFFFAFAFA),
-    onBackground = Color(0xFF1C1B1F),
+    secondaryContainer = Color(0xFFF7DEEA),
+    onSecondaryContainer = Color(0xFF3B2231),
+    tertiary = Color(0xFFA8702D),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFFFE3C3),
+    onTertiaryContainer = Color(0xFF4A2E06),
+    background = Color(0xFFFBF7F9),
+    onBackground = Color(0xFF241A21),
     surface = Color.White,
-    onSurface = Color(0xFF1C1B1F),
-    surfaceVariant = Color(0xFFF5F5F5),
-    onSurfaceVariant = Color(0xFF49454F),
-    outline = Color(0xFFBDBDBD),
-    error = Color(0xFFD32F2F),
+    onSurface = Color(0xFF241A21),
+    surfaceVariant = Color(0xFFF4EBF0),
+    onSurfaceVariant = Color(0xFF6E5F68),
+    outline = Color(0xFFC9B9C2),
+    outlineVariant = Color(0xFFEADFE5),
+    error = Color(0xFFB3261E),
+    onError = Color.White,
+    errorContainer = Color(0xFFFBE7E6),
+    onErrorContainer = Color(0xFF5F1412),
 )
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFF4DB6AC),
-    onPrimary = Color(0xFF003731),
-    primaryContainer = Color(0xFF005048),
-    onPrimaryContainer = Color(0xFFB2DFDB),
-    secondary = Color(0xFF9FA8DA),
-    onSecondary = Color(0xFF1A237E),
-    secondaryContainer = Color(0xFF303F9F),
-    tertiary = Color(0xFFFFD54F),
-    onTertiary = Color(0xFF3E2723),
-    background = Color(0xFF121212),
-    onBackground = Color(0xFFE6E1E5),
-    surface = Color(0xFF1E1E1E),
-    onSurface = Color(0xFFE6E1E5),
-    surfaceVariant = Color(0xFF2C2C2C),
-    onSurfaceVariant = Color(0xFFCAC4D0),
-    outline = Color(0xFF616161),
-    error = Color(0xFFEF5350),
+    primary = BrandPink,
+    onPrimary = Color(0xFF4B1032),
+    primaryContainer = Color(0xFF5C2246),
+    onPrimaryContainer = BrandBlush,
+    secondary = Color(0xFFDBB6CB),
+    onSecondary = Color(0xFF402A37),
+    secondaryContainer = Color(0xFF58414E),
+    onSecondaryContainer = Color(0xFFF7DEEA),
+    tertiary = Color(0xFFE4B87C),
+    onTertiary = Color(0xFF402C10),
+    tertiaryContainer = Color(0xFF5C4423),
+    onTertiaryContainer = Color(0xFFFFE3C3),
+    background = Color(0xFF1B1319),
+    onBackground = Color(0xFFF2E7EC),
+    surface = Color(0xFF241A21),
+    onSurface = Color(0xFFF2E7EC),
+    surfaceVariant = Color(0xFF2F2229),
+    onSurfaceVariant = Color(0xFFC6B3BC),
+    outline = Color(0xFF907E88),
+    outlineVariant = Color(0xFF3C2E35),
+    error = Color(0xFFF2B8B5),
+    onError = Color(0xFF4A1210),
+    errorContainer = Color(0xFF4A2222),
+    onErrorContainer = Color(0xFFF2B8B5),
 )
 
 val AppTypography = Typography(
@@ -97,9 +136,14 @@ val AppTypography = Typography(
 
 @Composable
 fun EasyBCTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    themeMode: ThemeMode = ThemeMode.SYSTEM,
     content: @Composable () -> Unit,
 ) {
+    val darkTheme = when (themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+    }
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
 
     val view = LocalView.current
@@ -111,16 +155,21 @@ fun EasyBCTheme(
         }
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = AppTypography,
-        content = content,
-    )
+    CompositionLocalProvider(LocalEbDarkTheme provides darkTheme) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = AppTypography,
+            content = content,
+        )
+    }
 }
 
 /** Return the appropriate background color for a recommended action. */
 @Composable
-fun actionBackgroundColor(action: com.easybc.planner.data.RecommendedAction, dark: Boolean = isSystemInDarkTheme()): Color =
+fun actionBackgroundColor(
+    action: com.easybc.planner.data.RecommendedAction,
+    dark: Boolean = LocalEbDarkTheme.current,
+): Color =
     if (dark) {
         when (action) {
             com.easybc.planner.data.RecommendedAction.U -> ActionUnprotectedBgDark

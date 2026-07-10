@@ -394,6 +394,15 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
         _currentMonth.value = YearMonth.now()
     }
 
+    /**
+     * Re-center on the current month without touching the selected day.
+     * Called when the calendar screen is (re)entered: today is what the
+     * user is normally recording, so never land on a stale month.
+     */
+    fun resetToCurrentMonth() {
+        _currentMonth.value = YearMonth.now()
+    }
+
     fun logPeriodStart(date: LocalDate) {
         viewModelScope.launch {
             repo.logPeriodStart(date)

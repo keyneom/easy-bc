@@ -9,6 +9,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -17,13 +18,29 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
+import com.easybc.planner.ui.kit.EbAvatar
+import com.easybc.planner.ui.kit.EbBanner
+import com.easybc.planner.ui.kit.EbBannerTone
+import com.easybc.planner.ui.kit.EbGroupLabel
+import com.easybc.planner.ui.kit.EbNavRow
+import com.easybc.planner.ui.kit.EbProfileBadge
+import com.easybc.planner.ui.kit.EbProfileHeaderCard
+import com.easybc.planner.ui.kit.EbRowTone
+import com.easybc.planner.ui.kit.EbStatusRow
+import com.easybc.planner.ui.kit.EbStatusTone
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,287 +64,349 @@ import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(vm: SettingsViewModel = viewModel()) {
+fun SettingsScreen(
+    vm: SettingsViewModel = viewModel(),
+    /** Navigate to a settings sub-route ("settings/basics", …). */
+    onOpen: (String) -> Unit = {},
+) {
+    val activity = LocalContext.current as ComponentActivity
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val draft by vm.draft.collectAsState()
     val saved by vm.settings.collectAsState()
+    val sharedState by vm.sharedSyncState.collectAsState()
+    val lastSync by vm.lastCloudSync.collectAsState()
+    val status by vm.cloudStatus.collectAsState()
+    val themeMode by com.easybc.planner.ui.theme.ThemeModeStore.mode.collectAsState()
     val isFirstTime = saved?.onboardingComplete != true
+    val busy = status is SettingsViewModel.SyncStatus.Running
+    var showSwitcher by remember { mutableStateOf(false) }
+    var pendingSwitchKey by remember { mutableStateOf<String?>(null) }
+
+    val state = sharedState
+    val activeProfile = state?.profiles?.firstOrNull {
+        com.easybc.planner.sync.shared.profileKey(it.ownerEmail, it.datasetId) == state.activeProfileKey
+    }
+
+    val switchLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        val key = pendingSwitchKey
+        pendingSwitchKey = null
+        if (result.resultCode != Activity.RESULT_OK) {
+            vm.cloudError("Google authorization was cancelled.")
+            return@rememberLauncherForActivityResult
+        }
+        runCatching { vm.finishCloudAuthorization(activity, result.data) }
+            .onSuccess { token -> key?.let { vm.switchProfile(token, it) } }
+            .onFailure { vm.cloudError(it.message ?: "Google authorization failed.") }
+    }
+
+    fun switchTo(key: String) {
+        val currentState = sharedState ?: return
+        showSwitcher = false
+        if (busy || key == currentState.activeProfileKey) return
+        val target = currentState.profiles.firstOrNull {
+            com.easybc.planner.sync.shared.profileKey(it.ownerEmail, it.datasetId) == key
+        } ?: return
+        scope.launch {
+            try {
+                val current = activeProfile
+                if (
+                    com.easybc.planner.sync.shared.isLocalProfile(target) &&
+                    current != null &&
+                    com.easybc.planner.sync.shared.isLocalProfile(current)
+                ) {
+                    vm.switchProfile(null, key)
+                    return@launch
+                }
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.switchProfile(step.accessToken, key)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingSwitchKey = key
+                        switchLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(if (isFirstTime) "Welcome — Set Up Your Profile" else "Settings") },
-            )
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { vm.save() },
-                icon = { Icon(Icons.Default.Save, null) },
-                text = { Text(if (isFirstTime) "Start Planning" else "Save") },
-            )
+            TopAppBar(title = { Text(if (isFirstTime) "Welcome to EasyBC" else "Settings") })
         },
     ) { padding ->
         Column(
             modifier = Modifier
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
         ) {
             if (isFirstTime) {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text(
-                        "Configure your profile to get a personalized cycle plan. " +
-                            "All calculations are done on-device — your data stays private.",
-                        modifier = Modifier.padding(16.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-
-            // ── Profile ──
-            SectionHeader("Profile")
-
-            IntField("Age", draft.ageYears, 15..55) { v ->
-                vm.updateDraft { d -> d.copy(ageYears = v) }
-            }
-            IntField("Typical cycle length (days)", draft.cycleLengthDays, 21..45) { v ->
-                vm.updateDraft { d -> d.copy(cycleLengthDays = v) }
-            }
-
-            // ── Risk Target ──
-            SectionHeader("Risk Target")
-
-            SliderField(
-                label = "Cumulative failure target",
-                value = draft.targetCumulativeFailure,
-                range = 0.005f..0.5f,
-                format = { "%.1f%%".format(it * 100) },
-                onValueChange = { v -> vm.updateDraft { d -> d.copy(targetCumulativeFailure = v.toDouble()) } },
-            )
-            IntField("Horizon (years)", draft.horizonYears, 1..40) { v ->
-                vm.updateDraft { d -> d.copy(horizonYears = v) }
-            }
-
-            // ── Behavior ──
-            SectionHeader("Behavior")
-
-            DoubleField("Acts per week", draft.actsPerWeek, 0.0..14.0) { v ->
-                vm.updateDraft { d -> d.copy(actsPerWeek = v) }
-            }
-
-            // ── Method Library ──
-            SectionHeader("Contraceptive Methods")
-
-            // Persistent method
-            Text("Persistent / background method", style = MaterialTheme.typography.labelLarge)
-            Text(
-                "An always-on method that reduces baseline risk for all days.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(4.dp))
-            val currentPersistent = try {
-                PersistentMethod.entries.first { it.name.equals(draft.persistentMethod, ignoreCase = true) }
-            } catch (_: Exception) { PersistentMethod.None }
-
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PersistentMethod.entries.forEach { method ->
-                    FilterChip(
-                        selected = currentPersistent == method,
-                        onClick = {
-                            vm.updateDraft { d -> d.copy(persistentMethod = method.name.lowercase()) }
-                        },
-                        label = { Text(method.label, style = MaterialTheme.typography.labelSmall) },
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            // Protected day method
-            Text("Protected-day method", style = MaterialTheme.typography.labelLarge)
-            Text(
-                "Barrier method used on days marked 'C' (protected). Controls what 'condom' means in the plan.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(4.dp))
-            val currentProtected = try {
-                ProtectedDayMethod.entries.first { it.name.equals(draft.protectedDayMethod, ignoreCase = true) }
-            } catch (_: Exception) { ProtectedDayMethod.ExternalCondom }
-
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ProtectedDayMethod.entries.forEach { method ->
-                    FilterChip(
-                        selected = currentProtected == method,
-                        onClick = {
-                            vm.updateDraft { d -> d.copy(protectedDayMethod = method.name.lowercase()) }
-                        },
-                        label = { Text(method.label, style = MaterialTheme.typography.labelSmall) },
-                    )
-                }
-            }
-
-            // Condom calibration (only if protected day method is external condom)
-            if (currentProtected == ProtectedDayMethod.ExternalCondom) {
-                Spacer(Modifier.height(4.dp))
-                Text("Condom use quality", style = MaterialTheme.typography.labelLarge)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("perfect", "typical", "custom").forEach { mode ->
-                        FilterChip(
-                            selected = draft.condomMode == mode,
-                            onClick = { vm.updateDraft { d -> d.copy(condomMode = mode) } },
-                            label = { Text(mode.replaceFirstChar { c -> c.uppercase() }) },
+                    Column(Modifier.padding(16.dp)) {
+                        Text(
+                            "Set up your plan to get personalized recommendations. " +
+                                "All calculations happen on this device — your data stays private.",
+                            style = MaterialTheme.typography.bodyMedium,
                         )
+                        Spacer(Modifier.height(10.dp))
+                        Button(onClick = { onOpen("settings/basics") }) { Text("Set up your plan") }
                     }
                 }
-
-                if (draft.condomMode == "custom") {
-                    DoubleField("Custom condom residual", draft.customCondomResidual, 0.0..1.0) { v ->
-                        vm.updateDraft { d -> d.copy(customCondomResidual = v) }
-                    }
-                }
+                Spacer(Modifier.height(10.dp))
             }
 
-            Spacer(Modifier.height(8.dp))
-
-            // Withdrawal
-            Text("Withdrawal", style = MaterialTheme.typography.labelLarge)
-            Text(
-                "If enabled, the planner can recommend withdrawal (W) on moderate-risk days.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(4.dp))
-            val currentWithdrawal = try {
-                WithdrawalMode.entries.first { it.name.equals(draft.withdrawalMode, ignoreCase = true) }
-            } catch (_: Exception) { WithdrawalMode.None }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                WithdrawalMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = currentWithdrawal == mode,
-                        onClick = {
-                            vm.updateDraft { d -> d.copy(withdrawalMode = mode.name.lowercase()) }
-                        },
-                        label = { Text(mode.label) },
-                    )
-                }
-            }
-
-            if (currentWithdrawal == WithdrawalMode.Custom) {
-                DoubleField("Withdrawal relative risk", draft.withdrawalRelativeRisk, 0.0..1.0) { v ->
-                    vm.updateDraft { d -> d.copy(withdrawalRelativeRisk = v) }
-                }
-            }
-
-            // Combined method layering
-            if (currentProtected != ProtectedDayMethod.None && currentWithdrawal != WithdrawalMode.None) {
-                Spacer(Modifier.height(4.dp))
-                SwitchRow(
-                    label = "Layer withdrawal on protected days",
-                    checked = draft.useWithdrawalBackupOnProtectedDays,
-                    onCheckedChange = { checked ->
-                        vm.updateDraft { d -> d.copy(useWithdrawalBackupOnProtectedDays = checked) }
+            // ── Active profile header ──
+            if (state != null && activeProfile != null) {
+                val label = com.easybc.planner.sync.shared.profileDisplayLabel(state, activeProfile)
+                EbProfileHeaderCard(
+                    name = label,
+                    meta = buildString {
+                        append(hubProfileMeta(state, activeProfile))
+                        lastSync?.let { append(" · synced ${formatSyncTime(it)}") }
                     },
+                    colorKey = state.activeProfileKey,
+                    badge = hubProfileBadge(state, activeProfile),
+                    actionLabel = "Switch",
+                    onAction = { showSwitcher = true },
                 )
-                if (draft.useWithdrawalBackupOnProtectedDays) {
-                    SliderField(
-                        label = "Combined method independence",
-                        value = draft.combinedMethodIndependence,
-                        range = 0f..1f,
-                        format = { v ->
-                            when {
-                                v < 0.2 -> "%.0f%% — Conservative".format(v * 100)
-                                v > 0.7 -> "%.0f%% — Assumes high independence".format(v * 100)
-                                else -> "%.0f%%".format(v * 100)
-                            }
+            }
+            when (val s = status) {
+                is SettingsViewModel.SyncStatus.Running ->
+                    EbStatusRow(tone = EbStatusTone.BUSY, text = "Working…")
+                is SettingsViewModel.SyncStatus.Error ->
+                    EbBanner(tone = EbBannerTone.ERROR, text = s.message)
+                else -> {}
+            }
+
+            // ── Profile settings ──
+            EbGroupLabel("Profile")
+            EbNavRow(
+                title = "Plan basics",
+                value = "Age ${draft.ageYears} · ${draft.cycleLengthDays}-day cycle",
+                icon = Icons.Filled.Person,
+                onClick = { onOpen("settings/basics") },
+            )
+            EbNavRow(
+                title = "Protection",
+                value = hubProtectionSummary(draft),
+                icon = Icons.Filled.Favorite,
+                onClick = { onOpen("settings/protection") },
+            )
+            EbNavRow(
+                title = "Risk & comfort",
+                value = "%.1f%% over %d years".format(
+                    draft.targetCumulativeFailure * 100,
+                    draft.horizonYears,
+                ),
+                icon = Icons.Filled.Tune,
+                onClick = { onOpen("settings/risk") },
+            )
+            EbNavRow(
+                title = "Profiles & sharing",
+                value = when {
+                    state == null || activeProfile == null -> "Set up sync and sharing"
+                    else -> "${state.profiles.size} profile${if (state.profiles.size == 1) "" else "s"} · " +
+                        hubProfileMeta(state, activeProfile)
+                },
+                icon = Icons.Filled.Group,
+                tone = if (activeProfile != null && state != null &&
+                    hubProfileBadge(state, activeProfile) == EbProfileBadge.SHARED
+                ) {
+                    EbRowTone.SHARED
+                } else {
+                    EbRowTone.DEFAULT
+                },
+                onClick = { onOpen("settings/storage") },
+            )
+
+            // ── This device ──
+            EbGroupLabel("This device")
+            EbNavRow(
+                title = "Reminders",
+                value = if (saved?.reminderEnabled == true) {
+                    "Daily reconcile · ${hubFormatTime(saved?.reminderHour ?: 9, saved?.reminderMinute ?: 0)}"
+                } else {
+                    "Off"
+                },
+                icon = Icons.Filled.Notifications,
+                onClick = { onOpen("settings/reminders") },
+            )
+            EbNavRow(
+                title = "Device calendar",
+                value = if (saved?.calendarSyncEnabled == true) "Auto-update on" else "Off",
+                icon = Icons.Filled.CalendarMonth,
+                onClick = { onOpen("settings/device-calendar") },
+            )
+            EbNavRow(
+                title = "Backup & restore",
+                value = "Export or import everything on this device",
+                icon = Icons.Filled.Save,
+                onClick = { onOpen("settings/backup") },
+            )
+
+            EbGroupLabel("Appearance")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                com.easybc.planner.ui.theme.ThemeMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = themeMode == mode,
+                        onClick = { com.easybc.planner.ui.theme.ThemeModeStore.set(context, mode) },
+                        label = {
+                            Text(
+                                when (mode) {
+                                    com.easybc.planner.ui.theme.ThemeMode.SYSTEM -> "System default"
+                                    com.easybc.planner.ui.theme.ThemeMode.LIGHT -> "Light"
+                                    com.easybc.planner.ui.theme.ThemeMode.DARK -> "Dark"
+                                },
+                            )
                         },
-                        onValueChange = { v -> vm.updateDraft { d -> d.copy(combinedMethodIndependence = v.toDouble()) } },
                     )
                 }
             }
 
-            // ── Preferences ──
-            SectionHeader("Preferences")
-
-            SliderField(
-                label = "Streak aversion",
-                value = draft.streakAversion,
-                range = 0f..1f,
-                format = { pct ->
-                    when {
-                        pct < 0.33 -> "%.0f%% — Fewer total abstinence days".format(pct * 100)
-                        pct > 0.66 -> "%.0f%% — Shorter abstinence streaks".format(pct * 100)
-                        else -> "%.0f%% — Balanced".format(pct * 100)
-                    }
-                },
-                onValueChange = { v -> vm.updateDraft { d -> d.copy(streakAversion = v.toDouble()) } },
+            EbGroupLabel("About")
+            EbNavRow(
+                title = "About EasyBC",
+                value = "Version ${com.easybc.planner.BuildConfig.VERSION_NAME} · disclaimers",
+                icon = Icons.Filled.Info,
+                onClick = { onOpen("settings/about") },
             )
+        }
+    }
 
-            // ── Reminders ──
-            SectionHeader("Reminders")
-            ReminderSection(vm)
-
-            // ── Device Calendar Export ──
-            SectionHeader("Device Calendar Export")
-            DeviceCalendarSection(vm)
-
-            // ── Encrypted cloud sync ──
-            SectionHeader("Encrypted Cloud Sync")
-            EncryptedSyncSection(vm)
-
-            // ── Backup file ──
-            SectionHeader("Backup File")
-            BackupRestoreSection(vm)
-
-            // ── Advanced ──
-            SectionHeader("Advanced")
-
-            DoubleField("Ovulation SD (days)", draft.ovulationSdDays, 0.5..15.0) { v ->
-                vm.updateDraft { d -> d.copy(ovulationSdDays = v) }
-            }
-
-            SwitchRow(
-                label = "Hold lifecycle constant",
-                checked = draft.holdLifecycleConstant,
-                onCheckedChange = { checked -> vm.updateDraft { d -> d.copy(holdLifecycleConstant = checked) } },
-            )
-
-            Spacer(Modifier.height(8.dp))
-
-            OutlinedButton(
-                onClick = { vm.resetToDefaults() },
-                modifier = Modifier.fillMaxWidth(),
+    if (showSwitcher && state != null) {
+        ModalBottomSheet(onDismissRequest = { showSwitcher = false }) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 24.dp),
             ) {
-                Icon(Icons.Default.RestartAlt, null)
-                Spacer(Modifier.width(8.dp))
-                Text("Reset to defaults")
+                Text(
+                    "PROFILES",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(6.dp))
+                state.profiles.forEach { profile ->
+                    val key = com.easybc.planner.sync.shared.profileKey(profile.ownerEmail, profile.datasetId)
+                    val isActive = key == state.activeProfileKey
+                    val label = com.easybc.planner.sync.shared.profileDisplayLabel(state, profile)
+                    Surface(
+                        onClick = { switchTo(key) },
+                        enabled = !busy,
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isActive) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surface,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            EbAvatar(
+                                name = label,
+                                colorKey = key,
+                                size = 36.dp,
+                                badge = hubProfileBadge(state, profile),
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(label, style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    hubProfileMeta(state, profile),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (isActive) {
+                                Text(
+                                    "✓",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                    }
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                TextButton(
+                    onClick = {
+                        showSwitcher = false
+                        onOpen("settings/storage")
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Manage profiles, storage & sharing") }
             }
-
-            // ── Disclaimers ──
-            SectionHeader("Disclaimers")
-
-            Text(
-                text = "This is not FDA-cleared as contraception. " +
-                    "Calculations assume regular cycles. " +
-                    "Consult a healthcare provider for medical advice. " +
-                    "Plan effectiveness depends on adherence.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            Spacer(Modifier.height(80.dp)) // Room for FAB
         }
     }
 }
 
+internal fun hubProfileMeta(
+    state: com.easybc.planner.sync.shared.SharedSyncState,
+    profile: com.easybc.planner.sync.shared.ProfileRecord,
+): String = when {
+    com.easybc.planner.sync.shared.isLocalProfile(profile) -> "Local only · this device"
+    !profile.ownerEmail.equals(state.ownerEmail, ignoreCase = true) ->
+        "Shared with you · ${profile.role}"
+    profile.participantEmails.orEmpty().isNotEmpty() ->
+        "Shared · ${profile.participantEmails.orEmpty().size} " +
+            if (profile.participantEmails.orEmpty().size == 1) "person" else "people"
+    else -> "Private encrypted · your devices"
+}
+
+internal fun hubProfileBadge(
+    state: com.easybc.planner.sync.shared.SharedSyncState,
+    profile: com.easybc.planner.sync.shared.ProfileRecord,
+): EbProfileBadge = when {
+    profile.needsInitialLoad -> EbProfileBadge.WAITING
+    com.easybc.planner.sync.shared.isLocalProfile(profile) -> EbProfileBadge.LOCAL
+    !profile.ownerEmail.equals(state.ownerEmail, ignoreCase = true) ->
+        if (!com.easybc.planner.sync.shared.canPublishRole(profile.role)) EbProfileBadge.READ_ONLY
+        else EbProfileBadge.SHARED
+    profile.participantEmails.orEmpty().isNotEmpty() -> EbProfileBadge.SHARED
+    else -> EbProfileBadge.PRIVATE
+}
+
+internal fun hubProtectionSummary(draft: com.easybc.planner.data.db.UserSettingsEntity): String {
+    val persistent = PersistentMethod.entries.firstOrNull {
+        it.name.equals(draft.persistentMethod, ignoreCase = true)
+    } ?: PersistentMethod.None
+    val protected = ProtectedDayMethod.entries.firstOrNull {
+        it.name.equals(draft.protectedDayMethod, ignoreCase = true)
+    } ?: ProtectedDayMethod.ExternalCondom
+    val withdrawal = WithdrawalMode.entries.firstOrNull {
+        it.name.equals(draft.withdrawalMode, ignoreCase = true)
+    } ?: WithdrawalMode.None
+    return buildString {
+        if (persistent != PersistentMethod.None) append("${persistent.label} · ")
+        append(protected.label)
+        if (protected == ProtectedDayMethod.ExternalCondom) append(" (${draft.condomMode})")
+        if (withdrawal != WithdrawalMode.None) append(" + withdrawal")
+    }
+}
+
+private fun hubFormatTime(hour: Int, minute: Int): String {
+    val h12 = when {
+        hour == 0 -> 12
+        hour > 12 -> hour - 12
+        else -> hour
+    }
+    return "%d:%02d %s".format(h12, minute, if (hour < 12) "AM" else "PM")
+}
+
 @Composable
-private fun EncryptedSyncSection(vm: SettingsViewModel) {
+internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     val activity = LocalContext.current as ComponentActivity
     val scope = rememberCoroutineScope()
     val status by vm.cloudStatus.collectAsState()
@@ -1244,7 +1323,7 @@ private fun EncryptedSyncSection(vm: SettingsViewModel) {
     }
 }
 
-private fun formatSyncTime(value: String): String = runCatching {
+internal fun formatSyncTime(value: String): String = runCatching {
     DateTimeFormatter.ofPattern("MMM d, yyyy h:mm a")
         .withZone(ZoneId.systemDefault())
         .format(Instant.parse(value))
@@ -1257,7 +1336,7 @@ private fun formatSyncTime(value: String): String = runCatching {
  * hence the morning-after default time and the copy below.
  */
 @Composable
-private fun ReminderSection(vm: SettingsViewModel) {
+internal fun ReminderSection(vm: SettingsViewModel) {
     val saved by vm.settings.collectAsState()
     val enabled = saved?.reminderEnabled == true
     val hour = saved?.reminderHour ?: 9
@@ -1341,7 +1420,7 @@ private fun ReminderSection(vm: SettingsViewModel) {
 }
 
 @Composable
-private fun DeviceCalendarSection(vm: SettingsViewModel) {
+internal fun DeviceCalendarSection(vm: SettingsViewModel) {
     val status by vm.calendarStatus.collectAsState()
     val saved by vm.settings.collectAsState()
     val syncEnabled = saved?.calendarSyncEnabled == true
@@ -1522,7 +1601,7 @@ private fun LabelField(
 }
 
 @Composable
-private fun BackupRestoreSection(vm: SettingsViewModel) {
+internal fun BackupRestoreSection(vm: SettingsViewModel) {
     val status by vm.backupStatus.collectAsState()
 
     val exportLauncher = rememberLauncherForActivityResult(
@@ -1645,7 +1724,7 @@ private fun SectionHeader(title: String) {
 }
 
 @Composable
-private fun SwitchRow(
+internal fun SwitchRow(
     label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
@@ -1661,7 +1740,7 @@ private fun SwitchRow(
 }
 
 @Composable
-private fun IntField(
+internal fun IntField(
     label: String,
     value: Int,
     range: IntRange,
@@ -1685,7 +1764,7 @@ private fun IntField(
 }
 
 @Composable
-private fun DoubleField(
+internal fun DoubleField(
     label: String,
     value: Double,
     range: ClosedFloatingPointRange<Double>,
@@ -1709,7 +1788,7 @@ private fun DoubleField(
 }
 
 @Composable
-private fun SliderField(
+internal fun SliderField(
     label: String,
     value: Double,
     range: ClosedFloatingPointRange<Float>,

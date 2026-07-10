@@ -4,10 +4,15 @@ import {
   CalendarDays,
   ChartSpline,
   CheckCircle,
+  Heart,
   History,
+  Info,
   RefreshCw,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
+  User,
+  Users,
 } from "lucide-react";
 import init, { planFertilityRiskJson, replanPreviewJson, ecEffectJson } from "../pkg/planner_core.js";
 import {
@@ -79,10 +84,12 @@ import {
   extractSharedPayload,
   findProfile,
   isEncryptedProfile,
+  isLocalProfile,
   sharedPayloadFingerprint,
   sharedPayloadToSyncPayload,
   type SharedSyncState,
 } from "./sync/sharedTypes";
+import { profileDisplayLabel } from "./sync/profileLabels";
 import { shouldOpenSyncSettings } from "./sync/sharedRoute";
 import {
   ensureProfileState,
@@ -102,6 +109,13 @@ import {
   type EcEffectFn,
   type InFlightDay,
 } from "./tracker/realizedRisk";
+import {
+  EbGroupLabel,
+  EbNavRow,
+  EbProfileHeaderCard,
+  EbThemeModeToggle,
+  type EbProfileBadge,
+} from "./ui/Kit";
 
 interface DayWeight {
   day: number;
@@ -530,6 +544,49 @@ const WITHDRAWAL_MODE_OPTIONS: ChoiceOption<WithdrawalMode>[] = [
   { value: "custom", label: "Custom" },
 ];
 
+/** Settings hub views — parity with the Android settings routes. */
+type SettingsView = "hub" | "basics" | "protection" | "risk" | "sharing" | "about";
+
+function optionLabel<T extends string>(options: ChoiceOption<T>[], value: T): string {
+  return options.find((option) => option.value === value)?.label ?? value;
+}
+
+function protectionSummary(opts: WasmOptions): string {
+  const parts: string[] = [];
+  if (opts.persistentMethod !== "none") {
+    parts.push(optionLabel(PERSISTENT_METHOD_OPTIONS, opts.persistentMethod));
+  }
+  let protectedLabel = optionLabel(PROTECTED_METHOD_OPTIONS, opts.protectedDayMethod);
+  if (opts.protectedDayMethod === "external_condom") {
+    protectedLabel += ` (${opts.condomMode})`;
+  }
+  parts.push(protectedLabel);
+  if (opts.withdrawalMode !== "none") parts.push("withdrawal");
+  return parts.join(" + ");
+}
+
+type AnyProfileRecord = SharedSyncState["profiles"][number];
+
+function settingsProfileMeta(state: SharedSyncState, record: AnyProfileRecord): string {
+  if (isLocalProfile(record)) return "Local only · this device";
+  if (record.ownerEmail.toLowerCase() !== state.ownerEmail.toLowerCase()) {
+    return `Shared with you · ${record.role}`;
+  }
+  const participantCount = Object.keys(record.participantEmails ?? {}).length;
+  return participantCount > 0
+    ? `Shared · ${participantCount} ${participantCount === 1 ? "person" : "people"}`
+    : "Private encrypted · your devices";
+}
+
+function settingsProfileBadge(state: SharedSyncState, record: AnyProfileRecord): EbProfileBadge {
+  if (record.needsInitialLoad) return "waiting";
+  if (isLocalProfile(record)) return "local";
+  if (record.ownerEmail.toLowerCase() !== state.ownerEmail.toLowerCase()) {
+    return canPublishRole(record.role) ? "shared" : "readonly";
+  }
+  return Object.keys(record.participantEmails ?? {}).length > 0 ? "shared" : "private";
+}
+
 function hasCalendarLogData(log: CalendarDayLog | undefined): boolean {
   if (!log) return false;
   if (log.actualAction && log.actualAction !== "NONE") return true;
@@ -757,6 +814,28 @@ export default function App() {
   const initDate = useMemo(() => new Date(), []);
   const [viewYear, setViewYear] = useState(initDate.getFullYear());
   const [viewMonth, setViewMonth] = useState(initDate.getMonth());
+
+  // Settings is a hub (parity with Android): deep links land on the sharing
+  // panel (where SyncSettings processes them); everything else starts at hub.
+  const [settingsView, setSettingsView] = useState<SettingsView>(() =>
+    typeof window !== "undefined" && shouldOpenSyncSettings(window.location.search)
+      ? "sharing"
+      : "hub",
+  );
+
+  // The calendar is where today gets logged: returning to the tab always
+  // re-centers on the current month so the user never edits a stale month.
+  const selectTab = (next: AppTab) => {
+    if (next === "tracker" && tab !== "tracker") {
+      const now = new Date();
+      setViewYear(now.getFullYear());
+      setViewMonth(now.getMonth());
+    }
+    if (next === "settings" && tab !== "settings") {
+      setSettingsView("hub");
+    }
+    setTab(next);
+  };
   const [selectedDayIso, setSelectedDayIso] = useState<string | null>(null);
   const [periodRecords, setPeriodRecords] = useState<PeriodRecord[]>([]);
 
@@ -1618,7 +1697,7 @@ export default function App() {
           role="tab"
           className="app-tab"
           aria-selected={tab === "tracker"}
-          onClick={() => setTab("tracker")}
+          onClick={() => selectTab("tracker")}
         >
           <CalendarDays aria-hidden />
           Calendar
@@ -1628,7 +1707,7 @@ export default function App() {
           role="tab"
           className="app-tab"
           aria-selected={tab === "planner"}
-          onClick={() => setTab("planner")}
+          onClick={() => selectTab("planner")}
         >
           <ChartSpline aria-hidden />
           Plan
@@ -1638,7 +1717,7 @@ export default function App() {
           role="tab"
           className="app-tab"
           aria-selected={tab === "history"}
-          onClick={() => setTab("history")}
+          onClick={() => selectTab("history")}
         >
           <History aria-hidden />
           History
@@ -1648,7 +1727,7 @@ export default function App() {
           role="tab"
           className="app-tab"
           aria-selected={tab === "settings"}
-          onClick={() => setTab("settings")}
+          onClick={() => selectTab("settings")}
         >
           <Settings aria-hidden />
           Settings
@@ -1886,7 +1965,7 @@ export default function App() {
             </section>
           )}
 
-          {tab === "settings" && (
+          {tab === "settings" && settingsView === "hub" && (
             <section className="settings-screen">
               <div className="screen-heading">
                 <p className="eyebrow">{session.plannerConfigured ? "Settings" : "Welcome"}</p>
@@ -1898,11 +1977,86 @@ export default function App() {
                   {" "}All calculations run on this device.
                 </p>
               </div>
+              {sharedSyncState && (() => {
+                const active = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+                if (!active) return null;
+                return (
+                  <EbProfileHeaderCard
+                    name={profileDisplayLabel(sharedSyncState, active)}
+                    meta={settingsProfileMeta(sharedSyncState, active)}
+                    colorKey={sharedSyncState.activeProfileKey}
+                    badge={settingsProfileBadge(sharedSyncState, active)}
+                    actionLabel="Switch"
+                    onAction={() => setSettingsView("sharing")}
+                  />
+                );
+              })()}
+              <div className="appearance-row">
+                <span className="appearance-label">Appearance</span>
+                <EbThemeModeToggle />
+              </div>
+              <EbGroupLabel>Profile</EbGroupLabel>
+              <EbNavRow
+                icon={<User />}
+                title="Plan basics"
+                value={`Age ${opts.ageYears} · ${opts.cycleLengthDays}-day baseline cycle`}
+                onClick={() => setSettingsView("basics")}
+              />
+              <EbNavRow
+                icon={<Heart />}
+                title="Protection"
+                value={protectionSummary(opts)}
+                onClick={() => setSettingsView("protection")}
+              />
+              <EbNavRow
+                icon={<SlidersHorizontal />}
+                title="Risk & comfort"
+                value={`${(opts.targetCumulativeFailure * 100).toFixed(1)}% over ${opts.horizonYears} ${calendarMode ? "predicted cycles" : "years"}`}
+                onClick={() => setSettingsView("risk")}
+              />
+              <EbNavRow
+                icon={<Users />}
+                title="Profiles & sharing"
+                value={(() => {
+                  const active = sharedSyncState
+                    ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
+                    : null;
+                  if (!sharedSyncState || !active) return "Set up sync and sharing";
+                  const count = sharedSyncState.profiles.length;
+                  return `${count} profile${count === 1 ? "" : "s"} · ${settingsProfileMeta(sharedSyncState, active)}`;
+                })()}
+                tone={(() => {
+                  const active = sharedSyncState
+                    ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
+                    : null;
+                  return sharedSyncState && active &&
+                    settingsProfileBadge(sharedSyncState, active) === "shared"
+                    ? "shared"
+                    : "default";
+                })()}
+                onClick={() => setSettingsView("sharing")}
+              />
+              <EbGroupLabel>About</EbGroupLabel>
+              <EbNavRow
+                icon={<Info />}
+                title="About EasyBC"
+                value="Privacy, source & platform notes"
+                onClick={() => setSettingsView("about")}
+              />
+            </section>
+          )}
+
+          {tab === "settings" && settingsView === "basics" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("hub")}
+              >
+                ← Settings
+              </button>
               <fieldset className="settings-form settings-form-android">
-                <legend>Profile</legend>
-                <div className="settings-subsection-title">
-                  <h3>Profile</h3>
-                </div>
+                <legend>Plan basics</legend>
                 <label>
                   Age
                   <input
@@ -1912,78 +2066,6 @@ export default function App() {
                     value={opts.ageYears}
                     onChange={(e) =>
                       setOpts((o) => ({ ...o, ageYears: Number(e.target.value) }))
-                    }
-                  />
-                </label>
-                <div className="settings-subsection-title">
-                  <h3>Risk Target</h3>
-                </div>
-                <label>
-                  {calendarMode
-                    ? "Horizon (predicted menstrual cycles)"
-                    : "Horizon (calendar years)"}
-                  <input
-                    type="number"
-                    min={1}
-                    max={40}
-                    value={opts.horizonYears}
-                    onChange={(e) =>
-                      setOpts((o) => ({ ...o, horizonYears: Number(e.target.value) }))
-                    }
-                  />
-                  <span className="field-hint">
-                    {calendarMode ? (
-                      <>
-                        Each slice is one <strong>forecast cycle</strong> from your log. Not solar
-                        years.
-                      </>
-                    ) : (
-                      <>
-                        Calendar years forward (Rust <code>horizon_years</code>): one representative
-                        cycle per year of age.
-                      </>
-                    )}
-                  </span>
-                </label>
-                <label>
-                  Cumulative risk target over the <strong>entire horizon</strong>
-                  <input
-                    type="number"
-                    step={0.005}
-                    min={0}
-                    max={0.5}
-                    value={opts.targetCumulativeFailure}
-                    onChange={(e) =>
-                      setOpts((o) => ({
-                        ...o,
-                        targetCumulativeFailure: Number(e.target.value),
-                      }))
-                    }
-                  />
-                </label>
-                <div className="derived-field">
-                  In-flight incident adjustment
-                  <strong>{formatPercent(opts.realizedCumulativeRisk)}</strong>
-                  <span className="field-hint">
-                    Conditional additional risk not already represented by retained
-                    incident-day plan entries. It tightens the remaining plan and
-                    releases with a new period. Timed EC uses the model’s
-                    least-effective scenario; missing or contradictory timing
-                    receives no credit.
-                  </span>
-                </div>
-                <div className="settings-subsection-title">
-                  <h3>Behavior</h3>
-                </div>
-                <label>
-                  Acts per week
-                  <input
-                    type="number"
-                    step={0.1}
-                    min={0}
-                    value={opts.actsPerWeek}
-                    onChange={(e) =>
-                      setOpts((o) => ({ ...o, actsPerWeek: Number(e.target.value) }))
                     }
                   />
                 </label>
@@ -1999,9 +2081,104 @@ export default function App() {
                     }
                   />
                 </label>
-                <div className="settings-subsection-title">
-                  <h3>Contraceptive Methods</h3>
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={() => {
+                    runPlan();
+                    setTab("planner");
+                  }}
+                >
+                  {session.plannerConfigured ? "Update plan" : "Generate plan"}
+                </button>
+              </fieldset>
+
+              <section className="period-panel">
+                <h2>Predicted cycles → core</h2>
+                <p className="hint">
+                  Needs at least <strong>two period starts</strong> in History/Calendar to infer
+                  lengths. Then letters on the wall calendar reflect this plan when in calendar mode.
+                </p>
+                {horizonToday && opts.calendarCycles?.length ? (
+                  <p className="hint">
+                    Anchor grid: row <strong>{horizonToday.row}</strong>, cycle day{" "}
+                    <strong>{horizonToday.dayInCycle}</strong>.
+                  </p>
+                ) : null}
+                <div className="row">
+                  <button
+                    type="button"
+                    onClick={() => applyPredictedCycles(6)}
+                    disabled={sortedStarts.length < 2}
+                    title="Need at least two starts to infer a length"
+                  >
+                    Plan with 6 predicted cycles
+                  </button>
+                  <button type="button" className="ghost" onClick={clearCalendarMode}>
+                    Clear calendar-cycle mode
+                  </button>
                 </div>
+                {opts.calendarCycles?.length ? (
+                  <p className="hint">
+                    Calendar mode: <strong>{opts.calendarCycles.length}</strong> rows (lengths{" "}
+                    {opts.calendarCycles.map((c) => c.cycleLengthDays).join(", ")}).
+                  </p>
+                ) : null}
+                <div className="variance-card card">
+                  <h3>Cycle length posterior → planner uncertainty</h3>
+                  <p className="hint compact">
+                    From your logged period starts we infer <strong>{historyLengths.length}</strong>{" "}
+                    completed cycle length(s). With fewer than two, cycle-to-cycle spread is unknown
+                    and we use age-based defaults only.
+                  </p>
+                  <p className="meta">
+                    Posterior mean next-cycle length:{" "}
+                    <strong>{lengthPosterior.mean.toFixed(1)}</strong> day(s). Predictive range:{" "}
+                    <strong>
+                      {lengthPosterior.lower}-{lengthPosterior.upper}
+                    </strong>{" "}
+                    day(s).
+                  </p>
+                  {historyLengths.length >= 2 ? (
+                    <p className="meta">
+                      Sample SD of lengths: <strong>{lengthSampleSd!.toFixed(2)}</strong> day(s).
+                      Extra widening added to baseline ovulation SD:{" "}
+                      <strong>{varianceWidenExtra.toFixed(2)}</strong> (capped in core per row).
+                      {effectiveRowSd != null && (
+                        <>
+                          {" "}
+                          Effective <code>cycleSdDays</code> on each predicted row:{" "}
+                          <strong>{effectiveRowSd.toFixed(2)}</strong> (includes baseline{" "}
+                          {opts.ovulationSdDays.toFixed(2)} from inputs).
+                        </>
+                      )}
+                    </p>
+                  ) : (
+                    <p className="meta">Log at least two cycles to personalize variance widening.</p>
+                  )}
+                  {varianceWidenExtra > 0 && (
+                    <p className="hint">
+                      Higher length variability widens the <strong>modeled</strong> fertile window in
+                      the optimizer, which usually pushes the plan toward more protected or abstinent
+                      days for the same cumulative target, not a diagnosis.
+                    </p>
+                  )}
+                </div>
+              </section>
+            </section>
+          )}
+
+          {tab === "settings" && settingsView === "protection" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("hub")}
+              >
+                ← Settings
+              </button>
+              <fieldset className="settings-form settings-form-android">
+                <legend>Protection</legend>
                 <ChoiceChipGroup
                   label="Persistent / background method"
                   description="An always-on method that reduces baseline risk for all days."
@@ -2122,8 +2299,99 @@ export default function App() {
                     </span>
                   </label>
                 )}
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={() => {
+                    runPlan();
+                    setTab("planner");
+                  }}
+                >
+                  {session.plannerConfigured ? "Update plan" : "Generate plan"}
+                </button>
+              </fieldset>
+            </section>
+          )}
+
+          {tab === "settings" && settingsView === "risk" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("hub")}
+              >
+                ← Settings
+              </button>
+              <fieldset className="settings-form settings-form-android">
+                <legend>Risk &amp; comfort</legend>
+                <label>
+                  {calendarMode
+                    ? "Horizon (predicted menstrual cycles)"
+                    : "Horizon (calendar years)"}
+                  <input
+                    type="number"
+                    min={1}
+                    max={40}
+                    value={opts.horizonYears}
+                    onChange={(e) =>
+                      setOpts((o) => ({ ...o, horizonYears: Number(e.target.value) }))
+                    }
+                  />
+                  <span className="field-hint">
+                    {calendarMode ? (
+                      <>
+                        Each slice is one <strong>forecast cycle</strong> from your log. Not solar
+                        years.
+                      </>
+                    ) : (
+                      <>
+                        Calendar years forward (Rust <code>horizon_years</code>): one representative
+                        cycle per year of age.
+                      </>
+                    )}
+                  </span>
+                </label>
+                <label>
+                  Cumulative risk target over the <strong>entire horizon</strong>
+                  <input
+                    type="number"
+                    step={0.005}
+                    min={0}
+                    max={0.5}
+                    value={opts.targetCumulativeFailure}
+                    onChange={(e) =>
+                      setOpts((o) => ({
+                        ...o,
+                        targetCumulativeFailure: Number(e.target.value),
+                      }))
+                    }
+                  />
+                </label>
+                <div className="derived-field">
+                  In-flight incident adjustment
+                  <strong>{formatPercent(opts.realizedCumulativeRisk)}</strong>
+                  <span className="field-hint">
+                    Conditional additional risk not already represented by retained
+                    incident-day plan entries. It tightens the remaining plan and
+                    releases with a new period. Timed EC uses the model’s
+                    least-effective scenario; missing or contradictory timing
+                    receives no credit.
+                  </span>
+                </div>
+                <label>
+                  Acts per week
+                  <input
+                    type="number"
+                    step={0.1}
+                    min={0}
+                    value={opts.actsPerWeek}
+                    onChange={(e) =>
+                      setOpts((o) => ({ ...o, actsPerWeek: Number(e.target.value) }))
+                    }
+                  />
+                </label>
                 <div className="settings-subsection-title">
-                  <h3>Preferences &amp; Advanced</h3>
+                  <h3>Advanced</h3>
                 </div>
                 <label>
                   <input
@@ -2211,83 +2479,18 @@ export default function App() {
                   {session.plannerConfigured ? "Update plan" : "Generate plan"}
                 </button>
               </fieldset>
+            </section>
+          )}
 
-              <section className="period-panel">
-                <h2>Predicted cycles → core</h2>
-                <p className="hint">
-                  Needs at least <strong>two period starts</strong> in History/Calendar to infer
-                  lengths. Then letters on the wall calendar reflect this plan when in calendar mode.
-                </p>
-                {horizonToday && opts.calendarCycles?.length ? (
-                  <p className="hint">
-                    Anchor grid: row <strong>{horizonToday.row}</strong>, cycle day{" "}
-                    <strong>{horizonToday.dayInCycle}</strong>.
-                  </p>
-                ) : null}
-                <div className="row">
-                  <button
-                    type="button"
-                    onClick={() => applyPredictedCycles(6)}
-                    disabled={sortedStarts.length < 2}
-                    title="Need at least two starts to infer a length"
-                  >
-                    Plan with 6 predicted cycles
-                  </button>
-                  <button type="button" className="ghost" onClick={clearCalendarMode}>
-                    Clear calendar-cycle mode
-                  </button>
-                </div>
-                {opts.calendarCycles?.length ? (
-                  <p className="hint">
-                    Calendar mode: <strong>{opts.calendarCycles.length}</strong> rows (lengths{" "}
-                    {opts.calendarCycles.map((c) => c.cycleLengthDays).join(", ")}).
-                  </p>
-                ) : null}
-                <div className="variance-card card">
-                  <h3>Cycle length posterior → planner uncertainty</h3>
-                  <p className="hint compact">
-                    From your logged period starts we infer <strong>{historyLengths.length}</strong>{" "}
-                    completed cycle length(s). With fewer than two, cycle-to-cycle spread is unknown
-                    and we use age-based defaults only.
-                  </p>
-                  <p className="meta">
-                    Posterior mean next-cycle length:{" "}
-                    <strong>{lengthPosterior.mean.toFixed(1)}</strong> day(s). Predictive range:{" "}
-                    <strong>
-                      {lengthPosterior.lower}-{lengthPosterior.upper}
-                    </strong>{" "}
-                    day(s).
-                  </p>
-                  {historyLengths.length >= 2 ? (
-                    <p className="meta">
-                      Sample SD of lengths: <strong>{lengthSampleSd!.toFixed(2)}</strong> day(s).
-                      Extra widening added to baseline ovulation SD:{" "}
-                      <strong>{varianceWidenExtra.toFixed(2)}</strong> (capped in core per row).
-                      {effectiveRowSd != null && (
-                        <>
-                          {" "}
-                          Effective <code>cycleSdDays</code> on each predicted row:{" "}
-                          <strong>{effectiveRowSd.toFixed(2)}</strong> (includes baseline{" "}
-                          {opts.ovulationSdDays.toFixed(2)} from inputs).
-                        </>
-                      )}
-                    </p>
-                  ) : (
-                    <p className="meta">Log at least two cycles to personalize variance widening.</p>
-                  )}
-                  {varianceWidenExtra > 0 && (
-                    <p className="hint">
-                      Higher length variability widens the <strong>modeled</strong> fertile window in
-                      the optimizer, which usually pushes the plan toward more protected or abstinent
-                      days for the same cumulative target, not a diagnosis.
-                    </p>
-                  )}
-                </div>
-              </section>
-
-              <div className="settings-subsection-title settings-subsection-outside">
-                <h3>Encrypted Cloud Sync</h3>
-              </div>
+          {tab === "settings" && settingsView === "sharing" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("hub")}
+              >
+                ← Settings
+              </button>
               <SyncSettings
                 options={opts}
                 periodRecords={periodRecords}
@@ -2297,14 +2500,31 @@ export default function App() {
                 onSharedSyncStateChange={setSharedSyncState}
                 onSyncComplete={markSyncComplete}
               />
+            </section>
+          )}
+
+          {tab === "settings" && settingsView === "about" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("hub")}
+              >
+                ← Settings
+              </button>
               <section className="settings-platform-card">
-                <h3>Platform-specific settings</h3>
+                <h3>About EasyBC</h3>
                 <p className="hint">
                   Android keeps <strong>Device Calendar Export</strong>, reminder scheduling, and
                   <strong> Backup File</strong> export/import in its native settings screen. The web
                   app keeps browser-safe settings here and uses <strong>Encrypted Sync</strong>
                   for planner, period, and logged-day data. Web and Android use the same profile,
                   encrypted sync, and sharing model.
+                </p>
+                <p className="hint">
+                  This is not FDA-cleared as contraception. Calculations assume regular cycles.
+                  Consult a healthcare provider for medical advice. Plan effectiveness depends on
+                  adherence.
                 </p>
                 <p className="settings-links">
                   <a href={`${import.meta.env.BASE_URL}privacy.html`}>Privacy policy</a>
@@ -2314,7 +2534,6 @@ export default function App() {
                   </a>
                 </p>
               </section>
-
             </section>
           )}
 
@@ -2346,7 +2565,7 @@ export default function App() {
                       {" · "}
                       Withdrawal: <strong>{humanizeMethodLabel(methodLibrary!.withdrawalMode)}</strong>
                     </p>
-                    <button type="button" className="ghost" onClick={() => setTab("settings")}>
+                    <button type="button" className="ghost" onClick={() => selectTab("settings")}>
                       Update inputs
                     </button>
                   </section>
@@ -2651,7 +2870,7 @@ export default function App() {
                   <ChartSpline size={52} aria-hidden />
                   <h2>No plan yet</h2>
                   <p>Set up your profile in Settings to generate a personalized plan.</p>
-                  <button type="button" onClick={() => setTab("settings")}>Open Settings</button>
+                  <button type="button" onClick={() => selectTab("settings")}>Open Settings</button>
                 </section>
               )}
 

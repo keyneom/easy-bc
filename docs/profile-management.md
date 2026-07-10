@@ -3,6 +3,10 @@
 Profiles are the primary unit of data ownership in EasyBC. Storage and sharing
 are attributes of a profile; they are not separate global modes.
 
+UI/IA for these operations:
+[settings-profiles-redesign.md](settings-profiles-redesign.md). Per-dataset
+sharing protocol: [sync-kit-multi-file-datasets.md](sync-kit-multi-file-datasets.md).
+
 ## Profile types
 
 | Type | Stored where | Available on | Sharing |

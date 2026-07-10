@@ -1,0 +1,336 @@
+/*
+ * EasyBC design tokens.
+ *
+ * Brand palette is sampled from the launcher logo:
+ *   pink #FFB6CC · blush #FFE0EC · raspberry #7B2D5F · plum #3E1E3C
+ * Indicator colors (period / fertile / U-W-C-A / credits / risk) carry over
+ * from the existing calendar semantics and stay recognizable in both themes.
+ *
+ * Theme resolution (see ui/theme.ts):
+ *   - default follows the OS via prefers-color-scheme;
+ *   - an explicit in-app choice stamps data-theme="light|dark" on <html>
+ *     and wins over the media query in both directions.
+ *
+ * This file must be imported AFTER index.css: it remaps the legacy
+ * variables (--primary, --surface, …) onto the brand tokens so the whole
+ * existing app re-skins without touching per-component CSS.
+ */
+
+:root {
+  /* Fixed brand palette (theme-independent references) */
+  --eb-brand-pink: #ffb6cc;
+  --eb-brand-blush: #ffe0ec;
+  --eb-brand-raspberry: #7b2d5f;
+  --eb-brand-plum: #3e1e3c;
+
+  /* Shape */
+  --eb-r-sm: 8px;
+  --eb-r-md: 14px;
+  --eb-r-lg: 18px;
+  --eb-r-full: 999px;
+}
+
+/* ---------- Light theme (default, and explicit data-theme="light") ---------- */
+:root {
+  color-scheme: light;
+
+  --eb-bg: #fbf7f9;
+  --eb-surface: #ffffff;
+  --eb-surface-variant: #f4ebf0;
+  --eb-surface-soft: #f9f1f5;
+  --eb-ink: #241a21;
+  --eb-muted: #6e5f68;
+  --eb-outline: #c9b9c2;
+  --eb-outline-soft: #eadfe5;
+  --eb-shadow: 0 10px 30px rgba(62, 30, 60, 0.09);
+
+  --eb-accent: var(--eb-brand-raspberry);
+  --eb-on-accent: #ffffff;
+  --eb-accent-strong: #63244d;
+  --eb-accent-container: var(--eb-brand-blush);
+  --eb-on-accent-container: var(--eb-brand-plum);
+  --eb-focus: var(--eb-brand-raspberry);
+
+  --eb-ok: #2e7d4f;
+  --eb-ok-container: #e0f2e7;
+  --eb-warn: #7a5410;
+  --eb-warn-container: #fdf3e3;
+  --eb-danger: #b3261e;
+  --eb-danger-container: #fbe7e6;
+  --eb-info: #44618c;
+  --eb-info-container: #e7edf7;
+
+  /* Profile storage modes — semantic, never used as the accent */
+  --eb-mode-local: #6e6e66;
+  --eb-mode-local-container: #ecece4;
+  --eb-mode-private: #256e62;
+  --eb-mode-private-container: #ddefeb;
+  --eb-mode-shared: #5b4b8a;
+  --eb-mode-shared-container: #ece7f6;
+
+  /* Datasets (per-file sharing) */
+  --eb-ds-cycle: #7b2d5f;
+  --eb-ds-plan: #44618c;
+  --eb-ds-intimacy: #a8702d;
+  --eb-ds-sensitive: #5b5561;
+
+  /* Calendar indicators (existing semantics, unchanged hues) */
+  --eb-period: #c2185b;
+  --eb-period-bg: #fce4ec;
+  --eb-fertile: #7b1fa2;
+  --eb-fertile-bg: #f3e5f5;
+  --eb-action-u: #43a047;
+  --eb-action-u-bg: #e8f5e9;
+  --eb-action-w: #9e9d24;
+  --eb-action-w-bg: #f9fbe7;
+  --eb-action-c: #fb8c00;
+  --eb-action-c-bg: #fff3e0;
+  --eb-action-a: #ef5350;
+  --eb-action-a-bg: #ffebee;
+  --eb-credit: #ffb300;
+  --eb-risk-low: #66bb6a;
+  --eb-risk-med: #ffa726;
+  --eb-risk-high: #ef5350;
+  --eb-today-ring: var(--eb-accent);
+
+  /* Legacy variable remap (keeps every existing screen on-brand) */
+  --primary: var(--eb-accent);
+  --primary-strong: var(--eb-accent-strong);
+  --primary-container: var(--eb-accent-container);
+  --on-primary-container: var(--eb-on-accent-container);
+  --secondary-container: var(--eb-mode-shared-container);
+  --surface: var(--eb-surface);
+  --surface-variant: var(--eb-surface-variant);
+  --surface-soft: var(--eb-surface-soft);
+  --text: var(--eb-ink);
+  --muted: var(--eb-muted);
+  --outline: var(--eb-outline);
+  --outline-soft: var(--eb-outline-soft);
+  --period: var(--eb-period);
+  --period-bg: var(--eb-period-bg);
+  --fertile: var(--eb-fertile);
+  --fertile-bg: var(--eb-fertile-bg);
+  --unprotected: var(--eb-action-u);
+  --unprotected-bg: var(--eb-action-u-bg);
+  --withdrawal: var(--eb-action-w);
+  --withdrawal-bg: var(--eb-action-w-bg);
+  --protected: var(--eb-action-c);
+  --protected-bg: var(--eb-action-c-bg);
+  --abstain: var(--eb-action-a);
+  --abstain-bg: var(--eb-action-a-bg);
+  --shadow: var(--eb-shadow);
+}
+
+/*
+ * ---------- Dark theme ----------
+ * Applied two ways with identical values:
+ *   1. OS dark, unless the user explicitly chose light
+ *      (`:root:not([data-theme="light"])` inside the media query);
+ *   2. explicit user choice (`:root[data-theme="dark"]`), regardless of OS.
+ * Keep both blocks byte-identical when editing.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --eb-bg: #1b1319;
+    --eb-surface: #241a21;
+    --eb-surface-variant: #2f2229;
+    --eb-surface-soft: #2a1e25;
+    --eb-ink: #f2e7ec;
+    --eb-muted: #b5a3ac;
+    --eb-outline: #715f69;
+    --eb-outline-soft: #3c2e35;
+    --eb-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+
+    --eb-accent: var(--eb-brand-pink);
+    --eb-on-accent: #4b1032;
+    --eb-accent-strong: #ffccda;
+    --eb-accent-container: #5c2246;
+    --eb-on-accent-container: var(--eb-brand-blush);
+    --eb-focus: var(--eb-brand-pink);
+
+    --eb-ok: #7cc79b;
+    --eb-ok-container: #1e3a2b;
+    --eb-warn: #e3b34e;
+    --eb-warn-container: #3d321a;
+    --eb-danger: #f2b8b5;
+    --eb-danger-container: #4a2222;
+    --eb-info: #94b2dc;
+    --eb-info-container: #263349;
+
+    --eb-mode-local: #a9a99f;
+    --eb-mode-local-container: #34342e;
+    --eb-mode-private: #6fbfaf;
+    --eb-mode-private-container: #1e3a34;
+    --eb-mode-shared: #a79bd1;
+    --eb-mode-shared-container: #322a48;
+
+    --eb-ds-cycle: #e792b9;
+    --eb-ds-plan: #94b2dc;
+    --eb-ds-intimacy: #dba96a;
+    --eb-ds-sensitive: #aba3b3;
+
+    --eb-period: #f48fb1;
+    --eb-period-bg: rgba(136, 14, 79, 0.34);
+    --eb-fertile: #ce93d8;
+    --eb-fertile-bg: rgba(74, 20, 140, 0.34);
+    --eb-action-u: #81c784;
+    --eb-action-u-bg: rgba(27, 94, 32, 0.34);
+    --eb-action-w: #dce775;
+    --eb-action-w-bg: rgba(130, 119, 23, 0.34);
+    --eb-action-c: #ffb74d;
+    --eb-action-c-bg: rgba(230, 81, 0, 0.34);
+    --eb-action-a: #ef9a9a;
+    --eb-action-a-bg: rgba(183, 28, 28, 0.34);
+    --eb-credit: #ffca4d;
+    --eb-risk-low: #81c784;
+    --eb-risk-med: #ffb74d;
+    --eb-risk-high: #ef9a9a;
+    --eb-today-ring: var(--eb-accent);
+
+    --primary: var(--eb-accent);
+    --primary-strong: var(--eb-accent-strong);
+    --primary-container: var(--eb-accent-container);
+    --on-primary-container: var(--eb-on-accent-container);
+    --secondary-container: var(--eb-mode-shared-container);
+    --surface: var(--eb-surface);
+    --surface-variant: var(--eb-surface-variant);
+    --surface-soft: var(--eb-surface-soft);
+    --text: var(--eb-ink);
+    --muted: var(--eb-muted);
+    --outline: var(--eb-outline);
+    --outline-soft: var(--eb-outline-soft);
+    --period: var(--eb-period);
+    --period-bg: var(--eb-period-bg);
+    --fertile: var(--eb-fertile);
+    --fertile-bg: var(--eb-fertile-bg);
+    --unprotected: var(--eb-action-u);
+    --unprotected-bg: var(--eb-action-u-bg);
+    --withdrawal: var(--eb-action-w);
+    --withdrawal-bg: var(--eb-action-w-bg);
+    --protected: var(--eb-action-c);
+    --protected-bg: var(--eb-action-c-bg);
+    --abstain: var(--eb-action-a);
+    --abstain-bg: var(--eb-action-a-bg);
+    --shadow: var(--eb-shadow);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --eb-bg: #1b1319;
+  --eb-surface: #241a21;
+  --eb-surface-variant: #2f2229;
+  --eb-surface-soft: #2a1e25;
+  --eb-ink: #f2e7ec;
+  --eb-muted: #b5a3ac;
+  --eb-outline: #715f69;
+  --eb-outline-soft: #3c2e35;
+  --eb-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+
+  --eb-accent: var(--eb-brand-pink);
+  --eb-on-accent: #4b1032;
+  --eb-accent-strong: #ffccda;
+  --eb-accent-container: #5c2246;
+  --eb-on-accent-container: var(--eb-brand-blush);
+  --eb-focus: var(--eb-brand-pink);
+
+  --eb-ok: #7cc79b;
+  --eb-ok-container: #1e3a2b;
+  --eb-warn: #e3b34e;
+  --eb-warn-container: #3d321a;
+  --eb-danger: #f2b8b5;
+  --eb-danger-container: #4a2222;
+  --eb-info: #94b2dc;
+  --eb-info-container: #263349;
+
+  --eb-mode-local: #a9a99f;
+  --eb-mode-local-container: #34342e;
+  --eb-mode-private: #6fbfaf;
+  --eb-mode-private-container: #1e3a34;
+  --eb-mode-shared: #a79bd1;
+  --eb-mode-shared-container: #322a48;
+
+  --eb-ds-cycle: #e792b9;
+  --eb-ds-plan: #94b2dc;
+  --eb-ds-intimacy: #dba96a;
+  --eb-ds-sensitive: #aba3b3;
+
+  --eb-period: #f48fb1;
+  --eb-period-bg: rgba(136, 14, 79, 0.34);
+  --eb-fertile: #ce93d8;
+  --eb-fertile-bg: rgba(74, 20, 140, 0.34);
+  --eb-action-u: #81c784;
+  --eb-action-u-bg: rgba(27, 94, 32, 0.34);
+  --eb-action-w: #dce775;
+  --eb-action-w-bg: rgba(130, 119, 23, 0.34);
+  --eb-action-c: #ffb74d;
+  --eb-action-c-bg: rgba(230, 81, 0, 0.34);
+  --eb-action-a: #ef9a9a;
+  --eb-action-a-bg: rgba(183, 28, 28, 0.34);
+  --eb-credit: #ffca4d;
+  --eb-risk-low: #81c784;
+  --eb-risk-med: #ffb74d;
+  --eb-risk-high: #ef9a9a;
+  --eb-today-ring: var(--eb-accent);
+
+  --primary: var(--eb-accent);
+  --primary-strong: var(--eb-accent-strong);
+  --primary-container: var(--eb-accent-container);
+  --on-primary-container: var(--eb-on-accent-container);
+  --secondary-container: var(--eb-mode-shared-container);
+  --surface: var(--eb-surface);
+  --surface-variant: var(--eb-surface-variant);
+  --surface-soft: var(--eb-surface-soft);
+  --text: var(--eb-ink);
+  --muted: var(--eb-muted);
+  --outline: var(--eb-outline);
+  --outline-soft: var(--eb-outline-soft);
+  --period: var(--eb-period);
+  --period-bg: var(--eb-period-bg);
+  --fertile: var(--eb-fertile);
+  --fertile-bg: var(--eb-fertile-bg);
+  --unprotected: var(--eb-action-u);
+  --unprotected-bg: var(--eb-action-u-bg);
+  --withdrawal: var(--eb-action-w);
+  --withdrawal-bg: var(--eb-action-w-bg);
+  --protected: var(--eb-action-c);
+  --protected-bg: var(--eb-action-c-bg);
+  --abstain: var(--eb-action-a);
+  --abstain-bg: var(--eb-action-a-bg);
+  --shadow: var(--eb-shadow);
+}
+
+/*
+ * ---------- Theme enforcement ----------
+ * index.css paints a few surfaces with literal colors and re-paints them in
+ * its own prefers-color-scheme block. Literals can't follow an explicit
+ * data-theme choice, so re-express them through tokens here (this file loads
+ * later, so these win in both directions and in both themes).
+ */
+:root,
+html,
+body {
+  background: var(--eb-bg);
+  color: var(--eb-ink);
+}
+.web-topbar {
+  background: color-mix(in srgb, var(--eb-surface) 94%, transparent);
+}
+.app-tabs {
+  background: var(--eb-surface-soft);
+}
+.app-tab {
+  color: var(--eb-muted);
+}
+.tracker-cell-sample {
+  background: var(--eb-surface-variant);
+}
+.warn,
+.sync-notice-error {
+  border-color: var(--eb-warn);
+  background: var(--eb-warn-container);
+  color: var(--eb-warn);
+}

@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,8 +75,11 @@ class MainActivity : ComponentActivity() {
         initialSettingsRequest.value = shouldRouteToSyncSettings(intent)
         handleSharedSyncJoinIntent(intent)
 
+        com.easybc.planner.ui.theme.ThemeModeStore.load(this)
         setContent {
-            EasyBCTheme {
+            val themeMode by com.easybc.planner.ui.theme.ThemeModeStore.mode
+                .collectAsState()
+            EasyBCTheme(themeMode = themeMode) {
                 var pendingReconcile by remember { initialReconcileRequest }
                 var pendingSettings by remember { initialSettingsRequest }
                 Surface(modifier = Modifier.fillMaxSize()) {
@@ -141,6 +145,11 @@ class MainActivity : ComponentActivity() {
         val url = data.toString()
         val isResponseLink = data.getQueryParameter("sk-resp") == "1"
         val isJoinLink = data.getQueryParameter("sk-inv") != null
+        if (isResponseLink || isJoinLink) {
+            // The link flow owns the auth UI from this moment; startup and
+            // foreground auto-sync defer until it completes or is cleared.
+            com.easybc.planner.sync.InteractiveAuthGate.deepLinkFlowStarted()
+        }
         if (!isResponseLink && !isJoinLink) {
             // Legacy exchange-file join link: leave to the Settings paste flow.
             if (parseSharedJoinLink(data) != null) {
@@ -162,9 +171,17 @@ class MainActivity : ComponentActivity() {
             ).show()
         } else {
             com.easybc.planner.sync.shared.PendingSharedJoin.setJoinLink(this, url)
+            // Returning from the browser grant page: the Picker grants are
+            // done, so the join continues automatically on the join screen.
+            val grantCompleted = data.getQueryParameter("sk-granted") == "1"
+            com.easybc.planner.sync.shared.PendingSharedJoin.setGrantCompleted(this, grantCompleted)
             Toast.makeText(
                 this,
-                "Join link ready. Grant file access, then join from Settings.",
+                if (grantCompleted) {
+                    "File access granted — finishing the join…"
+                } else {
+                    "Join link ready. Grant file access, then join from Settings."
+                },
                 Toast.LENGTH_LONG,
             ).show()
         }

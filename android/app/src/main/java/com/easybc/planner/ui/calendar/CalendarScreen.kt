@@ -61,6 +61,12 @@ fun CalendarScreen(
     val unreconciledCount by vm.unreconciledCount.collectAsState()
     val cycleLedger by vm.currentCycleLedger.collectAsState()
 
+    // Re-entering the calendar always re-centers on the current month —
+    // today is what the user is normally adjusting or recording.
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        vm.resetToCurrentMonth()
+    }
+
     Scaffold(
         topBar = {
             Column {
@@ -404,10 +410,12 @@ fun DayCell(
         else -> MaterialTheme.colorScheme.surface
     }
 
+    // Today must be identifiable at a glance: brand-primary ring + primary
+    // date number. Selection uses the secondary hue so the two never blur.
     val borderMod = if (isSelected) {
-        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
+        Modifier.border(2.dp, MaterialTheme.colorScheme.secondary, RoundedCornerShape(8.dp))
     } else if (cell.isToday) {
-        Modifier.border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(8.dp))
+        Modifier.border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp))
     } else {
         Modifier
     }
@@ -430,7 +438,8 @@ fun DayCell(
             text = cell.dayOfMonth.toString(),
             style = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.bodyMedium,
             fontWeight = if (cell.isToday) FontWeight.Bold else FontWeight.Normal,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
+            color = if (cell.isToday) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = alpha),
         )
 
         // Period dot. Filled when the bleed window is user-confirmed
@@ -646,5 +655,7 @@ private fun LegendItem(color: androidx.compose.ui.graphics.Color, label: String)
     }
 }
 
+// Follows the in-app ThemeMode override, not just the OS setting.
 @Composable
-private fun isSystemInDarkTheme(): Boolean = androidx.compose.foundation.isSystemInDarkTheme()
+private fun isSystemInDarkTheme(): Boolean =
+    com.easybc.planner.ui.theme.LocalEbDarkTheme.current

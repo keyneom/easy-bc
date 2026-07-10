@@ -16,6 +16,7 @@ object PendingSharedJoin {
     private const val JOIN_LINK = "join_link"
     private const val RESPONSE_TO_ACCEPT = "response_to_accept"
     private const val PRODUCED_RESPONSE = "produced_response"
+    private const val GRANT_COMPLETED = "grant_completed"
     private val _revision = MutableStateFlow(0L)
     val revision: StateFlow<Long> = _revision
 
@@ -37,6 +38,7 @@ object PendingSharedJoin {
 
     fun clearJoinLink(context: Context) {
         prefs(context).edit().remove(JOIN_LINK).apply()
+        com.easybc.planner.sync.InteractiveAuthGate.deepLinkFlowFinished()
         changed()
     }
 
@@ -49,6 +51,7 @@ object PendingSharedJoin {
 
     fun clearResponseToAccept(context: Context) {
         prefs(context).edit().remove(RESPONSE_TO_ACCEPT).apply()
+        com.easybc.planner.sync.InteractiveAuthGate.deepLinkFlowFinished()
         changed()
     }
 
@@ -58,6 +61,18 @@ object PendingSharedJoin {
 
     fun producedResponse(context: Context): String? =
         prefs(context).getString(PRODUCED_RESPONSE, null)
+
+    /**
+     * Set when the browser grant page sent the user back with `sk-granted=1`:
+     * the Picker grants are complete, so the join flow should continue
+     * automatically instead of waiting for another tap (docs/join-flow.md).
+     */
+    fun setGrantCompleted(context: Context, completed: Boolean) {
+        put(context, GRANT_COMPLETED, if (completed) "1" else null)
+    }
+
+    fun grantCompleted(context: Context): Boolean =
+        prefs(context).getString(GRANT_COMPLETED, null) == "1"
 
     private fun put(context: Context, key: String, value: String?) {
         val edit = prefs(context).edit()

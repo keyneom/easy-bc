@@ -110,6 +110,7 @@ Draw **interaction patterns** from mature **open-source or mainstream period tra
 ## 7. Related docs
 
 - [README.md](../README.md) — full functional requirements and algorithm context.
+- [settings-profiles-redesign.md](settings-profiles-redesign.md) — profiles-first settings/IA redesign (supersedes the single-scroll Settings page).
 - [incidents.md](incidents.md) — v1 mapping for realized risk vs locks.
 - [MOBILE_FFI.md](../crates/planner-core/MOBILE_FFI.md) — Android JSON parity.
 

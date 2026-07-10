@@ -27,7 +27,15 @@ import com.easybc.planner.ui.calendar.CalendarScreen
 import com.easybc.planner.ui.history.HistoryScreen
 import com.easybc.planner.ui.planner.PlannerScreen
 import com.easybc.planner.ui.reconcile.ReconcileScreen
+import com.easybc.planner.ui.settings.AboutScreen
+import com.easybc.planner.ui.settings.BackupScreen
+import com.easybc.planner.ui.settings.DeviceCalendarScreen
+import com.easybc.planner.ui.settings.PlanBasicsScreen
+import com.easybc.planner.ui.settings.ProtectionScreen
+import com.easybc.planner.ui.settings.RemindersScreen
+import com.easybc.planner.ui.settings.RiskComfortScreen
 import com.easybc.planner.ui.settings.SettingsScreen
+import com.easybc.planner.ui.settings.StorageSharingScreen
 import com.easybc.planner.ui.update.UpdateAvailableBanner
 
 enum class Screen(
@@ -68,7 +76,12 @@ fun AppNavigation(
 
     androidx.compose.runtime.LaunchedEffect(pendingSettingsDeepLink) {
         if (pendingSettingsDeepLink) {
+            // Land on the sharing screen (where join/response links are
+            // handled), with the settings hub beneath it on the back stack.
             navController.navigate(Screen.Settings.route) {
+                launchSingleTop = true
+            }
+            navController.navigate("settings/storage") {
                 launchSingleTop = true
             }
             onSettingsDeepLinkConsumed()
@@ -79,7 +92,10 @@ fun AppNavigation(
         bottomBar = {
             NavigationBar {
                 Screen.entries.forEach { screen ->
-                    val selected = currentDestination?.hierarchy?.any { it.route == screen.route } == true
+                    val selected = currentDestination?.hierarchy?.any {
+                        it.route == screen.route ||
+                            (screen == Screen.Settings && it.route?.startsWith("settings/") == true)
+                    } == true
                     NavigationBarItem(
                         icon = {
                             Icon(
@@ -119,7 +135,34 @@ fun AppNavigation(
             }
             composable(Screen.Planner.route) { PlannerScreen() }
             composable(Screen.History.route) { HistoryScreen() }
-            composable(Screen.Settings.route) { SettingsScreen() }
+            composable(Screen.Settings.route) {
+                SettingsScreen(onOpen = { route -> navController.navigate(route) })
+            }
+            // Settings sub-screens (docs/settings-profiles-redesign.md §2).
+            composable("settings/basics") {
+                PlanBasicsScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/protection") {
+                ProtectionScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/risk") {
+                RiskComfortScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/storage") {
+                StorageSharingScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/reminders") {
+                RemindersScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/device-calendar") {
+                DeviceCalendarScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/backup") {
+                BackupScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/about") {
+                AboutScreen(onBack = { navController.popBackStack() })
+            }
             // "reconcile" isn't a bottom-nav destination — it's a full-screen
             // child pushed from the Calendar screen's chip.
             composable("reconcile") {
