@@ -19,6 +19,7 @@ import com.easybc.planner.sync.GoogleAuthorization
 import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.shared.ProfileRecord
 import com.easybc.planner.sync.shared.PendingSharedJoin
+import com.easybc.planner.sync.shared.datasetPartLabel
 import com.easybc.planner.sync.shared.SharedSyncCoordinator
 import com.easybc.planner.sync.shared.SharedSyncState
 import com.easybc.planner.sync.shared.profileKey
@@ -535,6 +536,31 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             } catch (error: Exception) {
                 _cloudStatus.value =
                     cloudFailure("Update participant access", error, "Access update failed")
+            }
+        }
+    }
+
+    fun updateParticipantDatasetRole(
+        accessToken: String,
+        keyId: String,
+        email: String,
+        part: String,
+        level: String,
+    ) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _profileParticipants.value =
+                    sharedSync.updateParticipantDatasetRole(accessToken, keyId, email, part, level)
+                refreshSharedSyncState()
+                val label = datasetPartLabel(part)
+                _cloudStatus.value = SyncStatus.Success(
+                    if (level == "none") "Removed $label access."
+                    else "$label set to ${if (level == "viewer") "View" else "Edit"}.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value =
+                    cloudFailure("Update dataset access", error, "Access update failed")
             }
         }
     }

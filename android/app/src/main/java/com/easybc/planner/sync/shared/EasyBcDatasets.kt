@@ -39,6 +39,14 @@ fun datasetPartLabel(part: String): String = when (part) {
     else -> part
 }
 
+fun datasetPartSummary(part: String): String = when (part) {
+    PART_PLAN -> "Planner options and plan outputs"
+    PART_CYCLE -> "Period dates, cycle stats, body signals"
+    PART_INTIMACY -> "Logged acts, incidents, abstinence credits"
+    PART_SENSITIVE -> "Emergency contraception events"
+    else -> part
+}
+
 fun datasetIdForPart(baseDatasetId: String, part: String): String =
     if (part == PART_PLAN) baseDatasetId else "$baseDatasetId.$part"
 
@@ -99,19 +107,36 @@ fun highestGrantedRole(grants: Map<String, String>): String =
     grants.values.maxByOrNull { ROLE_RANK[it.lowercase()] ?: 0 }?.lowercase() ?: "viewer"
 
 /** Invite presets — same ids/grants as web SHARING_PRESETS. */
-data class SharingPreset(val id: String, val label: String, val grants: Map<String, String>)
+data class SharingPreset(
+    val id: String,
+    val label: String,
+    val description: String,
+    val grants: Map<String, String>,
+)
 
 val SHARING_PRESETS: List<SharingPreset> = listOf(
-    SharingPreset("cycle-only", "Cycle only", mapOf(PART_CYCLE to "viewer")),
-    SharingPreset("cycle-partner", "Cycle partner", mapOf(PART_CYCLE to "writer", PART_PLAN to "viewer")),
+    SharingPreset(
+        "cycle-only",
+        "Cycle only",
+        "They see period dates, cycle stats, and body signals — read-only.",
+        mapOf(PART_CYCLE to "viewer"),
+    ),
+    SharingPreset(
+        "cycle-partner",
+        "Cycle partner",
+        "They can log periods and body signals, and see the plan.",
+        mapOf(PART_CYCLE to "writer", PART_PLAN to "viewer"),
+    ),
     SharingPreset(
         "full-partner",
         "Full partner",
+        "They can edit everything except sensitive events.",
         mapOf(PART_PLAN to "writer", PART_CYCLE to "writer", PART_INTIMACY to "writer"),
     ),
     SharingPreset(
         "everything",
         "Everything",
+        "Full edit access, including sensitive events.",
         mapOf(
             PART_PLAN to "writer",
             PART_CYCLE to "writer",

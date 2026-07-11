@@ -1406,6 +1406,28 @@ h3 {
   color: var(--text);
 }
 
+/* Per-dataset access grid inside a person card and the Custom invite grid. */
+.participant-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.participant-grid,
+.invite-custom-grid {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.6rem;
+}
+
+.participant-grid .field-hint,
+.invite-custom-grid + .field-hint {
+  margin-top: 0.35rem;
+}
+
 .sync-share-panel {
   display: grid;
   gap: 0.65rem;

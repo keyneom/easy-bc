@@ -437,6 +437,12 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         mutableStateOf<Triple<String, String, Map<String, String>?>?>(null)
     }
     var invitePresetId by remember { mutableStateOf("cycle-only") }
+    // "custom" preset composes arbitrary grants via the per-dataset grid.
+    var customGrants by remember { mutableStateOf<Map<String, String>>(mapOf("cycle" to "viewer")) }
+    // Which participant's per-dataset access grid is expanded (keyId).
+    var expandedParticipant by remember { mutableStateOf<String?>(null) }
+    // [keyId, email, part, level] carried across a Google auth resolution.
+    var pendingParticipantDatasetRoleChange by remember { mutableStateOf<List<String>?>(null) }
     var dangerZoneOpen by remember { mutableStateOf(false) }
     var pendingJoin by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingLinkJoin by remember { mutableStateOf<String?>(null) }
@@ -474,6 +480,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         val profileDeleteKey = pendingProfileDeleteKey
         val refreshParticipants = pendingProfileParticipantsRefresh
         val participantRoleChange = pendingParticipantRoleChange
+        val participantDatasetRoleChange = pendingParticipantDatasetRoleChange
         val participantRevoke = pendingParticipantRevoke
         val invite = pendingInvite
         val join = pendingJoin
@@ -485,6 +492,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         pendingProfileDeleteKey = null
         pendingProfileParticipantsRefresh = false
         pendingParticipantRoleChange = null
+        pendingParticipantDatasetRoleChange = null
         pendingParticipantRevoke = null
         pendingInvite = null
         pendingJoin = null
@@ -509,6 +517,14 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                             participantRoleChange.first,
                             participantRoleChange.second,
                             participantRoleChange.third,
+                        )
+                    participantDatasetRoleChange != null ->
+                        vm.updateParticipantDatasetRole(
+                            token,
+                            participantDatasetRoleChange[0],
+                            participantDatasetRoleChange[1],
+                            participantDatasetRoleChange[2],
+                            participantDatasetRoleChange[3],
                         )
                     participantRevoke != null ->
                         vm.revokeParticipant(token, participantRevoke.first, participantRevoke.second)
@@ -617,6 +633,31 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                         vm.updateParticipantRole(step.accessToken, keyId, email, role)
                     is AuthorizationStep.NeedsResolution -> {
                         pendingParticipantRoleChange = Triple(keyId, email, role)
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndChangeParticipantDatasetRole(
+        keyId: String,
+        email: String,
+        part: String,
+        level: String,
+    ) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized ->
+                        vm.updateParticipantDatasetRole(step.accessToken, keyId, email, part, level)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingParticipantDatasetRoleChange = listOf(keyId, email, part, level)
                         resolutionLauncher.launch(
                             IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
                         )
@@ -1018,6 +1059,79 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                        } else if (participant.datasetRoles != null) {
+                            // Split profile: per-dataset access grid.
+                            val expanded = expandedParticipant == participant.keyId
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(
+                                    onClick = {
+                                        expandedParticipant =
+                                            if (expanded) null else participant.keyId
+                                    },
+                                    enabled = !busy,
+                                ) { Text(if (expanded) "Done" else "Manage access") }
+                                TextButton(
+                                    onClick = {
+                                        participantRevokeConfirm = participant.keyId to participantEmail
+                                    },
+                                    enabled = !busy,
+                                    colors = ButtonDefaults.textButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.error,
+                                    ),
+                                ) { Text("Remove") }
+                            }
+                            if (expanded) {
+                                com.easybc.planner.sync.shared.DATASET_PARTS.forEach { part ->
+                                    val role = participant.datasetRoles?.get(part)
+                                    val has = role != null
+                                    com.easybc.planner.ui.kit.EbDatasetRow(
+                                        dataset = when (part) {
+                                            com.easybc.planner.sync.shared.PART_CYCLE ->
+                                                com.easybc.planner.ui.kit.EbDataset.CYCLE
+                                            com.easybc.planner.sync.shared.PART_INTIMACY ->
+                                                com.easybc.planner.ui.kit.EbDataset.INTIMACY
+                                            com.easybc.planner.sync.shared.PART_SENSITIVE ->
+                                                com.easybc.planner.ui.kit.EbDataset.SENSITIVE
+                                            else -> com.easybc.planner.ui.kit.EbDataset.PLAN
+                                        },
+                                        title = com.easybc.planner.sync.shared.datasetPartLabel(part),
+                                        summary = com.easybc.planner.sync.shared.datasetPartSummary(part),
+                                        modifier = Modifier.padding(vertical = 2.dp),
+                                        trailing = {
+                                            com.easybc.planner.ui.kit.EbAccessSegmented(
+                                                value = when (role) {
+                                                    "writer", "admin", "owner" ->
+                                                        com.easybc.planner.ui.kit.EbAccessLevel.EDIT
+                                                    "viewer" ->
+                                                        com.easybc.planner.ui.kit.EbAccessLevel.VIEW
+                                                    else ->
+                                                        com.easybc.planner.ui.kit.EbAccessLevel.NONE
+                                                },
+                                                enabled = !busy && has,
+                                                onChange = { level ->
+                                                    authorizeAndChangeParticipantDatasetRole(
+                                                        participant.keyId,
+                                                        participantEmail,
+                                                        part,
+                                                        when (level) {
+                                                            com.easybc.planner.ui.kit.EbAccessLevel.NONE -> "none"
+                                                            com.easybc.planner.ui.kit.EbAccessLevel.VIEW -> "viewer"
+                                                            com.easybc.planner.ui.kit.EbAccessLevel.EDIT -> "writer"
+                                                        },
+                                                    )
+                                                },
+                                            )
+                                        },
+                                    )
+                                }
+                                Text(
+                                    "To add a dataset this person has never received, invite " +
+                                        "them again with that dataset — sharing can't add a file " +
+                                        "they hold no key for.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         } else {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 if (participant.role != "viewer") {
@@ -1083,6 +1197,57 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                             label = { Text(preset.label, style = MaterialTheme.typography.labelSmall) },
                         )
                     }
+                    FilterChip(
+                        selected = invitePresetId == "custom",
+                        onClick = { invitePresetId = "custom" },
+                        label = { Text("Custom…", style = MaterialTheme.typography.labelSmall) },
+                    )
+                }
+                if (invitePresetId == "custom") {
+                    com.easybc.planner.sync.shared.DATASET_PARTS.forEach { part ->
+                        val role = customGrants[part]
+                        com.easybc.planner.ui.kit.EbDatasetRow(
+                            dataset = when (part) {
+                                com.easybc.planner.sync.shared.PART_CYCLE ->
+                                    com.easybc.planner.ui.kit.EbDataset.CYCLE
+                                com.easybc.planner.sync.shared.PART_INTIMACY ->
+                                    com.easybc.planner.ui.kit.EbDataset.INTIMACY
+                                com.easybc.planner.sync.shared.PART_SENSITIVE ->
+                                    com.easybc.planner.ui.kit.EbDataset.SENSITIVE
+                                else -> com.easybc.planner.ui.kit.EbDataset.PLAN
+                            },
+                            title = com.easybc.planner.sync.shared.datasetPartLabel(part),
+                            summary = com.easybc.planner.sync.shared.datasetPartSummary(part),
+                            modifier = Modifier.padding(vertical = 2.dp),
+                            trailing = {
+                                com.easybc.planner.ui.kit.EbAccessSegmented(
+                                    value = when (role) {
+                                        "writer", "admin", "owner" ->
+                                            com.easybc.planner.ui.kit.EbAccessLevel.EDIT
+                                        "viewer" -> com.easybc.planner.ui.kit.EbAccessLevel.VIEW
+                                        else -> com.easybc.planner.ui.kit.EbAccessLevel.NONE
+                                    },
+                                    enabled = !busy,
+                                    onChange = { level ->
+                                        customGrants = customGrants.toMutableMap().apply {
+                                            when (level) {
+                                                com.easybc.planner.ui.kit.EbAccessLevel.NONE -> remove(part)
+                                                com.easybc.planner.ui.kit.EbAccessLevel.VIEW -> put(part, "viewer")
+                                                com.easybc.planner.ui.kit.EbAccessLevel.EDIT -> put(part, "writer")
+                                            }
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                    }
+                } else {
+                    Text(
+                        com.easybc.planner.sync.shared.SHARING_PRESETS
+                            .firstOrNull { it.id == invitePresetId }?.description.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1106,11 +1271,15 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
             OutlinedButton(
                 onClick = {
                     if (inviteEmail.isBlank()) return@OutlinedButton
-                    val presetGrants = if (inviteProfileIsSplit) {
-                        com.easybc.planner.sync.shared.SHARING_PRESETS
+                    val presetGrants = when {
+                        !inviteProfileIsSplit -> null
+                        invitePresetId == "custom" -> customGrants
+                        else -> com.easybc.planner.sync.shared.SHARING_PRESETS
                             .firstOrNull { it.id == invitePresetId }?.grants
-                    } else {
-                        null
+                    }
+                    if (inviteProfileIsSplit && presetGrants.isNullOrEmpty()) {
+                        vm.cloudError("Pick at least one dataset to share.")
+                        return@OutlinedButton
                     }
                     val effectiveRole = presetGrants
                         ?.let { com.easybc.planner.sync.shared.highestGrantedRole(it) }

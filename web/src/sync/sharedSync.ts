@@ -1249,6 +1249,68 @@ export async function updateParticipantRole(
   });
 }
 
+/**
+ * Change one participant's access to a single dataset part of a split profile.
+ * `"none"` revokes just that dataset file (re-keys it, drops its Drive
+ * permission); `viewer`/`writer` adjust an existing grant. Granting a dataset
+ * the participant has never held is not possible here — that needs the invite
+ * key exchange — so callers only offer view/edit for parts already in
+ * `datasetRoles`.
+ */
+export async function updateParticipantDatasetRole(
+  config: SharedSyncConfig,
+  input: {
+    profileKey: string;
+    keyId: string;
+    emailAddress: string;
+    part: DatasetPart;
+    level: "none" | "viewer" | "writer";
+  },
+): Promise<SharedSyncState> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = findProfile(state, input.profileKey);
+    if (!profile || isLocalProfile(profile)) throw new Error("That encrypted profile is missing.");
+    if (!isSplitProfile(profile)) {
+      throw new Error("This profile shares everything as one dataset; per-dataset access needs the split.");
+    }
+    const datasetId = datasetIdForPart(profile.datasetId, input.part);
+    const scoped = createRuntimeForProfile(config, state, input.profileKey, createEmptySharedSyncPayload());
+    try {
+      if (input.level === "none") {
+        await scoped.controller.revokeDatasetKey({
+          datasetId,
+          keyId: input.keyId,
+          emailAddress: input.emailAddress,
+        });
+      } else {
+        await scoped.controller.setDatasetRole({
+          datasetId,
+          keyId: input.keyId,
+          role: input.level,
+          emailAddress: input.emailAddress,
+        });
+      }
+      const refreshed = (await refreshCachedState()) ?? state;
+      const current = findProfile(refreshed, input.profileKey) ?? profile;
+      const next = upsertProfile(refreshed, {
+        ...current,
+        participantEmails: {
+          ...current.participantEmails,
+          [input.keyId]: input.emailAddress,
+        },
+      });
+      cachedState = next;
+      await saveSharedSyncState(next);
+      return next;
+    } finally {
+      scoped.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
 export async function revokeParticipant(
   config: SharedSyncConfig,
   profileKeyValue: string,

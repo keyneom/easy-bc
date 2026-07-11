@@ -44,6 +44,7 @@ import {
   submitJoinFromLink,
   switchManagedProfile,
   syncActiveDataset,
+  updateParticipantDatasetRole,
   updateParticipantRole,
 } from "../sync/sharedSync";
 import {
@@ -55,6 +56,8 @@ import {
   DATASET_PART_LABELS,
   DATASET_PART_SUMMARIES,
   DATASET_PARTS,
+  type DatasetGrants,
+  type DatasetPart,
   highestGrantedRole,
   SHARING_PRESETS,
 } from "../sync/datasets";
@@ -69,7 +72,13 @@ import {
   sharedPayloadToSyncPayload,
   type SharedSyncState,
 } from "../sync/sharedTypes";
-import { EbDatasetRow, EbPresetChip } from "../ui/Kit";
+import {
+  type EbAccessLevel,
+  EbAccessSegmented,
+  EbDatasetRow,
+  EbPersonCard,
+  EbPresetChip,
+} from "../ui/Kit";
 import type { SyncPayloadV1 } from "../sync/types";
 
 type Props = {
@@ -83,6 +92,13 @@ type Props = {
 };
 
 type Notice = { kind: "info" | "success" | "error"; message: string } | null;
+
+/** Map a sync-kit role to the grid's None/View/Edit segmented level. */
+function roleToLevel(role?: SharingRole): EbAccessLevel {
+  if (role === "writer" || role === "admin" || role === "owner") return "edit";
+  if (role === "viewer") return "view";
+  return "none";
+}
 
 export function SyncSettings({
   options,
@@ -100,7 +116,11 @@ export function SyncSettings({
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<Exclude<SharingRole, "owner">>("viewer");
   // Split profiles invite via presets; "cycle-only" is the safe default.
+  // "custom" reveals the per-dataset grid to compose arbitrary grants.
   const [invitePreset, setInvitePreset] = useState<string>("cycle-only");
+  const [customGrants, setCustomGrants] = useState<DatasetGrants>({ cycle: "viewer" });
+  // Which participant's per-dataset access grid is expanded (keyId).
+  const [expandedParticipant, setExpandedParticipant] = useState<string | null>(null);
   const [lastJoinUrl, setLastJoinUrl] = useState<string | null>(null);
   const [joinLinkInput, setJoinLinkInput] = useState("");
   const [responseLink, setResponseLink] = useState<string | null>(null);
@@ -215,14 +235,23 @@ export function SyncSettings({
     if (!config || !inviteEmail.trim()) return;
     setBusy("invite");
     try {
-      const preset = SHARING_PRESETS.find((entry) => entry.id === invitePreset);
       const splitActive = activeProfile ? isSplitProfile(activeProfile) : false;
+      const grants: DatasetGrants | undefined = !splitActive
+        ? undefined
+        : invitePreset === "custom"
+          ? customGrants
+          : SHARING_PRESETS.find((entry) => entry.id === invitePreset)?.grants;
+      if (splitActive && grants && Object.keys(grants).length === 0) {
+        setNotice({ kind: "error", message: "Pick at least one dataset to share." });
+        setBusy(null);
+        return;
+      }
       const invited = await inviteToDatasetLink(config, {
         emailAddress: inviteEmail.trim(),
-        role: splitActive && preset
-          ? (highestGrantedRole(preset.grants) as Exclude<SharingRole, "owner">)
+        role: splitActive && grants
+          ? (highestGrantedRole(grants) as Exclude<SharingRole, "owner">)
           : inviteRole,
-        ...(splitActive && preset ? { grants: preset.grants } : {}),
+        ...(splitActive && grants ? { grants } : {}),
       });
       setLastJoinUrl(invited.joinLink);
       setNotice({
@@ -553,6 +582,46 @@ export function SyncSettings({
         current.map((entry) => entry.keyId === participant.keyId ? { ...entry, role } : entry),
       );
       setNotice({ kind: "success", message: "Participant access updated." });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const changeParticipantDatasetRole = async (
+    participant: ManagedParticipant,
+    part: DatasetPart,
+    level: EbAccessLevel,
+  ) => {
+    if (!config || !sharedSyncState || !participant.emailAddress) return;
+    const mapped = level === "none" ? "none" : level === "view" ? "viewer" : "writer";
+    setBusy(`participant-${participant.keyId}`);
+    try {
+      const next = await updateParticipantDatasetRole(config, {
+        profileKey: sharedSyncState.activeProfileKey,
+        keyId: participant.keyId,
+        emailAddress: participant.emailAddress,
+        part,
+        level: mapped,
+      });
+      onSharedSyncStateChange(next);
+      setParticipants((current) =>
+        current.map((entry) => {
+          if (entry.keyId !== participant.keyId) return entry;
+          const datasetRoles = { ...entry.datasetRoles };
+          if (mapped === "none") delete datasetRoles[part];
+          else datasetRoles[part] = mapped;
+          return { ...entry, datasetRoles };
+        }),
+      );
+      setNotice({
+        kind: "success",
+        message:
+          mapped === "none"
+            ? `Removed ${DATASET_PART_LABELS[part]} access.`
+            : `${DATASET_PART_LABELS[part]} set to ${level === "view" ? "View" : "Edit"}.`,
+      });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -937,10 +1006,43 @@ export function SyncSettings({
                     {preset.label}
                   </EbPresetChip>
                 ))}
+                <EbPresetChip
+                  selected={invitePreset === "custom"}
+                  onClick={() => setInvitePreset("custom")}
+                >
+                  Custom…
+                </EbPresetChip>
               </div>
-              <span className="field-hint">
-                {SHARING_PRESETS.find((preset) => preset.id === invitePreset)?.description}
-              </span>
+              {invitePreset === "custom" ? (
+                <div className="invite-custom-grid">
+                  {DATASET_PARTS.map((part) => (
+                    <EbDatasetRow
+                      key={part}
+                      dataset={part}
+                      title={DATASET_PART_LABELS[part]}
+                      summary={DATASET_PART_SUMMARIES[part]}
+                      trailing={
+                        <EbAccessSegmented
+                          label={`${DATASET_PART_LABELS[part]} access`}
+                          value={roleToLevel(customGrants[part])}
+                          onChange={(level) =>
+                            setCustomGrants((current) => {
+                              const next = { ...current };
+                              if (level === "none") delete next[part];
+                              else next[part] = level === "view" ? "viewer" : "writer";
+                              return next;
+                            })
+                          }
+                        />
+                      }
+                    />
+                  ))}
+                </div>
+              ) : (
+                <span className="field-hint">
+                  {SHARING_PRESETS.find((preset) => preset.id === invitePreset)?.description}
+                </span>
+              )}
             </div>
           ) : (
             <label className="field">
@@ -973,57 +1075,112 @@ export function SyncSettings({
               <strong>People with access</strong>
               <span>{participants.length} encryption {participants.length === 1 ? "key" : "keys"}</span>
             </div>
-            {participants.map((participant) => (
-              <div className="participant-row" key={participant.keyId}>
-                <div>
-                  <strong>
-                    {participant.emailAddress ||
-                      (participant.isCurrentDevice ? "You (this identity)" : "Unknown participant")}
-                  </strong>
-                  <span>
-                    {participant.datasetRoles
-                      ? DATASET_PARTS.filter((part) => participant.datasetRoles?.[part])
-                          .map(
-                            (part) =>
-                              `${DATASET_PART_LABELS[part]} (${participant.datasetRoles![part]})`,
-                          )
-                          .join(" · ")
-                      : participant.role}
-                    {!participant.emailAddress && !participant.isCurrentDevice
-                      ? ` · key ${participant.keyId.slice(0, 10)}…`
-                      : ""}
-                  </span>
-                </div>
-                {participant.role !== "owner" && !participant.isCurrentDevice && (
-                  <div className="participant-actions">
-                    <select
-                      aria-label={`Access for ${participant.emailAddress || participant.keyId}`}
-                      value={participant.role}
-                      disabled={busy !== null || !participant.emailAddress}
-                      onChange={(event) =>
-                        void changeParticipantRole(
-                          participant,
-                          event.target.value as Exclude<SharingRole, "owner">,
-                        )
-                      }
-                    >
-                      <option value="viewer">Viewer</option>
-                      <option value="writer">Writer</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                    <button
-                      type="button"
-                      className="ghost danger"
-                      disabled={busy !== null}
-                      onClick={() => void removeParticipant(participant)}
-                    >
-                      <UserMinus aria-hidden />
-                      Remove
-                    </button>
+            {participants.map((participant) => {
+              const split = activeProfile ? isSplitProfile(activeProfile) : false;
+              const name =
+                participant.emailAddress ||
+                (participant.isCurrentDevice ? "You (this identity)" : "Unknown participant");
+              const canManage =
+                participant.role !== "owner" &&
+                !participant.isCurrentDevice &&
+                Boolean(participant.emailAddress);
+              const summary = split
+                ? DATASET_PARTS.filter((part) => participant.datasetRoles?.[part])
+                    .map((part) => `${DATASET_PART_LABELS[part]} (${participant.datasetRoles![part]})`)
+                    .join(" · ") || "No dataset access"
+                : participant.role;
+              const expanded = expandedParticipant === participant.keyId;
+              return (
+                <EbPersonCard
+                  key={participant.keyId}
+                  name={name}
+                  email={participant.emailAddress}
+                  colorKey={participant.emailAddress ?? participant.keyId}
+                >
+                  <div className="participant-summary">
+                    <span className="field-hint">
+                      {summary}
+                      {!participant.emailAddress && !participant.isCurrentDevice
+                        ? ` · key ${participant.keyId.slice(0, 10)}…`
+                        : ""}
+                    </span>
+                    {canManage && (
+                      <div className="participant-actions">
+                        {split && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() =>
+                              setExpandedParticipant(expanded ? null : participant.keyId)
+                            }
+                          >
+                            {expanded ? "Done" : "Manage access"}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="ghost danger"
+                          disabled={busy !== null}
+                          onClick={() => void removeParticipant(participant)}
+                        >
+                          <UserMinus aria-hidden />
+                          Remove
+                        </button>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
+                  {canManage && !split && (
+                    <label className="field">
+                      <span>Access</span>
+                      <select
+                        aria-label={`Access for ${participant.emailAddress}`}
+                        value={participant.role}
+                        disabled={busy !== null}
+                        onChange={(event) =>
+                          void changeParticipantRole(
+                            participant,
+                            event.target.value as Exclude<SharingRole, "owner">,
+                          )
+                        }
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="writer">Writer</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </label>
+                  )}
+                  {canManage && split && expanded && (
+                    <div className="participant-grid">
+                      {DATASET_PARTS.map((part) => {
+                        const has = Boolean(participant.datasetRoles?.[part]);
+                        return (
+                          <EbDatasetRow
+                            key={part}
+                            dataset={part}
+                            title={DATASET_PART_LABELS[part]}
+                            summary={DATASET_PART_SUMMARIES[part]}
+                            trailing={
+                              <EbAccessSegmented
+                                label={`${name}'s access to ${DATASET_PART_LABELS[part]}`}
+                                value={roleToLevel(participant.datasetRoles?.[part])}
+                                disabled={busy !== null || !has}
+                                onChange={(level) =>
+                                  void changeParticipantDatasetRole(participant, part, level)
+                                }
+                              />
+                            }
+                          />
+                        );
+                      })}
+                      <span className="field-hint">
+                        To add a dataset this person has never received, invite them again
+                        with that dataset — sharing can’t add a file they hold no key for.
+                      </span>
+                    </div>
+                  )}
+                </EbPersonCard>
+              );
+            })}
           </div>
           {pendingResponses.length > 0 && (
             <div className="sync-pending-list">

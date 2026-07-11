@@ -746,6 +746,57 @@ class SharedSyncCoordinator(
         return listActiveParticipants(accessToken)
     }
 
+    /**
+     * Change one participant's access to a single dataset part of a split
+     * profile. `"none"` revokes just that dataset file; `viewer`/`writer`
+     * adjust an existing grant. Granting a dataset the participant has never
+     * held needs the invite key exchange, so callers only offer view/edit for
+     * parts already in the participant's [ProfileParticipant.datasetRoles].
+     */
+    suspend fun updateParticipantDatasetRole(
+        accessToken: String,
+        keyId: String,
+        emailAddress: String,
+        part: String,
+        level: String,
+    ): List<ProfileParticipant> {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile)) { "That profile is local only." }
+        require(canAdministerRole(profile.role)) { "Only owners/admins can change participant access." }
+        require(isSplitProfile(profile)) {
+            "This profile shares everything as one dataset; per-dataset access needs the split."
+        }
+        val trimmedEmail = emailAddress.trim()
+        require(trimmedEmail.isNotEmpty()) {
+            "EasyBC needs the participant email to update their Drive access."
+        }
+        val datasetId = datasetIdForPart(profile.datasetId, part)
+        val controller = controllerFor(state, profile)
+        if (level == "none") {
+            controller.revokeDatasetKey(
+                datasetId = datasetId,
+                keyId = keyId,
+                emailAddress = trimmedEmail,
+            )
+        } else {
+            controller.setDatasetRole(
+                datasetId = datasetId,
+                keyId = keyId,
+                role = sharingRoleFromString(level),
+                emailAddress = trimmedEmail,
+            )
+        }
+        registry.upsertProfile(
+            refreshedProfile(profile).copy(
+                participantEmails = profile.participantEmails.orEmpty() +
+                    (keyId to trimmedEmail),
+            ),
+        )
+        return listActiveParticipants(accessToken)
+    }
+
     suspend fun revokeParticipant(
         accessToken: String,
         keyId: String,
