@@ -30,13 +30,17 @@ grants; membership + provenance mirrored via `synchronizeMembers`), and
 profile photos ride the `plan` dataset (`profileMeta`). Trust display reads
 account verifications from the control directory on both platforms.
 **Known limitation:** Android-originated joins are still accurately labeled
-"Key from invite link" — sync-kit-android exposes the
-`createAccountBinding`/`verifyAccountBinding` controller hooks but ships no
-Kotlin creator/verifier yet, and EasyBC does not fabricate one. Porting the
-TS `account-binding.ts` (Credential Manager assertion + nonce-bound Google
-ID token, byte-identical canonical challenge, cross-platform fixtures) is
-the tracked follow-up; `requireAccountBinding` stays false everywhere until
-every platform can produce bindings.
+"Key from invite link". As of sync-kit 0.2.0-rc.13 the Kotlin
+creator/verifier exists in the library (Credential Manager assertion +
+nonce-bound Google ID token over the same canonical challenge as the TS
+`account-binding.ts`, with a shared golden fixture), but EasyBC has not
+wired it yet. Remaining app-side work before enabling: APK-certificate
+origin allowlists (debug + release) and Digital Asset Links; requesting the
+Google ID token with the web/server OAuth client ID as audience; migrating
+existing identities that lack `credentialPublicKey`; wiring the
+`createAccountBinding`/`verifyAccountBinding` controller callbacks; and an
+on-device two-account web↔Android ceremony. `requireAccountBinding` stays
+false everywhere until all of that lands on every platform.
 This replaces the earlier speculative proposal that lived in this file; rc.11
 settled the protocol differently (and better). The authoritative protocol doc
 is `sync-kit/docs/sharing-control-datasets.md`; this file records what EasyBC
