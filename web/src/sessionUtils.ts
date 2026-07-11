@@ -96,6 +96,14 @@ export type PersistedSession = {
   deletedVoluntaryAbstinenceDates: Record<string, string>;
   plannerOptionsUpdatedAt: string;
   ecJournalUpdatedAt: string;
+  /**
+   * Profile display metadata (avatar) from the plan dataset. Mirrored onto
+   * ProfileRecord.avatarWebp for chips/headers after apply.
+   */
+  profileMeta?: {
+    avatarWebp?: string;
+    updatedAt: string;
+  };
   /** Android-only sync preferences; web preserves these without applying them. */
   androidPreferences?: PreservedAndroidPreferences;
 };

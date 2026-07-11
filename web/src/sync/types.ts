@@ -6,6 +6,13 @@ export type { SyncEnvelopeV1 } from "@keyneom/sync-kit/crypto";
 
 export type PortablePlannerOptions = Omit<WasmOptions, "calendarCycles">;
 
+/** Profile display metadata synced via the plan dataset (avatar, etc.). */
+export type ProfileMetaV1 = {
+  /** Base64 WebP bytes, no data-URL prefix. */
+  avatarWebp?: string;
+  updatedAt: string;
+};
+
 export type SyncPayloadV1 = {
   schemaVersion: 1;
   exportedAt: string;
@@ -25,6 +32,11 @@ export type SyncPayloadV1 = {
     value: boolean;
     updatedAt: string;
   };
+  /**
+   * Profile display metadata (avatar). Lives in the plan dataset part only.
+   * Absent on snapshots written before avatar support.
+   */
+  profileMeta?: ProfileMetaV1;
   /** Android-only device preferences. Web preserves these without applying them. */
   androidPreferences?: {
     value: AndroidPreferences;
@@ -159,6 +171,9 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
   const androidPreferences = a.androidPreferences && b.androidPreferences
     ? newer(a.androidPreferences, a.androidPreferences.updatedAt, b.androidPreferences, b.androidPreferences.updatedAt)
     : (a.androidPreferences ?? b.androidPreferences);
+  const profileMeta = a.profileMeta && b.profileMeta
+    ? newer(a.profileMeta, a.profileMeta.updatedAt, b.profileMeta, b.profileMeta.updatedAt)
+    : (a.profileMeta ?? b.profileMeta);
   const merged: SyncPayloadV1 = {
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
@@ -168,6 +183,7 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
     calendarDayLogs: dayLogs,
     ...abstinence,
     ecJournal,
+    ...(profileMeta ? { profileMeta } : {}),
     ...(androidPreferences ? { androidPreferences } : {}),
   };
   if (merged.planner.configured === undefined && plannerConfiguredFromPayload(merged)) {
@@ -189,6 +205,15 @@ export function parseSyncPayload(value: unknown): SyncPayloadV1 {
     !parsed.ecJournal
   ) {
     throw new Error("The Drive snapshot is not a supported EasyBC sync file.");
+  }
+  if (
+    parsed.profileMeta &&
+    (typeof parsed.profileMeta.updatedAt !== "string" ||
+      (parsed.profileMeta.avatarWebp !== undefined &&
+        (typeof parsed.profileMeta.avatarWebp !== "string" ||
+          parsed.profileMeta.avatarWebp.length > 16_384)))
+  ) {
+    throw new Error("The Drive snapshot contains invalid profile photo metadata.");
   }
   return {
     ...parsed,

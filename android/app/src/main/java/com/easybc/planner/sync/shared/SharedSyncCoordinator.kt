@@ -3,6 +3,7 @@ package com.easybc.planner.sync.shared
 import android.content.Context
 import com.easybc.planner.data.db.AppDatabase
 import com.easybc.planner.sync.SYNC_RP_ID
+import com.easybc.planner.sync.ProfileMetaV1
 import com.easybc.planner.sync.SyncPayloadGateway
 import com.easybc.planner.sync.SyncPayloadV1
 import com.keyneom.synckit.crypto.SyncKitJson
@@ -15,6 +16,10 @@ import com.keyneom.synckit.sharing.SharingDatasetGrantV1
 import com.keyneom.synckit.sharing.SharingJoinParamStyle
 import com.keyneom.synckit.sharing.SharingJoinParams
 import com.keyneom.synckit.sharing.SharingRole
+import com.keyneom.synckit.sharing.SharingControlDataset
+import com.keyneom.synckit.sharing.SharingControlMemberMetadataV1
+import com.keyneom.synckit.sharing.SharingControlStateV1
+import com.keyneom.synckit.sharing.createSharingControlCodec
 import com.keyneom.synckit.sharing.VerifySharedBackupOptions
 import com.keyneom.synckit.sharing.appendSharingJoinParams
 import com.keyneom.synckit.sharing.buildSharingJoinLinkV1
@@ -104,6 +109,8 @@ class SharedSyncCoordinator(
             displayName = activeBeforeSetup?.displayName,
             role = SharingRole.OWNER.name.lowercase(),
             trustedOwnerKeyId = identity.publicKey.keyId,
+            controlDatasetId = controlDatasetIdFor(PRIMARY_DATASET_ID),
+            controlEnrollment = "pending",
             syncMode = "encrypted",
         )
         val provisional = SharedSyncState(
@@ -116,7 +123,7 @@ class SharedSyncCoordinator(
             registry.save(provisional)
             val controller = controllerFor(provisional, connectedProfile)
             val storage = controller.ensureStorage()
-            val local = sharedPayload(store.localPayload())
+            val local = sharedPayload(store.localPayload()).withProfileAvatar(connectedProfile)
             // Adopt an existing primary dataset (interrupted setup, reinstall,
             // reconnecting device) instead of failing with "already exists";
             // create only when the folder has none. A fresh folder gets the
@@ -126,6 +133,9 @@ class SharedSyncCoordinator(
             // publishes a full payload into one file.
             val datasets = controller.listDatasets()
             val existing = datasets.firstOrNull { it.datasetId == PRIMARY_DATASET_ID }
+            val existingControl = datasets.firstOrNull {
+                it.datasetId == connectedProfile.controlDatasetId
+            }
             val companionIds = datasets.mapNotNull { entry ->
                 partForDatasetId(PRIMARY_DATASET_ID, entry.datasetId)
                     ?.takeIf { it != PART_PLAN }
@@ -140,6 +150,9 @@ class SharedSyncCoordinator(
                     controller.adoptDataset(PRIMARY_DATASET_ID, requireOwned = true)
                     for (companionId in companionIds) {
                         controller.adoptDataset(companionId, requireOwned = true)
+                    }
+                    if (existingControl != null) {
+                        controller.adoptDataset(existingControl.datasetId, requireOwned = true)
                     }
                 } catch (error: Exception) {
                     throw IllegalArgumentException(
@@ -184,6 +197,16 @@ class SharedSyncCoordinator(
                 createdFileId = fileId
                 createdRevisionId = revisionId
             }
+            if (existingControl == null && existing == null) {
+                val currentState = registry.load() ?: provisional
+                val currentProfile = findProfile(
+                    currentState,
+                    profileKey(ownerEmail, PRIMARY_DATASET_ID),
+                ) ?: connectedProfile
+                controlDatasetFor(currentState, currentProfile).create(
+                    SharingControlMemberMetadataV1(email = ownerEmail),
+                )
+            }
             // Companion registry records were persisted onto the provisional
             // profile during the operations above — carry them forward.
             val persistedProfile = registry.load()?.let {
@@ -200,6 +223,15 @@ class SharedSyncCoordinator(
                 lastRevisionId = createdRevisionId,
                 lastSyncedAt = java.time.Instant.now().toString(),
                 displayName = connectedProfile.displayName,
+                avatarWebp = appliedPayload.profileMeta?.avatarWebp ?: connectedProfile.avatarWebp,
+                avatarUpdatedAt = appliedPayload.profileMeta?.updatedAt
+                    ?: connectedProfile.avatarUpdatedAt,
+                controlDatasetId = connectedProfile.controlDatasetId,
+                controlEnrollment = if (existingControl != null || existing == null) {
+                    "enrolled"
+                } else {
+                    "pending"
+                },
                 syncMode = "encrypted",
                 datasetGrants = if (split) OWNER_DATASET_GRANTS else null,
                 datasetRecords = persistedProfile?.datasetRecords,
@@ -235,7 +267,7 @@ class SharedSyncCoordinator(
             "This profile is local only. Connect encrypted sync before syncing it."
         }
         val controller = controllerFor(state, profile)
-        val local = sharedPayload(store.localPayload())
+        val local = sharedPayload(store.localPayload()).withProfileAvatar(profile)
         val result = syncProfileDatasetGroup(
             controller,
             profile,
@@ -244,7 +276,7 @@ class SharedSyncCoordinator(
         )
         store.apply(result.payload.withLocalAndroidPreferences(store.localPayload()))
         val syncedAt = java.time.Instant.now().toString()
-        val nextProfile = refreshedProfile(profile).copy(
+        val nextProfile = refreshedProfile(profile).withAvatarFrom(result.payload).copy(
             fileId = result.fileId,
             lastRevisionId = result.revisionId,
             lastSyncedAt = syncedAt,
@@ -253,7 +285,7 @@ class SharedSyncCoordinator(
         val next = registry.upsertProfile(nextProfile)
         store.rememberSync(result.fileId, syncedAt)
         SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
-        return next
+        return refreshControlEnrollment(next, nextProfile)
     }
 
     suspend fun invite(
@@ -271,8 +303,9 @@ class SharedSyncCoordinator(
         val invited = controller.inviteParticipant(
             InviteParticipantInput(
                 emailAddress = emailAddress.trim(),
-                requestedGrants = listOf(
-                    SharingDatasetGrantV1(profile.datasetId, sharingRole),
+                requestedGrants = requestedGrantsWithControl(
+                    profile,
+                    listOf(SharingDatasetGrantV1(profile.datasetId, sharingRole)),
                 ),
                 joinLandingUrl = EASY_BC_JOIN_LANDING_URL,
                 appDisplayName = "EasyBC",
@@ -310,7 +343,7 @@ class SharedSyncCoordinator(
         require(canAdministerRole(profile.role)) { "Only owners/admins can invite participants." }
         val sharingRole = sharingRoleFromString(role)
         require(sharingRole != SharingRole.OWNER) { "Cannot invite as owner." }
-        val requestedGrants = if (isSplitProfile(profile)) {
+        val dataGrants = if (isSplitProfile(profile)) {
             requestedGrantsFromDatasetGrants(
                 profile.datasetId,
                 grants ?: DATASET_PARTS.associateWith { role.lowercase() },
@@ -318,6 +351,7 @@ class SharedSyncCoordinator(
         } else {
             listOf(SharingDatasetGrantV1(profile.datasetId, sharingRole))
         }
+        val requestedGrants = requestedGrantsWithControl(profile, dataGrants)
         require(requestedGrants.isNotEmpty()) { "Choose at least one dataset to share." }
         val controller = controllerFor(state, profile)
         val invited = controller.inviteParticipantForLink(
@@ -355,12 +389,18 @@ class SharedSyncCoordinator(
         if (existing == null && hasMeaningfulSharedData(localBeforeJoin)) {
             existing = setup(accessToken)
         }
-        val grant = parsed.invitation.requestedGrants.firstOrNull()
+        val controlGrant = parsed.invitation.requestedGrants.firstOrNull {
+            it.datasetId.endsWith(CONTROL_DATASET_SUFFIX)
+        }
+        val appGrants = parsed.invitation.requestedGrants.filter {
+            it.datasetId != controlGrant?.datasetId
+        }
+        val grant = appGrants.firstOrNull()
             ?: error("Invitation has no dataset grants.")
         // A split share grants a subset of the profile's dataset files; the
         // profile is keyed by the base dataset id and remembers per-part
         // roles so sync and the UI know exactly what this device can see.
-        val parsedGrants = grantsFromRequestedGrants(parsed.invitation.requestedGrants)
+        val parsedGrants = grantsFromRequestedGrants(appGrants)
         val joinProfile = ProfileRecord(
             datasetId = parsedGrants.baseDatasetId,
             ownerEmail = ownerEmail,
@@ -374,6 +414,8 @@ class SharedSyncCoordinator(
             appFolderId = parsed.invitation.appFolderId,
             needsInitialLoad = true,
             datasetGrants = if (parsedGrants.split) parsedGrants.grants else null,
+            controlDatasetId = controlGrant?.datasetId,
+            controlEnrollment = if (controlGrant == null) "none" else "pending",
         )
         val profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId)
         existing?.let {
@@ -441,7 +483,9 @@ class SharedSyncCoordinator(
         // The first grant may be a companion file of a split profile; the
         // profile record is keyed by the base dataset id.
         val datasetId = baseDatasetIdOf(
-            pending.invitation.requestedGrants.firstOrNull()?.datasetId ?: PRIMARY_DATASET_ID,
+            pending.invitation.requestedGrants.firstOrNull {
+                !it.datasetId.endsWith(CONTROL_DATASET_SUFFIX)
+            }?.datasetId ?: PRIMARY_DATASET_ID,
         )
         val profile = pending.profileKey
             ?.let { findProfile(state, it) }
@@ -465,11 +509,16 @@ class SharedSyncCoordinator(
             refreshed,
             profileKey(profile.ownerEmail, profile.datasetId),
         ) ?: profile
-        registry.upsertProfile(
-            acceptedProfile.copy(
-                participantEmails = acceptedProfile.participantEmails.orEmpty() +
-                    (parsed.response.keyId to pending.recipientEmail),
-            ),
+        val updatedProfile = acceptedProfile.copy(
+            participantEmails = acceptedProfile.participantEmails.orEmpty() +
+                (parsed.response.keyId to pending.recipientEmail),
+        )
+        val updatedState = registry.upsertProfile(updatedProfile)
+        synchronizeControlMembers(
+            updatedState,
+            refreshedProfile(updatedProfile),
+            parsed.response.keyId,
+            pending.recipientEmail,
         )
         pendingInvites.delete(parsed.response.exchangeId)
     }
@@ -519,9 +568,15 @@ class SharedSyncCoordinator(
             }
             throw error
         }
-        val grant = invitation.requestedGrants.firstOrNull()
+        val controlGrant = invitation.requestedGrants.firstOrNull {
+            it.datasetId.endsWith(CONTROL_DATASET_SUFFIX)
+        }
+        val appGrants = invitation.requestedGrants.filter {
+            it.datasetId != controlGrant?.datasetId
+        }
+        val grant = appGrants.firstOrNull()
             ?: error("Invitation has no dataset grants.")
-        val parsedGrants = grantsFromRequestedGrants(invitation.requestedGrants)
+        val parsedGrants = grantsFromRequestedGrants(appGrants)
         val joinProfile = ProfileRecord(
             datasetId = parsedGrants.baseDatasetId,
             ownerEmail = ownerEmail,
@@ -535,6 +590,8 @@ class SharedSyncCoordinator(
             appFolderId = ownerFolderId,
             needsInitialLoad = true,
             datasetGrants = if (parsedGrants.split) parsedGrants.grants else null,
+            controlDatasetId = controlGrant?.datasetId,
+            controlEnrollment = if (controlGrant == null) "none" else "pending",
         )
         val profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId)
         val localBeforeJoin = sharedPayload(store.localPayload())
@@ -621,10 +678,49 @@ class SharedSyncCoordinator(
             refreshed,
             profileKey(profile.ownerEmail, profile.datasetId),
         ) ?: profile
-        registry.upsertProfile(
+        val updatedProfile = current.copy(
+            participantEmails = current.participantEmails.orEmpty() +
+                (response.response.keyId to recipientEmailAddress.trim()),
+        )
+        val updatedState = registry.upsertProfile(updatedProfile)
+        synchronizeControlMembers(
+            updatedState,
+            refreshedProfile(updatedProfile),
+            response.response.keyId,
+            recipientEmailAddress.trim(),
+        )
+    }
+
+    suspend fun enrollActiveControlDataset(accessToken: String): SharedSyncState {
+        rememberAccess(accessToken)
+        var state = registry.load() ?: error("Shared sync is not configured on this device.")
+        var profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile) && canAdministerRole(profile.role)) {
+            "Only an owner or admin can enroll sharing coordination."
+        }
+        val controlDatasetId = profile.controlDatasetId ?: controlDatasetIdFor(profile.datasetId)
+        profile = profile.copy(
+            controlDatasetId = controlDatasetId,
+            controlEnrollment = "pending",
+        )
+        state = registry.upsertProfile(profile)
+        if (profile.datasetRecords?.get(controlDatasetId)?.fileId == null) {
+            controlDatasetFor(state, profile).create(
+                SharingControlMemberMetadataV1(email = state.ownerEmail),
+            )
+        }
+        val refreshed = registry.load() ?: state
+        val current = findProfile(refreshed, refreshed.activeProfileKey) ?: profile
+        val required = requiredProfileMemberKeyIds(refreshed, current)
+        val verified = controlDatasetFor(refreshed, current).read()
+        return registry.upsertProfile(
             current.copy(
-                participantEmails = current.participantEmails.orEmpty() +
-                    (response.response.keyId to recipientEmailAddress.trim()),
+                controlDatasetId = controlDatasetId,
+                controlEnrollment = if (required.all(verified.members::containsKey)) {
+                    "enrolled"
+                } else {
+                    "pending"
+                },
             ),
         )
     }
@@ -671,6 +767,18 @@ class SharedSyncCoordinator(
         if (files.isEmpty()) return emptyList()
         val transport = EasyBcSharedTransport.forProfile(state, profile, driveAuth)
         val currentKeyId = identityStore.getOrCreate().publicKey.keyId
+        val accountVerifiedKeyIds = if (
+            profile.controlDatasetId != null &&
+            profile.datasetRecords?.get(profile.controlDatasetId)?.fileId != null
+        ) {
+            runCatching {
+                controlDatasetFor(state, profile).read().members
+                    .filterValues { !it.googleSubject.isNullOrBlank() }
+                    .keys
+            }.getOrDefault(emptySet())
+        } else {
+            emptySet()
+        }
         val aggregated = linkedMapOf<String, ProfileParticipant>()
         for ((part, fileId) in files) {
             val stored = transport.readDataset(fileId)
@@ -687,6 +795,7 @@ class SharedSyncCoordinator(
                         ?: role,
                     emailAddress = profile.participantEmails?.get(participant.keyId),
                     isCurrentDevice = participant.keyId == currentKeyId,
+                    accountVerified = participant.keyId in accountVerifiedKeyIds,
                     datasetRoles = if (isSplitProfile(profile)) {
                         existing?.datasetRoles.orEmpty() + (part to role)
                     } else {
@@ -816,7 +925,7 @@ class SharedSyncCoordinator(
         // revocation re-keys that file and removes its tracked Drive permission.
         var revoked = 0
         var lastError: Exception? = null
-        for (datasetId in profileDatasetIds(profile)) {
+        for (datasetId in profileDatasetIdsIncludingControl(profile)) {
             try {
                 controller.revokeDatasetKey(
                     datasetId = datasetId,
@@ -871,7 +980,7 @@ class SharedSyncCoordinator(
             val local = registry.loadLocalPayload(profileKeyValue) ?: emptySharedPayload()
             store.apply(local.withLocalAndroidPreferences(store.localPayload()))
             registry.clearCheckpoint()
-            return next
+            return registry.upsertProfile(target.withAvatarFrom(local))
         }
         return try {
             loadActiveProfile(requireNotNull(accessToken))
@@ -895,14 +1004,15 @@ class SharedSyncCoordinator(
         )
         store.apply(loaded.payload.withLocalAndroidPreferences(store.localPayload()))
         val syncedAt = java.time.Instant.now().toString()
-        val nextProfile = refreshedProfile(profile).copy(
+        val nextProfile = refreshedProfile(profile).withAvatarFrom(loaded.payload).copy(
             fileId = loaded.fileId,
             lastRevisionId = loaded.revisionId,
             lastSyncedAt = syncedAt,
             needsInitialLoad = false,
         )
         store.rememberSync(loaded.fileId, syncedAt)
-        return registry.upsertProfile(nextProfile)
+        val next = registry.upsertProfile(nextProfile)
+        return refreshControlEnrollment(next, nextProfile)
     }
 
     suspend fun createOwnedProfile(accessToken: String, displayName: String): SharedSyncState {
@@ -915,6 +1025,7 @@ class SharedSyncCoordinator(
         val appFolderId = primary.appFolderId
             ?: error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.")
         val datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles)
+        val profileKeyValue = profileKey(state.ownerEmail, datasetId)
         // Profile record first — companion registry records land on it — and
         // the controller scoped to the NEW profile's key.
         val newProfile = ProfileRecord(
@@ -925,12 +1036,24 @@ class SharedSyncCoordinator(
             role = SharingRole.OWNER.name.lowercase(),
             trustedOwnerKeyId = primary.trustedOwnerKeyId,
             appFolderId = appFolderId,
+            controlDatasetId = controlDatasetIdFor(datasetId),
+            controlEnrollment = "pending",
             datasetGrants = OWNER_DATASET_GRANTS,
         )
         val provisional = registry.upsertProfile(newProfile)
         val empty = emptySharedPayload()
         val (createdFileId, createdRevisionId) = try {
-            createProfileDatasetGroup(controllerFor(provisional, newProfile), datasetId, empty)
+            val created = createProfileDatasetGroup(
+                controllerFor(provisional, newProfile),
+                datasetId,
+                empty,
+            )
+            val afterDataCreate = registry.load() ?: provisional
+            val controlProfile = findProfile(afterDataCreate, profileKeyValue) ?: newProfile
+            controlDatasetFor(afterDataCreate, controlProfile).create(
+                SharingControlMemberMetadataV1(email = state.ownerEmail),
+            )
+            created
         } catch (error: Exception) {
             registry.save(state)
             throw error
@@ -941,9 +1064,9 @@ class SharedSyncCoordinator(
                 fileId = createdFileId,
                 lastRevisionId = createdRevisionId,
                 lastSyncedAt = syncedAt,
+                controlEnrollment = "enrolled",
             ),
         )
-        val profileKeyValue = profileKey(state.ownerEmail, datasetId)
         registry.setActiveProfile(profileKeyValue)
         store.apply(empty.withLocalAndroidPreferences(store.localPayload()))
         store.rememberSync(createdFileId, syncedAt)
@@ -962,7 +1085,7 @@ class SharedSyncCoordinator(
             ?: error("Your encrypted sync folder is not ready yet. Sync once, then try again.")
         val displayName = active.displayName?.trim().orEmpty().ifEmpty { "Profile" }
         val datasetId = uniqueOwnedDatasetId(displayName, state.ownerEmail, state.profiles)
-        val local = sharedPayload(store.localPayload())
+        val local = sharedPayload(store.localPayload()).withProfileAvatar(active)
         // Profile record first (companion registry records land on it),
         // scoped controller second, dataset group last.
         val connected = ProfileRecord(
@@ -970,9 +1093,13 @@ class SharedSyncCoordinator(
             ownerEmail = state.ownerEmail,
             folderName = primary.folderName,
             displayName = displayName,
+            avatarWebp = active.avatarWebp,
+            avatarUpdatedAt = active.avatarUpdatedAt,
             role = SharingRole.OWNER.name.lowercase(),
             trustedOwnerKeyId = primary.trustedOwnerKeyId,
             appFolderId = appFolderId,
+            controlDatasetId = controlDatasetIdFor(datasetId),
+            controlEnrollment = "pending",
             syncMode = "encrypted",
             datasetGrants = OWNER_DATASET_GRANTS,
         )
@@ -985,7 +1112,17 @@ class SharedSyncCoordinator(
         )
         registry.save(provisional)
         val (createdFileId, createdRevisionId) = try {
-            createProfileDatasetGroup(controllerFor(provisional, connected), datasetId, local)
+            val created = createProfileDatasetGroup(
+                controllerFor(provisional, connected),
+                datasetId,
+                local,
+            )
+            val afterDataCreate = registry.load() ?: provisional
+            val controlProfile = findProfile(afterDataCreate, connectedKey) ?: connected
+            controlDatasetFor(afterDataCreate, controlProfile).create(
+                SharingControlMemberMetadataV1(email = state.ownerEmail),
+            )
+            created
         } catch (error: Exception) {
             registry.save(state)
             throw error
@@ -996,6 +1133,7 @@ class SharedSyncCoordinator(
                 fileId = createdFileId,
                 lastRevisionId = createdRevisionId,
                 lastSyncedAt = syncedAt,
+                controlEnrollment = "enrolled",
             ),
         )
         registry.deleteLocalPayload(state.activeProfileKey)
@@ -1045,6 +1183,21 @@ class SharedSyncCoordinator(
         val profile = findProfile(state, profileKeyValue)
             ?: error("That profile is not available on this device.")
         return registry.upsertProfile(profile.copy(displayName = trimmed))
+    }
+
+    suspend fun updateProfileAvatar(
+        profileKeyValue: String,
+        avatarWebp: String?,
+    ): SharedSyncState {
+        val state = registry.load() ?: error("No profile registry is available on this device.")
+        val profile = findProfile(state, profileKeyValue)
+            ?: error("That profile is not available on this device.")
+        return registry.upsertProfile(
+            profile.copy(
+                avatarWebp = avatarWebp,
+                avatarUpdatedAt = java.time.Instant.now().toString(),
+            ),
+        )
     }
 
     suspend fun disconnectActiveProfileToLocal(): SharedSyncState {
@@ -1097,7 +1250,7 @@ class SharedSyncCoordinator(
             // Companions first; the base dataset's registry delete also
             // removes the profile record, so it must go last.
             val controller = controllerFor(state, profile)
-            for (datasetId in profileDatasetIds(profile).reversed()) {
+            for (datasetId in profileDatasetIdsIncludingControl(profile).reversed()) {
                 controller.deleteDataset(datasetId)
             }
         }
@@ -1137,19 +1290,27 @@ class SharedSyncCoordinator(
             lastSyncedAt = null,
             datasetGrants = OWNER_DATASET_GRANTS,
             datasetRecords = null,
+            controlDatasetId = profile.controlDatasetId ?: controlDatasetIdFor(profile.datasetId),
+            controlEnrollment = "pending",
         )
         state = registry.upsertProfile(cleared)
-        val local = sharedPayload(store.localPayload())
+        val local = sharedPayload(store.localPayload()).withProfileAvatar(cleared)
         val (createdFileId, createdRevisionId) = createProfileDatasetGroup(
             controllerFor(state, cleared),
             profile.datasetId,
             local,
+        )
+        val afterDataCreate = registry.load() ?: state
+        val controlProfile = findProfile(afterDataCreate, state.activeProfileKey) ?: cleared
+        controlDatasetFor(afterDataCreate, controlProfile).create(
+            SharingControlMemberMetadataV1(email = state.ownerEmail),
         )
         val syncedAt = java.time.Instant.now().toString()
         val restored = refreshedProfile(cleared).copy(
             fileId = createdFileId,
             lastRevisionId = createdRevisionId,
             lastSyncedAt = syncedAt,
+            controlEnrollment = "enrolled",
         )
         val next = registry.upsertProfile(restored)
         store.apply(local.withLocalAndroidPreferences(store.localPayload()))
@@ -1263,6 +1424,58 @@ class SharedSyncCoordinator(
         )
     }
 
+    private suspend fun synchronizeControlMembers(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+        keyId: String,
+        email: String,
+    ) {
+        if (profile.controlDatasetId == null) return
+        val control = controlDatasetFor(state, profile)
+        control.synchronizeMembers(
+            mapOf(keyId to SharingControlMemberMetadataV1(email = email)),
+        )
+        val verified = control.read()
+        val required = requiredProfileMemberKeyIds(state, profile)
+        registry.upsertProfile(
+            refreshedProfile(profile).copy(
+                controlEnrollment = if (required.all(verified.members::containsKey)) {
+                    "enrolled"
+                } else {
+                    "pending"
+                },
+            ),
+        )
+    }
+
+    private suspend fun requiredProfileMemberKeyIds(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ): Set<String> {
+        val controller = controllerFor(state, profile)
+        return profileDatasetIds(profile).flatMap { datasetId ->
+            controller.getDatasetParticipants(datasetId).participants.map { it.keyId }
+        }.toSet()
+    }
+
+    private suspend fun refreshControlEnrollment(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ): SharedSyncState {
+        val controlDatasetId = profile.controlDatasetId ?: return state
+        val current = findProfile(state, profileKey(profile.ownerEmail, profile.datasetId)) ?: profile
+        if (current.datasetRecords?.get(controlDatasetId)?.fileId == null) return state
+        val enrolled = runCatching {
+            val verified = controlDatasetFor(state, current).read()
+            verified.members.containsKey(identityStore.getOrCreate().publicKey.keyId)
+        }.getOrDefault(false)
+        return if (enrolled && current.controlEnrollment != "enrolled") {
+            registry.upsertProfile(current.copy(controlEnrollment = "enrolled"))
+        } else {
+            state
+        }
+    }
+
     private suspend fun controllerFor(
         state: SharedSyncState,
         profile: ProfileRecord,
@@ -1271,6 +1484,9 @@ class SharedSyncCoordinator(
         return SharedBackupController(
             appId = EASY_BC_APP_ID,
             codec = EasyBcSharedCodec,
+            codecForDataset = { datasetId ->
+                createSharingControlCodec().takeIf { datasetId == profile.controlDatasetId }
+            },
             identity = { identityStore.getOrCreate() },
             transport = EasyBcSharedTransport.forProfile(state, profile, driveAuth),
             registry = ProfileScopedSharedBackupRegistry(registry, scopeKey),
@@ -1279,6 +1495,30 @@ class SharedSyncCoordinator(
             verifyAccountBinding = null,
             requireAccountBinding = false,
             resolveFork = { _ -> "merge" },
+        )
+    }
+
+    private fun controlDatasetFor(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ): SharingControlDataset {
+        val controlDatasetId = profile.controlDatasetId
+            ?: error("This profile has no sharing control dataset.")
+        val scopeKey = profileKey(profile.ownerEmail, profile.datasetId)
+        val controller = SharedBackupController<SharingControlStateV1>(
+            appId = EASY_BC_APP_ID,
+            codec = createSharingControlCodec(),
+            identity = { identityStore.getOrCreate() },
+            transport = EasyBcSharedTransport.forProfile(state, profile, driveAuth),
+            registry = ProfileScopedSharedBackupRegistry(registry, scopeKey),
+            cryptoOptions = SharingCryptoOptions(),
+            resolveFork = { _ -> "merge" },
+        )
+        return SharingControlDataset(
+            controller = controller,
+            datasetId = controlDatasetId,
+            profileId = scopeKey,
+            identity = { identityStore.getOrCreate() },
         )
     }
 
@@ -1366,6 +1606,22 @@ class SharedSyncCoordinator(
     private fun sharedPayload(payload: SyncPayloadV1): SyncPayloadV1 =
         payload.copy(androidPreferences = null)
 
+    /** Prefer payload profileMeta; fall back to the ProfileRecord avatar cache. */
+    private fun SyncPayloadV1.withProfileAvatar(profile: ProfileRecord): SyncPayloadV1 {
+        val cachedAt = profile.avatarUpdatedAt ?: return this
+        if (profileMeta != null && profileMeta.updatedAt >= cachedAt) return this
+        return copy(profileMeta = ProfileMetaV1(profile.avatarWebp, cachedAt))
+    }
+
+    private fun ProfileRecord.withAvatarFrom(payload: SyncPayloadV1): ProfileRecord {
+        val meta = payload.profileMeta ?: return this
+        return if (meta.avatarWebp == avatarWebp && meta.updatedAt == avatarUpdatedAt) {
+            this
+        } else {
+            copy(avatarWebp = meta.avatarWebp, avatarUpdatedAt = meta.updatedAt)
+        }
+    }
+
     private fun newLocalProfile(displayName: String): ProfileRecord =
         ProfileRecord(
             datasetId = "profile",
@@ -1394,6 +1650,7 @@ class SharedSyncCoordinator(
         val role: String,
         val emailAddress: String?,
         val isCurrentDevice: Boolean,
+        val accountVerified: Boolean = false,
         /** Split profiles: the participant's role per dataset part they can see. */
         val datasetRoles: Map<String, String>? = null,
     )

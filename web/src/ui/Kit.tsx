@@ -328,19 +328,21 @@ export function EbPersonCard({
   email,
   trust,
   colorKey,
+  photoUrl,
   children,
 }: {
   name: string;
   email?: string;
   trust?: EbTrust;
   colorKey?: string;
+  photoUrl?: string;
   /** Expanded content: access grid rows, role actions. */
   children?: ReactNode;
 }) {
   return (
     <div className="eb-person">
       <div className="eb-person-top">
-        <EbAvatar name={name} colorKey={colorKey ?? email ?? name} size="md" />
+        <EbAvatar name={name} colorKey={colorKey ?? email ?? name} photoUrl={photoUrl} size="md" />
         <span className="eb-person-text">
           <span className="eb-person-name">{name}</span>
           {email && <span className="eb-person-email">{email}</span>}

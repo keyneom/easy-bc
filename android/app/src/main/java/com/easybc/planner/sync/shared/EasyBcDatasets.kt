@@ -25,6 +25,7 @@ const val PART_PLAN = "plan"
 const val PART_CYCLE = "cycle"
 const val PART_INTIMACY = "intimacy"
 const val PART_SENSITIVE = "sensitive"
+const val CONTROL_DATASET_SUFFIX = ".control"
 
 val DATASET_PARTS: List<String> = listOf(PART_PLAN, PART_CYCLE, PART_INTIMACY, PART_SENSITIVE)
 
@@ -40,7 +41,7 @@ fun datasetPartLabel(part: String): String = when (part) {
 }
 
 fun datasetPartSummary(part: String): String = when (part) {
-    PART_PLAN -> "Planner options and plan outputs"
+    PART_PLAN -> "Planner options, plan outputs, and profile photo"
     PART_CYCLE -> "Period dates, cycle stats, body signals"
     PART_INTIMACY -> "Logged acts, incidents, abstinence credits"
     PART_SENSITIVE -> "Emergency contraception events"
@@ -49,6 +50,8 @@ fun datasetPartSummary(part: String): String = when (part) {
 
 fun datasetIdForPart(baseDatasetId: String, part: String): String =
     if (part == PART_PLAN) baseDatasetId else "$baseDatasetId.$part"
+
+fun controlDatasetIdFor(baseDatasetId: String): String = "$baseDatasetId$CONTROL_DATASET_SUFFIX"
 
 fun partForDatasetId(baseDatasetId: String, datasetId: String): String? {
     if (datasetId == baseDatasetId) return PART_PLAN
@@ -178,6 +181,25 @@ fun profileDatasetIds(profile: ProfileRecord): List<String> {
     return grantedParts(profile).map { datasetIdForPart(profile.datasetId, it) }
 }
 
+fun profileDatasetIdsIncludingControl(profile: ProfileRecord): List<String> =
+    profileDatasetIds(profile) + listOfNotNull(
+        profile.controlDatasetId?.takeIf { profile.datasetRecords?.get(it)?.fileId != null },
+    )
+
+fun requestedGrantsWithControl(
+    profile: ProfileRecord,
+    dataGrants: List<SharingDatasetGrantV1>,
+): List<SharingDatasetGrantV1> {
+    val controlDatasetId = profile.controlDatasetId
+    val controlReady = controlDatasetId != null &&
+        profile.datasetRecords?.get(controlDatasetId)?.fileId != null
+    return dataGrants + if (controlReady) {
+        listOf(SharingDatasetGrantV1(requireNotNull(controlDatasetId), SharingRole.WRITER))
+    } else {
+        emptyList()
+    }
+}
+
 /* ---------- Payload projection & combination ---------- */
 
 private fun isSensitiveEvent(kind: String): Boolean = kind == "plan_b_taken"
@@ -237,7 +259,10 @@ fun projectDatasetPart(payload: SyncPayloadV1, part: String): SyncPayloadV1 {
         projectDayLog(log, part)?.let { date to it }
     }.toMap()
     return when (part) {
-        PART_PLAN -> empty.copy(planner = payload.planner)
+        PART_PLAN -> empty.copy(
+            planner = payload.planner,
+            profileMeta = payload.profileMeta,
+        )
         PART_CYCLE -> empty.copy(
             periodRecords = payload.periodRecords,
             deletedPeriodStarts = payload.deletedPeriodStarts,
@@ -270,7 +295,10 @@ fun combineDatasetParts(parts: Map<String, SyncPayloadV1>): SyncPayloadV1 {
         val payload = parts[part] ?: continue
         exportedAt = listOfNotNull(exportedAt, payload.exportedAt).maxOrNull()
         out = when (part) {
-            PART_PLAN -> out.copy(planner = payload.planner)
+            PART_PLAN -> out.copy(
+                planner = payload.planner,
+                profileMeta = payload.profileMeta,
+            )
             PART_CYCLE -> out.copy(
                 periodRecords = payload.periodRecords,
                 deletedPeriodStarts = payload.deletedPeriodStarts,

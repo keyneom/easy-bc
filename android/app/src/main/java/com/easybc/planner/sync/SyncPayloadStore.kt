@@ -164,6 +164,7 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
             voluntaryAbstinenceUpdatedAt = voluntaryUpdated,
             deletedVoluntaryAbstinenceDates = voluntaryDeleted,
             ecJournal = preserved.ecJournal,
+            profileMeta = preserved.profileMeta,
             androidPreferences = TimestampedAndroidPreferences(
                 value = AndroidPreferences(
                     calendarLabelPeriod = settings.calendarLabelPeriod,
@@ -310,6 +311,7 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
                     voluntaryAbstinenceUpdatedAt = payload.voluntaryAbstinenceUpdatedAt,
                     deletedVoluntaryAbstinenceDates = payload.deletedVoluntaryAbstinenceDates,
                     ecJournal = payload.ecJournal,
+                    profileMeta = payload.profileMeta,
                 )
             )
         )

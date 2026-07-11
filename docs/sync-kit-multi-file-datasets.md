@@ -23,6 +23,20 @@ day-sheet sections, "what you can see" dataset rows, and a calendar banner.
 all-or-nothing sharing; migrating them to the split layout is exactly the
 hard-cutover topology migration below and waits on the control-dataset
 integration.
+
+**v0.1.52 (sync-kit 0.2.0-rc.12):** control datasets are wired on both
+platforms (`<base>.control` enrolled as a writer grant alongside data
+grants; membership + provenance mirrored via `synchronizeMembers`), and
+profile photos ride the `plan` dataset (`profileMeta`). Trust display reads
+account verifications from the control directory on both platforms.
+**Known limitation:** Android-originated joins are still accurately labeled
+"Key from invite link" — sync-kit-android exposes the
+`createAccountBinding`/`verifyAccountBinding` controller hooks but ships no
+Kotlin creator/verifier yet, and EasyBC does not fabricate one. Porting the
+TS `account-binding.ts` (Credential Manager assertion + nonce-bound Google
+ID token, byte-identical canonical challenge, cross-platform fixtures) is
+the tracked follow-up; `requireAccountBinding` stays false everywhere until
+every platform can produce bindings.
 This replaces the earlier speculative proposal that lived in this file; rc.11
 settled the protocol differently (and better). The authoritative protocol doc
 is `sync-kit/docs/sharing-control-datasets.md`; this file records what EasyBC

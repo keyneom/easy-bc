@@ -3,6 +3,7 @@ package com.easybc.planner.sync.shared
 import com.easybc.planner.sync.SyncDayEvent
 import com.easybc.planner.sync.SyncDayLog
 import com.easybc.planner.sync.SyncPayloadV1
+import com.easybc.planner.sync.ProfileMetaV1
 import com.easybc.planner.sync.SyncPeriodRecord
 import com.easybc.planner.sync.TimestampedBoolean
 import com.keyneom.synckit.sharing.SharingDatasetGrantV1
@@ -50,6 +51,7 @@ class EasyBcDatasetsTest {
             voluntaryAbstinenceDates = mapOf("2026-07-06" to true),
             voluntaryAbstinenceUpdatedAt = mapOf("2026-07-06" to "2026-07-06T00:00:00.000Z"),
             ecJournal = TimestampedBoolean(value = true, updatedAt = "2026-07-02T10:00:00.000Z"),
+            profileMeta = ProfileMetaV1("encoded-photo", "2026-07-02T11:00:00.000Z"),
         )
     }
 
@@ -106,6 +108,7 @@ class EasyBcDatasetsTest {
         val parts = DATASET_PARTS.associateWith { projectDatasetPart(payload, it) }
         val combined = combineDatasetParts(parts)
         assertEquals(payload.planner, combined.planner)
+        assertEquals(payload.profileMeta, combined.profileMeta)
         assertEquals(payload.periodRecords, combined.periodRecords)
         assertEquals(payload.deletedPeriodStarts, combined.deletedPeriodStarts)
         assertEquals(payload.voluntaryAbstinenceDates, combined.voluntaryAbstinenceDates)
@@ -179,5 +182,35 @@ class EasyBcDatasetsTest {
         assertFalse(isSplitProfile(legacy))
         assertEquals(DATASET_PARTS, grantedParts(legacy))
         assertTrue(restrictedParts(legacy).isEmpty())
+    }
+
+    @Test
+    fun `ready control dataset is included as a writer grant`() {
+        val profile = ProfileRecord(
+            datasetId = "primary",
+            ownerEmail = "owner@example.com",
+            folderName = "EasyBC — owner@example.com",
+            role = "owner",
+            trustedOwnerKeyId = "owner-key",
+            controlDatasetId = "primary.control",
+            datasetRecords = mapOf(
+                "primary.control" to CompanionDatasetRecord(fileId = "control-file"),
+            ),
+        )
+        val grants = requestedGrantsWithControl(
+            profile,
+            listOf(SharingDatasetGrantV1("primary", SharingRole.VIEWER)),
+        )
+        assertEquals(
+            listOf(
+                SharingDatasetGrantV1("primary", SharingRole.VIEWER),
+                SharingDatasetGrantV1("primary.control", SharingRole.WRITER),
+            ),
+            grants,
+        )
+        assertEquals(
+            1,
+            requestedGrantsWithControl(profile.copy(datasetRecords = null), grants.take(1)).size,
+        )
     }
 }

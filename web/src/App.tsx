@@ -103,6 +103,8 @@ import {
   sharedSyncConfigFromEnv,
   syncActiveDataset,
 } from "./sync/sharedSync";
+import { updateProfileByKey } from "./sync/sharedRegistry";
+import { avatarDataUrl } from "./ui/avatarEncode";
 import { bindEasyBcSharingPoll } from "./sync/sharedSyncLifecycle";
 import {
   plannerConfiguredFromPayload,
@@ -990,6 +992,7 @@ export default function App() {
       ecJournalUpdatedAt: payload.ecJournal.updatedAt,
       realizedCumulativeRisk: payload.planner.value.realizedCumulativeRisk,
       androidPreferences: payload.androidPreferences ?? session.androidPreferences,
+      ...(payload.profileMeta ? { profileMeta: payload.profileMeta } : {}),
     };
     optionsFingerprintRef.current = JSON.stringify(portablePlannerOptions(nextOptions));
     setLocks([]);
@@ -1004,11 +1007,28 @@ export default function App() {
       idbSet(KV_SESSION, nextSession),
       idbSet(KV_OPTIONS, nextOptions),
     ]);
-  }, [session]);
+    if (payload.profileMeta && sharedSyncState) {
+      const next = await updateProfileByKey(sharedSyncState, sharedSyncState.activeProfileKey, {
+        avatarWebp: payload.profileMeta.avatarWebp,
+        avatarUpdatedAt: payload.profileMeta.updatedAt,
+      });
+      setSharedSyncState(next);
+    }
+  }, [session, sharedSyncState]);
 
   const localSyncFingerprint = useMemo(
-    () => sharedPayloadFingerprint(buildSharedSyncPayload(opts, periodRecords, session)),
-    [opts, periodRecords, session],
+    () =>
+      sharedPayloadFingerprint(
+        buildSharedSyncPayload(
+          opts,
+          periodRecords,
+          session,
+          sharedSyncState
+            ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
+            : null,
+        ),
+      ),
+    [opts, periodRecords, session, sharedSyncState],
   );
 
   const latestSyncInputsRef = useRef({
@@ -1062,7 +1082,14 @@ export default function App() {
       });
 
       try {
-        const local = buildSharedSyncPayload(options, records, currentSession);
+        const local = buildSharedSyncPayload(
+          options,
+          records,
+          currentSession,
+          sharedSyncState
+            ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
+            : null,
+        );
         const result = await syncActiveDataset(sharedSyncConfig, local);
         autoSyncFingerprintRef.current = sharedPayloadFingerprint(result.payload);
         await applySyncedPayload(
@@ -2028,6 +2055,7 @@ export default function App() {
                     name={profileDisplayLabel(sharedSyncState, active)}
                     meta={settingsProfileMeta(sharedSyncState, active)}
                     colorKey={sharedSyncState.activeProfileKey}
+                    photoUrl={active.avatarWebp ? avatarDataUrl(active.avatarWebp) : undefined}
                     badge={settingsProfileBadge(sharedSyncState, active)}
                     actionLabel="Switch"
                     onAction={() => setSettingsView("sharing")}

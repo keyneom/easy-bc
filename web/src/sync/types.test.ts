@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PortablePlannerOptions, SyncPayloadV1 } from "./types";
-import { mergeSyncPayloads, plannerConfiguredFromPayload } from "./types";
+import { mergeSyncPayloads, parseSyncPayload, plannerConfiguredFromPayload } from "./types";
 
 const options = (ageYears: number): PortablePlannerOptions => ({
   ageYears,
@@ -127,5 +127,16 @@ describe("mergeSyncPayloads", () => {
     const merged = mergeSyncPayloads(payload(30, "2026-01-01T00:00:00.000Z"), android);
 
     expect(merged.calendarDayLogs["2026-01-12"]).toEqual(android.calendarDayLogs["2026-01-12"]);
+  });
+});
+
+describe("parseSyncPayload", () => {
+  it("rejects oversized synced avatars before caching or decoding them", () => {
+    const invalid = payload(30, "2026-01-01T00:00:00.000Z");
+    invalid.profileMeta = {
+      avatarWebp: "a".repeat(16_385),
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    expect(() => parseSyncPayload(invalid)).toThrow("invalid profile photo metadata");
   });
 });

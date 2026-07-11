@@ -26,7 +26,11 @@ import com.easybc.planner.sync.shared.profileKey
 import com.easybc.planner.sync.shared.shouldLoadRemoteBeforePublish
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 
 private const val SYNC_LOG_TAG = "EasyBcSync"
 
@@ -480,6 +484,62 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun updateActiveProfileAvatar(uri: Uri?) {
+        val state = _sharedSyncState.value ?: return
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                val encoded = uri?.let { selected ->
+                    withContext(Dispatchers.IO) {
+                        val descriptorLength = app.contentResolver
+                            .openAssetFileDescriptor(selected, "r")
+                            ?.use { it.length } ?: -1L
+                        require(descriptorLength <= 20L * 1024L * 1024L || descriptorLength < 0L) {
+                            "Choose a photo smaller than 20 MB."
+                        }
+                        val bytes = app.contentResolver.openInputStream(selected)?.use { input ->
+                            input.readBytesLimited(20 * 1024 * 1024)
+                        } ?: error("Could not read that photo.")
+                        require(bytes.size <= 20 * 1024 * 1024) {
+                            "Choose a photo smaller than 20 MB."
+                        }
+                        com.easybc.planner.ui.kit.encodeAvatarFromBytes(bytes)
+                    }
+                }
+                sharedSync.updateProfileAvatar(state.activeProfileKey, encoded)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    if (encoded == null) "Profile photo removed. Sync to share the change."
+                    else "Profile photo updated. Sync to share it.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Update profile photo", error, "Photo update failed")
+            }
+        }
+    }
+
+    fun enrollControlDataset(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _sharedSyncState.value = sharedSync.enrollActiveControlDataset(accessToken)
+                _cloudStatus.value = SyncStatus.Success(
+                    if (activeProfile()?.controlEnrollment == "enrolled") {
+                        "Sharing coordination is ready."
+                    } else {
+                        "Coordination file created. Re-invite existing participants so they can enroll."
+                    },
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure(
+                    "Set up sharing coordination",
+                    error,
+                    "Coordination setup failed",
+                )
+            }
+        }
+    }
+
     fun disconnectActiveProfileToLocal() {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
@@ -696,4 +756,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             ReminderScheduler.cancel(app)
         }
     }
+}
+
+private fun InputStream.readBytesLimited(maxBytes: Int): ByteArray {
+    val output = ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
+    val buffer = ByteArray(16 * 1024)
+    var total = 0
+    while (true) {
+        val count = read(buffer)
+        if (count < 0) break
+        total += count
+        require(total <= maxBytes) { "Choose a photo smaller than 20 MB." }
+        output.write(buffer, 0, count)
+    }
+    return output.toByteArray()
 }

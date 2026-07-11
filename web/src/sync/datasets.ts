@@ -34,7 +34,7 @@ export const DATASET_PART_LABELS: Record<DatasetPart, string> = {
 };
 
 export const DATASET_PART_SUMMARIES: Record<DatasetPart, string> = {
-  plan: "Planner options and plan outputs",
+  plan: "Planner options, plan outputs, and profile photo",
   cycle: "Period dates, cycle stats, body signals",
   intimacy: "Logged acts, incidents, abstinence credits",
   sensitive: "Emergency contraception events",
@@ -97,6 +97,19 @@ export function requestedGrantsFromDatasetGrants(
     requested.push({ datasetId: datasetIdForPart(baseDatasetId, part), role });
   }
   return requested;
+}
+
+export function requestedGrantsWithControl(
+  dataGrants: Array<{ datasetId: string; role: Exclude<SharingRole, "owner"> }>,
+  controlDatasetId?: string,
+  controlFileId?: string,
+): Array<{ datasetId: string; role: Exclude<SharingRole, "owner"> }> {
+  return [
+    ...dataGrants,
+    ...(controlDatasetId && controlFileId
+      ? [{ datasetId: controlDatasetId, role: "writer" as const }]
+      : []),
+  ];
 }
 
 export const ROLE_RANK: Record<SharingRole, number> = {
@@ -223,6 +236,7 @@ export function projectDatasetPart(
   };
   if (part === "plan") {
     out.planner = payload.planner;
+    if (payload.profileMeta) out.profileMeta = payload.profileMeta;
     return out;
   }
   if (part === "cycle") {
@@ -262,6 +276,7 @@ export function combineDatasetParts(
     exportedAts.push(payload.exportedAt);
     if (part === "plan") {
       out.planner = payload.planner;
+      if (payload.profileMeta) out.profileMeta = payload.profileMeta;
     }
     if (part === "cycle") {
       out.periodRecords = payload.periodRecords;

@@ -29,6 +29,16 @@ export type ProfileRecord = {
   folderName: string;
   /** User-facing label for owned profiles (e.g. "Daughter"). */
   displayName?: string;
+  /**
+   * Local cache of the plan-dataset avatar (base64 WebP, no data-URL prefix).
+   * Lets chips/headers render without decrypting the plan file.
+   */
+  avatarWebp?: string;
+  /** Timestamp for avatar changes, including removal tombstones. */
+  avatarUpdatedAt?: string;
+  /** Protocol-owned coordination ledger for membership and migrations. */
+  controlDatasetId?: string;
+  controlEnrollment?: "none" | "pending" | "enrolled";
   appFolderId?: string;
   role: SharingRole;
   trustedOwnerKeyId: string;
@@ -168,7 +178,15 @@ export function buildSharedSyncPayload(
   options: WasmOptions,
   periodRecords: PeriodRecord[],
   session: PersistedSession,
+  profile?: Pick<ProfileRecord, "avatarWebp" | "avatarUpdatedAt"> | null,
 ): SharedSyncPayloadV1 {
+  const cachedMeta = profile?.avatarUpdatedAt
+    ? { avatarWebp: profile.avatarWebp, updatedAt: profile.avatarUpdatedAt }
+    : undefined;
+  const profileMeta = cachedMeta &&
+      (!session.profileMeta || cachedMeta.updatedAt > session.profileMeta.updatedAt)
+    ? cachedMeta
+    : session.profileMeta;
   return extractSharedPayload({
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
@@ -184,6 +202,7 @@ export function buildSharedSyncPayload(
     voluntaryAbstinenceUpdatedAt: session.voluntaryAbstinenceUpdatedAt,
     deletedVoluntaryAbstinenceDates: session.deletedVoluntaryAbstinenceDates,
     ecJournal: { value: session.ecJournalFlag, updatedAt: session.ecJournalUpdatedAt },
+    ...(profileMeta ? { profileMeta } : {}),
   });
 }
 

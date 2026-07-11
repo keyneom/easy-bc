@@ -17,7 +17,11 @@ object EasyBcSharedCodec : SharedBackupControllerCodec<SyncPayloadV1> {
         json.encodeToJsonElement(SyncPayloadV1.serializer(), value)
 
     override fun parse(element: JsonElement): SyncPayloadV1 =
-        json.decodeFromJsonElement(SyncPayloadV1.serializer(), element)
+        json.decodeFromJsonElement(SyncPayloadV1.serializer(), element).also { payload ->
+            require((payload.profileMeta?.avatarWebp?.length ?: 0) <= 16_384) {
+                "The Drive snapshot contains an oversized profile photo."
+            }
+        }
 
     override fun merge(local: SyncPayloadV1, remote: SyncPayloadV1): SyncPayloadV1 =
         SyncMerge.merge(remote, local)

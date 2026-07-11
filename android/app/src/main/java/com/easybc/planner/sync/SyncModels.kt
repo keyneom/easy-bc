@@ -2,6 +2,14 @@ package com.easybc.planner.sync
 
 import kotlinx.serialization.Serializable
 
+/** Profile display metadata synced via the plan dataset (avatar, etc.). */
+@Serializable
+data class ProfileMetaV1(
+    /** Base64 WebP bytes, no data-URL prefix. */
+    val avatarWebp: String? = null,
+    val updatedAt: String = SYNC_EPOCH,
+)
+
 @Serializable
 data class SyncPayloadV1(
     val schemaVersion: Int = 1,
@@ -14,6 +22,11 @@ data class SyncPayloadV1(
     val voluntaryAbstinenceUpdatedAt: Map<String, String> = emptyMap(),
     val deletedVoluntaryAbstinenceDates: Map<String, String> = emptyMap(),
     val ecJournal: TimestampedBoolean = TimestampedBoolean(),
+    /**
+     * Profile display metadata (avatar). Lives in the plan dataset part only.
+     * Absent on snapshots written before avatar support.
+     */
+    val profileMeta: ProfileMetaV1? = null,
     val androidPreferences: TimestampedAndroidPreferences? = null,
 )
 
@@ -125,4 +138,5 @@ internal data class PreservedWebState(
     val voluntaryAbstinenceUpdatedAt: Map<String, String> = emptyMap(),
     val deletedVoluntaryAbstinenceDates: Map<String, String> = emptyMap(),
     val ecJournal: TimestampedBoolean = TimestampedBoolean(),
+    val profileMeta: ProfileMetaV1? = null,
 )

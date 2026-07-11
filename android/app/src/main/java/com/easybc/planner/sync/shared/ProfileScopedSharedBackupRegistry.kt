@@ -31,7 +31,10 @@ class ProfileScopedSharedBackupRegistry(
             com.easybc.planner.sync.shared.profileKey(it.ownerEmail, it.datasetId) == profileKey
         } ?: error("The active encrypted sync profile is missing.")
         if (record.datasetId != profile.datasetId) {
-            if (partForDatasetId(profile.datasetId, record.datasetId) != null) {
+            if (
+                partForDatasetId(profile.datasetId, record.datasetId) != null ||
+                record.datasetId == profile.controlDatasetId
+            ) {
                 // Companion dataset state stays inside the scoped profile
                 // record — it must never surface as a profile of its own.
                 registry.upsertProfile(

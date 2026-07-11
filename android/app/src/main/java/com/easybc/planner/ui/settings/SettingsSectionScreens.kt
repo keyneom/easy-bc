@@ -331,27 +331,9 @@ fun RiskComfortScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
 
 /* ---------- Profiles, storage & sharing ---------- */
 
-/**
- * Flip when the sync-kit rc.11 control-dataset APIs are integrated in
- * SharedSyncCoordinator (createSharingControlDataset + synchronizeMembers —
- * see docs/sync-kit-multi-file-datasets.md §"Integration points"). Until
- * then no enrollment UI is rendered.
- */
-private const val CONTROL_DATASETS_WIRED = false
-
 @Composable
 fun StorageSharingScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
     SettingsSubScreen("Profiles & sharing", onBack) {
-        if (CONTROL_DATASETS_WIRED) {
-            com.easybc.planner.ui.kit.EbBanner(
-                tone = com.easybc.planner.ui.kit.EbBannerTone.INFO,
-                title = "Set up sharing coordination",
-                text = "This shared profile needs a one-time coordination file before " +
-                    "future data migrations. Everyone you've invited keeps their access.",
-                actionLabel = "Set up",
-                onAction = { /* vm.enrollControlDataset(...) — rc.11 integration point */ },
-            )
-        }
         EncryptedSyncSection(vm)
     }
 }

@@ -56,6 +56,16 @@ data class ProfileRecord(
     val ownerEmail: String,
     val folderName: String,
     val displayName: String? = null,
+    /**
+     * Local cache of the plan-dataset avatar (base64 WebP, no data-URL prefix).
+     * Lets chips/headers render without decrypting the plan file.
+     */
+    val avatarWebp: String? = null,
+    /** Timestamp for avatar changes, including removal tombstones. */
+    val avatarUpdatedAt: String? = null,
+    /** Protocol-owned coordination ledger for membership and migrations. */
+    val controlDatasetId: String? = null,
+    val controlEnrollment: String = "none",
     val role: String,
     val trustedOwnerKeyId: String,
     val appFolderId: String? = null,

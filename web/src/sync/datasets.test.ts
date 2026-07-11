@@ -10,6 +10,7 @@ import {
   partForDatasetId,
   projectDatasetPart,
   requestedGrantsFromDatasetGrants,
+  requestedGrantsWithControl,
   SHARING_PRESETS,
 } from "./datasets";
 import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
@@ -59,6 +60,10 @@ function samplePayload(): SharedSyncPayloadV1 {
     voluntaryAbstinenceUpdatedAt: { "2026-07-06": "2026-07-06T00:00:00.000Z" },
     deletedVoluntaryAbstinenceDates: {},
     ecJournal: { value: true, updatedAt: "2026-07-02T10:00:00.000Z" },
+    profileMeta: {
+      avatarWebp: "dGVzdA==",
+      updatedAt: "2026-07-01T12:00:00.000Z",
+    },
   };
 }
 
@@ -111,6 +116,25 @@ describe("grants mapping", () => {
     expect(Object.keys(cycleOnly.grants)).toEqual(["cycle"]);
     const fullPartner = SHARING_PRESETS.find((preset) => preset.id === "full-partner")!;
     expect(fullPartner.grants.sensitive).toBeUndefined();
+  });
+
+  it("adds a ready control file as a writer grant", () => {
+    expect(
+      requestedGrantsWithControl(
+        [{ datasetId: "primary.cycle", role: "viewer" }],
+        "primary.control",
+        "control-file",
+      ),
+    ).toEqual([
+      { datasetId: "primary.cycle", role: "viewer" },
+      { datasetId: "primary.control", role: "writer" },
+    ]);
+    expect(
+      requestedGrantsWithControl(
+        [{ datasetId: "primary.cycle", role: "viewer" }],
+        "primary.control",
+      ),
+    ).toHaveLength(1);
   });
 });
 

@@ -31,6 +31,12 @@ import {
   type SharedBackupController,
 } from "@keyneom/sync-kit/sharing/controller";
 import { verifySharingInvitationV1 } from "@keyneom/sync-kit/sharing/web-crypto";
+import {
+  createSharingControlCodec,
+  createSharingControlDataset,
+  type SharingControlDataset,
+  type SharingControlStateV1,
+} from "@keyneom/sync-kit/sharing/control";
 import { GoogleDriveSharedBackupTransport } from "@keyneom/sync-kit/stores/google-drive/sharing";
 import { idbDelete, idbGet, idbSet, KV_SHARING_SYNC_CHECKPOINT } from "../idbStore";
 import { pickSharedDatasetFiles } from "./sharedPicker";
@@ -60,6 +66,7 @@ import {
   highestGrantedRole,
   projectDatasetPart,
   requestedGrantsFromDatasetGrants,
+  requestedGrantsWithControl,
   type DatasetGrants,
   type DatasetPart,
 } from "./datasets";
@@ -109,6 +116,13 @@ let operationQueue: Promise<unknown> = Promise.resolve();
 let activeOperationCount = 0;
 const tokenExpiresAtByProfile = new Map<string, number>();
 const LOCAL_PROFILE_PAYLOAD_PREFIX = "profilePayload:";
+const CONTROL_DATASET_SUFFIX = ".control";
+const CONTROL_DATASETS_WIRED = true;
+const sharingControlCodec = createSharingControlCodec();
+
+function controlDatasetIdFor(baseDatasetId: string): string {
+  return `${baseDatasetId}${CONTROL_DATASET_SUFFIX}`;
+}
 
 const GOOGLE_SCOPES = `${GOOGLE_DRIVE_FILE_SCOPE} ${GOOGLE_DRIVE_APPDATA_SCOPE}`;
 const sharedAuthCache = new IndexedDbAuthorizationCache({
@@ -357,10 +371,15 @@ function buildController(
   googleIdentity: GoogleWebIdentityProvider,
 ): SharedBackupController<SharedSyncPayloadV1> {
   const scopeKey = profileKey(profile.ownerEmail, profile.datasetId);
-  const registry = new ProfileScopedSharedBackupRegistry(getCachedState, scopeKey);
+  // Registry writes can happen several times inside one multi-file operation;
+  // always read the last persisted record so companion/control writes compose
+  // instead of overwriting one another from the coordinator's cached snapshot.
+  const registry = new ProfileScopedSharedBackupRegistry(loadSharedSyncState, scopeKey);
   return createSharedBackupController({
     appId: EASY_BC_APP_ID,
     codec: easyBcSharedCodec,
+    codecForDataset: (datasetId) =>
+      datasetId === profile.controlDatasetId ? sharingControlCodec : undefined,
     identity: () => identityProvider.getOrCreate(),
     transport: buildTransport(state, profile, authorizationProvider),
     registry,
@@ -380,6 +399,31 @@ function buildController(
         allowedOrigins: config.allowedOrigins,
       }),
     resolveFork: async () => "merge",
+  });
+}
+
+function buildControlDataset(
+  state: SharedSyncState,
+  profile: ProfileRecord,
+  identityProvider: ReturnType<typeof createSharingIdentityProvider>,
+  authorizationProvider: CachingAuthorizationProvider,
+): SharingControlDataset {
+  const datasetId = profile.controlDatasetId;
+  if (!datasetId) throw new Error("This profile has no sharing control dataset.");
+  const scopeKey = profileKey(profile.ownerEmail, profile.datasetId);
+  const controller = createSharedBackupController<SharingControlStateV1>({
+    appId: EASY_BC_APP_ID,
+    codec: sharingControlCodec,
+    identity: () => identityProvider.getOrCreate(),
+    transport: buildTransport(state, profile, authorizationProvider),
+    registry: new ProfileScopedSharedBackupRegistry(loadSharedSyncState, scopeKey),
+    resolveFork: async () => "merge",
+  });
+  return createSharingControlDataset({
+    controller,
+    datasetId,
+    profileId: scopeKey,
+    identity: () => identityProvider.getOrCreate(),
   });
 }
 
@@ -455,6 +499,15 @@ export const OWNER_DATASET_GRANTS: DatasetGrants = {
 export function profileDatasetIds(profile: ProfileRecord): string[] {
   if (!isSplitProfile(profile)) return [profile.datasetId];
   return grantedParts(profile).map((part) => datasetIdForPart(profile.datasetId, part));
+}
+
+function profileDatasetIdsIncludingControl(profile: ProfileRecord): string[] {
+  return [
+    ...profileDatasetIds(profile),
+    ...(profile.controlDatasetId && profile.datasetRecords?.[profile.controlDatasetId]?.fileId
+      ? [profile.controlDatasetId]
+      : []),
+  ];
 }
 
 /**
@@ -562,7 +615,7 @@ export async function resetSharedSync(
     try {
       // Companions first; deleting the base dataset removes the profile
       // record itself, so it must go last.
-      for (const datasetId of [...profileDatasetIds(profile)].reverse()) {
+      for (const datasetId of [...profileDatasetIdsIncludingControl(profile)].reverse()) {
         await controller.deleteDataset(datasetId);
       }
       // Restore the profile record before recreating: companion registry
@@ -578,11 +631,23 @@ export async function resetSharedSync(
         participantPermissionIds: {},
         participantEmails: {},
         needsInitialLoad: false,
+        controlDatasetId: profile.controlDatasetId ?? controlDatasetIdFor(profile.datasetId),
+        controlEnrollment: "pending",
       };
       const afterDelete = upsertProfile((await refreshCachedState()) ?? state, restored);
       cachedState = afterDelete;
       await saveSharedSyncState(afterDelete);
       const created = await createProfileDatasetGroup(controller, profile.datasetId, local);
+      const afterDataCreate = (await refreshCachedState()) ?? afterDelete;
+      const controlProfile = findProfile(afterDataCreate, state.activeProfileKey) ?? restored;
+      if (CONTROL_DATASETS_WIRED) {
+        await buildControlDataset(
+          afterDataCreate,
+          controlProfile,
+          identityProvider,
+          authorizationProvider,
+        ).create({ email: state.ownerEmail });
+      }
       const syncedAt = new Date().toISOString();
       const refreshed = (await refreshCachedState()) ?? afterDelete;
       const nextProfile: ProfileRecord = {
@@ -590,6 +655,7 @@ export async function resetSharedSync(
         fileId: created.fileId,
         lastRevisionId: created.revisionId,
         lastSyncedAt: syncedAt,
+        controlEnrollment: CONTROL_DATASETS_WIRED ? "enrolled" : "pending",
       };
       const nextState = upsertProfile(refreshed, nextProfile);
       cachedState = nextState;
@@ -661,6 +727,8 @@ export async function setupSharedSync(
         : {}),
       role: "owner",
       trustedOwnerKeyId: identity.publicKey.keyId,
+      controlDatasetId: controlDatasetIdFor(PRIMARY_DATASET_ID),
+      controlEnrollment: "pending",
       syncMode: "encrypted",
     };
     const provisional: SharedSyncState = {
@@ -709,6 +777,16 @@ export async function setupSharedSync(
         createdPayload = synced.value as SharedSyncPayloadV1;
       } else {
         created = await createProfileDatasetGroup(controller, PRIMARY_DATASET_ID, local);
+        const afterDataCreate = (await refreshCachedState()) ?? provisional;
+        const controlProfile = findProfile(afterDataCreate, activeProfileId) ?? connectedProfile;
+        if (CONTROL_DATASETS_WIRED) {
+          await buildControlDataset(
+            afterDataCreate,
+            controlProfile,
+            identityProvider,
+            authorizationProvider,
+          ).create({ email: ownerEmail });
+        }
         createdPayload = local;
       }
       const encryptedState = createInitialSharedSyncState({
@@ -739,6 +817,8 @@ export async function setupSharedSync(
             ...(persistedProfile?.datasetRecords
               ? { datasetRecords: persistedProfile.datasetRecords }
               : {}),
+            controlDatasetId: connectedProfile.controlDatasetId,
+            controlEnrollment: split && CONTROL_DATASETS_WIRED ? "enrolled" : "pending",
             syncMode: "encrypted",
           },
         ],
@@ -802,6 +882,12 @@ export async function syncActiveDataset(
       ...(result.revisionId ? { lastRevisionId: result.revisionId } : {}),
       lastSyncedAt: new Date().toISOString(),
       needsInitialLoad: false,
+      ...(result.payload.profileMeta
+        ? {
+            avatarWebp: result.payload.profileMeta.avatarWebp,
+            avatarUpdatedAt: result.payload.profileMeta.updatedAt,
+          }
+        : {}),
     };
     const nextState = upsertProfile(refreshed, updatedProfile);
     cachedState = nextState;
@@ -840,6 +926,12 @@ export async function loadActiveProfileDataset(
       ...(loaded.revisionId ? { lastRevisionId: loaded.revisionId } : {}),
       lastSyncedAt: new Date().toISOString(),
       needsInitialLoad: false,
+      ...(loaded.payload.profileMeta
+        ? {
+            avatarWebp: loaded.payload.profileMeta.avatarWebp,
+            avatarUpdatedAt: loaded.payload.profileMeta.updatedAt,
+          }
+        : {}),
     };
     const nextState = upsertProfile(refreshed, updatedProfile);
     cachedState = nextState;
@@ -953,6 +1045,12 @@ export async function switchManagedProfile(
         ...(loaded.revisionId ? { lastRevisionId: loaded.revisionId } : {}),
         lastSyncedAt: new Date().toISOString(),
         needsInitialLoad: false,
+        ...(loaded.payload.profileMeta
+          ? {
+              avatarWebp: loaded.payload.profileMeta.avatarWebp,
+              avatarUpdatedAt: loaded.payload.profileMeta.updatedAt,
+            }
+          : {}),
       };
       state = upsertProfile(refreshedAfterLoad, nextProfile);
       cachedState = state;
@@ -1015,6 +1113,117 @@ export async function renameManagedProfile(
     await saveSharedSyncState(next);
     return next;
   });
+}
+
+export async function updateManagedProfileAvatar(
+  profileKeyValue: string,
+  avatarWebp?: string,
+): Promise<SharedSyncState> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = findProfile(state, profileKeyValue);
+    if (!profile) throw new Error("That profile is not available on this device.");
+    const next = upsertProfile(state, {
+      ...profile,
+      avatarWebp,
+      avatarUpdatedAt: new Date().toISOString(),
+    });
+    cachedState = next;
+    await saveSharedSyncState(next);
+    return next;
+  });
+}
+
+export async function enrollActiveControlDataset(
+  config: SharedSyncConfig,
+): Promise<SharedSyncState> {
+  return serialized(async () => {
+    if (!CONTROL_DATASETS_WIRED) {
+      throw new Error("Sharing coordination requires the next sync-kit Android release.");
+    }
+    let state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    let profile = profileForActive(state);
+    if (isLocalProfile(profile) || (profile.role !== "owner" && profile.role !== "admin")) {
+      throw new Error("Only an owner or admin can enroll sharing coordination.");
+    }
+    const controlDatasetId = profile.controlDatasetId ?? controlDatasetIdFor(profile.datasetId);
+    profile = { ...profile, controlDatasetId, controlEnrollment: "pending" };
+    state = upsertProfile(state, profile);
+    cachedState = state;
+    await saveSharedSyncState(state);
+    const scoped = createRuntimeForProfile(config, state, state.activeProfileKey, createEmptySharedSyncPayload());
+    try {
+      if (!profile.datasetRecords?.[controlDatasetId]?.fileId) {
+        await buildControlDataset(
+          state,
+          profile,
+          scoped.identityProvider,
+          scoped.authorizationProvider,
+        ).create({ email: state.ownerEmail });
+      }
+      const refreshed = (await refreshCachedState()) ?? state;
+      const current = findProfile(refreshed, refreshed.activeProfileKey) ?? profile;
+      const required = await requiredProfileMemberKeyIds(scoped, current);
+      const verified = await buildControlDataset(
+        refreshed,
+        current,
+        scoped.identityProvider,
+        scoped.authorizationProvider,
+      ).read();
+      const next = upsertProfile(refreshed, {
+        ...current,
+        controlDatasetId,
+        controlEnrollment: required.every((keyId) => verified.members.has(keyId))
+          ? "enrolled"
+          : "pending",
+      });
+      cachedState = next;
+      await saveSharedSyncState(next);
+      return next;
+    } finally {
+      scoped.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
+async function synchronizeProfileControlMembers(
+  runtimeForProfile: Runtime,
+  profile: ProfileRecord,
+  metadata: Record<string, { email?: string }> = {},
+): Promise<void> {
+  if (!CONTROL_DATASETS_WIRED || !profile.controlDatasetId) return;
+  const control = buildControlDataset(
+    runtimeForProfile.state,
+    profile,
+    runtimeForProfile.identityProvider,
+    runtimeForProfile.authorizationProvider,
+  );
+  await control.synchronizeMembers(metadata);
+  const verified = await control.read();
+  const required = await requiredProfileMemberKeyIds(runtimeForProfile, profile);
+  const enrollment = required.every((keyId) => verified.members.has(keyId))
+    ? "enrolled"
+    : "pending";
+  const refreshed = (await refreshCachedState()) ?? runtimeForProfile.state;
+  const current = findProfile(refreshed, profileKey(profile.ownerEmail, profile.datasetId)) ?? profile;
+  const next = upsertProfile(refreshed, { ...current, controlEnrollment: enrollment });
+  cachedState = next;
+  await saveSharedSyncState(next);
+}
+
+async function requiredProfileMemberKeyIds(
+  runtimeForProfile: Runtime,
+  profile: ProfileRecord,
+): Promise<string[]> {
+  const keys = new Set<string>();
+  for (const datasetId of profileDatasetIds(profile)) {
+    const membership = await runtimeForProfile.controller.getDatasetParticipants(datasetId);
+    membership.participants.forEach((participant) => keys.add(participant.keyId));
+  }
+  return [...keys];
 }
 
 export async function disconnectProfileToLocal(
@@ -1091,7 +1300,7 @@ export async function deleteManagedProfile(
       try {
         // Companions first; the base dataset's registry delete also removes
         // the profile record, so it must go last.
-        for (const datasetId of [...profileDatasetIds(profile)].reverse()) {
+        for (const datasetId of [...profileDatasetIdsIncludingControl(profile)].reverse()) {
           await deletionRuntime.controller.deleteDataset(datasetId);
         }
       } finally {
@@ -1120,6 +1329,7 @@ export type ManagedParticipant = {
   role: SharedBackupParticipantV1["role"];
   emailAddress?: string;
   isCurrentDevice: boolean;
+  trust: "verified" | "invite";
   /** Split profiles: the participant's role per dataset part they can see. */
   datasetRoles?: Partial<Record<DatasetPart, SharedBackupParticipantV1["role"]>>;
 };
@@ -1160,6 +1370,15 @@ export async function listProfileParticipants(
   try {
     const transport = buildTransport(state, profile, providers.authorizationProvider);
     const identity = await identityProvider.getOrCreate();
+    const controlMembers = profile.controlDatasetId &&
+      profile.datasetRecords?.[profile.controlDatasetId]?.fileId
+      ? await buildControlDataset(
+          state,
+          profile,
+          identityProvider,
+          providers.authorizationProvider,
+        ).read().then((verified) => verified.members).catch(() => new Map())
+      : new Map();
     const aggregated = new Map<string, ManagedParticipant>();
     for (const file of files) {
       const stored = await transport.readDataset(file.fileId);
@@ -1172,6 +1391,7 @@ export async function listProfileParticipants(
             ? { emailAddress: profile.participantEmails[participant.keyId] }
             : {}),
           isCurrentDevice: participant.keyId === identity.publicKey.keyId,
+          trust: controlMembers.get(participant.keyId)?.googleSubject ? "verified" : "invite",
         };
         if (
           existing &&
@@ -1329,7 +1549,7 @@ export async function revokeParticipant(
       const emailAddress = profile.participantEmails?.[keyId]?.trim();
       let revoked = 0;
       let lastError: unknown;
-      for (const datasetId of profileDatasetIds(profile)) {
+      for (const datasetId of profileDatasetIdsIncludingControl(profile)) {
         const revokeInput: Parameters<typeof scoped.controller.revokeDatasetKey>[0] & {
           emailAddress?: string;
         } = { datasetId, keyId };
@@ -1389,6 +1609,8 @@ export async function createOwnedProfile(
       role: "owner",
       trustedOwnerKeyId: primary.trustedOwnerKeyId,
       appFolderId: primary.appFolderId,
+      controlDatasetId: controlDatasetIdFor(datasetId),
+      controlEnrollment: "pending",
       datasetGrants: OWNER_DATASET_GRANTS,
       syncMode: "encrypted",
     };
@@ -1398,6 +1620,16 @@ export async function createOwnedProfile(
     const scoped = createRuntimeForProfile(config, provisional, profileKeyValue, emptyPayload);
     try {
       const created = await createProfileDatasetGroup(scoped.controller, datasetId, emptyPayload);
+      const afterDataCreate = (await refreshCachedState()) ?? provisional;
+      const controlProfile = findProfile(afterDataCreate, profileKeyValue) ?? newProfile;
+      if (CONTROL_DATASETS_WIRED) {
+        await buildControlDataset(
+          afterDataCreate,
+          controlProfile,
+          scoped.identityProvider,
+          scoped.authorizationProvider,
+        ).create({ email: state.ownerEmail });
+      }
       const syncedAt = new Date().toISOString();
       const refreshed = (await refreshCachedState()) ?? provisional;
       const finalProfile: ProfileRecord = {
@@ -1405,6 +1637,7 @@ export async function createOwnedProfile(
         fileId: created.fileId,
         lastRevisionId: created.revisionId,
         lastSyncedAt: syncedAt,
+        controlEnrollment: CONTROL_DATASETS_WIRED ? "enrolled" : "pending",
       };
       let nextState = upsertProfile(refreshed, finalProfile);
       nextState = { ...nextState, activeProfileKey: profileKeyValue };
@@ -1458,6 +1691,8 @@ export async function connectActiveLocalProfile(
       role: "owner",
       trustedOwnerKeyId: primary.trustedOwnerKeyId,
       appFolderId: primary.appFolderId,
+      controlDatasetId: controlDatasetIdFor(datasetId),
+      controlEnrollment: "pending",
       datasetGrants: OWNER_DATASET_GRANTS,
       syncMode: "encrypted",
     };
@@ -1478,6 +1713,16 @@ export async function connectActiveLocalProfile(
     const scoped = createRuntimeForProfile(config, provisional, connectedKey, local);
     try {
       const created = await createProfileDatasetGroup(scoped.controller, datasetId, local);
+      const afterDataCreate = (await refreshCachedState()) ?? provisional;
+      const controlProfile = findProfile(afterDataCreate, connectedKey) ?? connected;
+      if (CONTROL_DATASETS_WIRED) {
+        await buildControlDataset(
+          afterDataCreate,
+          controlProfile,
+          scoped.identityProvider,
+          scoped.authorizationProvider,
+        ).create({ email: state.ownerEmail });
+      }
       const syncedAt = new Date().toISOString();
       const refreshed = (await refreshCachedState()) ?? provisional;
       const finalProfile: ProfileRecord = {
@@ -1485,6 +1730,7 @@ export async function connectActiveLocalProfile(
         fileId: created.fileId,
         lastRevisionId: created.revisionId,
         lastSyncedAt: syncedAt,
+        controlEnrollment: CONTROL_DATASETS_WIRED ? "enrolled" : "pending",
       };
       const next = upsertProfile(refreshed, finalProfile);
       cachedState = next;
@@ -1526,6 +1772,7 @@ export async function inviteToDataset(
     const state = await getCachedState();
     if (!state) throw new Error("Encrypted sync is not set up on this device.");
     const active = await ensureRuntime(config, {} as SharedSyncPayloadV1);
+    const profile = profileForActive(state);
     const datasetId = input.datasetId ?? PRIMARY_DATASET_ID;
     const joinLandingUrl =
       typeof window !== "undefined"
@@ -1533,7 +1780,13 @@ export async function inviteToDataset(
         : undefined;
     const invited = await active.controller.inviteParticipant({
       emailAddress: input.emailAddress,
-      requestedGrants: [{ datasetId, role: input.role }],
+      requestedGrants: requestedGrantsWithControl(
+        [{ datasetId, role: input.role }],
+        CONTROL_DATASETS_WIRED ? profile.controlDatasetId : undefined,
+        profile.controlDatasetId
+          ? profile.datasetRecords?.[profile.controlDatasetId]?.fileId
+          : undefined,
+      ),
       appDisplayName: "EasyBC",
       ...(joinLandingUrl ? { joinLandingUrl } : {}),
       ...(input.emailMessage ? { emailMessage: input.emailMessage } : {}),
@@ -1590,7 +1843,7 @@ export async function inviteToDatasetLink(
     if (datasetId !== activeProfile.datasetId) {
       throw new Error("Switch to the profile you want to share before inviting someone.");
     }
-    const requestedGrants = isSplitProfile(activeProfile)
+    const dataGrants = isSplitProfile(activeProfile)
       ? requestedGrantsFromDatasetGrants(
           activeProfile.datasetId,
           input.grants ?? {
@@ -1601,6 +1854,13 @@ export async function inviteToDatasetLink(
           },
         )
       : [{ datasetId, role: input.role }];
+    const requestedGrants = requestedGrantsWithControl(
+      dataGrants,
+      CONTROL_DATASETS_WIRED ? activeProfile.controlDatasetId : undefined,
+      activeProfile.controlDatasetId
+        ? activeProfile.datasetRecords?.[activeProfile.controlDatasetId]?.fileId
+        : undefined,
+    );
     if (requestedGrants.length === 0) {
       throw new Error("Choose at least one dataset to share.");
     }
@@ -1697,7 +1957,13 @@ export async function submitJoinFromLink(
     // A split share grants a subset of the profile's dataset files; the
     // profile is keyed by the base dataset id and remembers per-part roles
     // so sync and the UI know exactly what this device can see.
-    const parsedGrants = grantsFromRequestedGrants(input.invitation.requestedGrants);
+    const controlGrant = input.invitation.requestedGrants.find((grant) =>
+      grant.datasetId.endsWith(CONTROL_DATASET_SUFFIX),
+    );
+    const appGrants = input.invitation.requestedGrants.filter(
+      (grant) => grant.datasetId !== controlGrant?.datasetId,
+    );
+    const parsedGrants = grantsFromRequestedGrants(appGrants);
     const joinProfile: ProfileRecord = {
       datasetId: parsedGrants.baseDatasetId || PRIMARY_DATASET_ID,
       ownerEmail: input.ownerEmail,
@@ -1708,6 +1974,9 @@ export async function submitJoinFromLink(
         : input.invitation.requestedGrants[0]?.role ?? "viewer",
       trustedOwnerKeyId: input.invitation.trustedOwnerKeyId,
       needsInitialLoad: true,
+      ...(controlGrant
+        ? { controlDatasetId: controlGrant.datasetId, controlEnrollment: "pending" as const }
+        : {}),
       ...(parsedGrants.split ? { datasetGrants: parsedGrants.grants } : {}),
     };
     const profileKeyValue = profileKey(joinProfile.ownerEmail, joinProfile.datasetId);
@@ -1823,7 +2092,9 @@ export async function acceptResponseFromLink(
     }
     const state = await getCachedState();
     if (!state) throw new Error("Encrypted sync is not set up on this device.");
-    const datasetId = pending.invitation.requestedGrants[0]?.datasetId;
+    const datasetId = pending.invitation.requestedGrants.find(
+      (grant) => !grant.datasetId.endsWith(CONTROL_DATASET_SUFFIX),
+    )?.datasetId;
     const fallbackProfile = state.profiles.find(
       (profile) =>
         profile.datasetId === datasetId &&
@@ -1851,15 +2122,19 @@ export async function acceptResponseFromLink(
       const refreshed = (await refreshCachedState()) ?? state;
       const acceptedProfile = findProfile(refreshed, profileKeyValue);
       if (acceptedProfile) {
-        const next = upsertProfile(refreshed, {
+        const updatedProfile = {
           ...acceptedProfile,
           participantEmails: {
             ...acceptedProfile.participantEmails,
             [input.response.keyId]: pending.recipientEmail,
           },
-        });
+        };
+        const next = upsertProfile(refreshed, updatedProfile);
         cachedState = next;
         await saveSharedSyncState(next);
+        await synchronizeProfileControlMembers(scopedRuntime, updatedProfile, {
+          [input.response.keyId]: { email: pending.recipientEmail },
+        });
       }
       disposeRuntime();
       await idbDelete(pendingInviteKey(input.response.exchangeId));
@@ -1935,15 +2210,19 @@ export async function acceptPendingKeyResponse(
     });
     const refreshed = (await refreshCachedState()) ?? active.state;
     const current = findProfile(refreshed, refreshed.activeProfileKey) ?? profile;
-    const next = upsertProfile(refreshed, {
+    const updatedProfile = {
       ...current,
       participantEmails: {
         ...current.participantEmails,
         [response.response.keyId]: input.recipientEmailAddress,
       },
-    });
+    };
+    const next = upsertProfile(refreshed, updatedProfile);
     cachedState = next;
     await saveSharedSyncState(next);
+    await synchronizeProfileControlMembers(active, updatedProfile, {
+      [response.response.keyId]: { email: input.recipientEmailAddress },
+    });
   });
 }
 

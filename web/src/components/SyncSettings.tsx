@@ -3,6 +3,7 @@ import {
   Cloud,
   Copy,
   HardDrive,
+  ImagePlus,
   KeyRound,
   LockKeyhole,
   Pencil,
@@ -30,6 +31,7 @@ import {
   createLocalProfile,
   deleteManagedProfile,
   disconnectProfileToLocal,
+  enrollActiveControlDataset,
   grantSharedDatasetFilesFromLink,
   inviteToDatasetLink,
   isSharedSyncConfigured,
@@ -46,6 +48,7 @@ import {
   syncActiveDataset,
   updateParticipantDatasetRole,
   updateParticipantRole,
+  updateManagedProfileAvatar,
 } from "../sync/sharedSync";
 import {
   parseSharingJoinLinkV1,
@@ -80,6 +83,7 @@ import {
   EbPresetChip,
 } from "../ui/Kit";
 import type { SyncPayloadV1 } from "../sync/types";
+import { avatarDataUrl, encodeAvatarFromFile } from "../ui/avatarEncode";
 
 type Props = {
   options: WasmOptions;
@@ -99,6 +103,20 @@ function roleToLevel(role?: SharingRole): EbAccessLevel {
   if (role === "viewer") return "view";
   return "none";
 }
+
+export function canManageParticipantAccess(
+  activeRole: SharingRole | undefined,
+  participant: Pick<ManagedParticipant, "role" | "isCurrentDevice" | "emailAddress">,
+): boolean {
+  return (
+    (activeRole === "owner" || activeRole === "admin") &&
+    participant.role !== "owner" &&
+    !participant.isCurrentDevice &&
+    Boolean(participant.emailAddress)
+  );
+}
+
+const CONTROL_DATASETS_WIRED = true;
 
 export function SyncSettings({
   options,
@@ -132,6 +150,7 @@ export function SyncSettings({
   const [participants, setParticipants] = useState<ManagedParticipant[]>([]);
   const [profileName, setProfileName] = useState("");
   const handledDeepLinkRef = useRef("");
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const developmentRp = rpId === "localhost" || rpId === "127.0.0.1";
 
   useEffect(() => {
@@ -160,7 +179,8 @@ export function SyncSettings({
     : null;
   const activeIsLocal = activeProfile ? isLocalProfile(activeProfile) : true;
 
-  const localShared = () => buildSharedSyncPayload(options, periodRecords, session);
+  const localShared = () =>
+    buildSharedSyncPayload(options, periodRecords, session, activeProfile);
 
   const applyShared = async (payload: ReturnType<typeof localShared>) => {
     await onApplyPayload(
@@ -224,6 +244,26 @@ export function SyncSettings({
       await applyShared(result.payload);
       onSyncComplete?.(sharedPayloadToSyncPayload(result.payload, session.androidPreferences));
       setNotice({ kind: "success", message: `Encrypted sync updated ${formatLastSync(result.syncedAt)}.` });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const enrollControlDataset = async () => {
+    if (!config) return;
+    setBusy("control-enrollment");
+    try {
+      const next = await enrollActiveControlDataset(config);
+      onSharedSyncStateChange(next);
+      setNotice({
+        kind: "success",
+        message:
+          findProfile(next, next.activeProfileKey)?.controlEnrollment === "enrolled"
+            ? "Sharing coordination is ready."
+            : "Coordination file created. Re-invite existing participants so they can enroll.",
+      });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -512,6 +552,39 @@ export function SyncSettings({
     }
   };
 
+  const changeAvatar = async (file?: File) => {
+    if (!sharedSyncState || !file) return;
+    setBusy("avatar");
+    try {
+      const avatarWebp = await encodeAvatarFromFile(file);
+      const next = await updateManagedProfileAvatar(
+        sharedSyncState.activeProfileKey,
+        avatarWebp,
+      );
+      onSharedSyncStateChange(next);
+      setNotice({ kind: "success", message: "Profile photo updated. Sync to share it." });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (avatarInputRef.current) avatarInputRef.current.value = "";
+      setBusy(null);
+    }
+  };
+
+  const removeAvatar = async () => {
+    if (!sharedSyncState) return;
+    setBusy("avatar");
+    try {
+      const next = await updateManagedProfileAvatar(sharedSyncState.activeProfileKey);
+      onSharedSyncStateChange(next);
+      setNotice({ kind: "success", message: "Profile photo removed. Sync to share the change." });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const disconnectActiveProfile = async () => {
     if (!sharedSyncState || !activeProfile || isLocalProfile(activeProfile)) return;
     if (
@@ -733,6 +806,12 @@ export function SyncSettings({
           </div>
 
           <div className="profile-name-row">
+            <img
+              className="profile-photo-preview"
+              src={activeProfile.avatarWebp ? avatarDataUrl(activeProfile.avatarWebp) : undefined}
+              alt=""
+              hidden={!activeProfile.avatarWebp}
+            />
             <label className="field">
               <span>Profile name</span>
               <input
@@ -750,6 +829,35 @@ export function SyncSettings({
               <Pencil aria-hidden />
               Rename
             </button>
+          </div>
+
+          <div className="profile-management-actions">
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(event) => void changeAvatar(event.target.files?.[0])}
+            />
+            <button
+              type="button"
+              className="ghost"
+              disabled={busy !== null}
+              onClick={() => avatarInputRef.current?.click()}
+            >
+              <ImagePlus aria-hidden />
+              {activeProfile.avatarWebp ? "Change photo" : "Add photo"}
+            </button>
+            {activeProfile.avatarWebp && (
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy !== null}
+                onClick={() => void removeAvatar()}
+              >
+                Remove photo
+              </button>
+            )}
           </div>
 
           <div className="profile-storage-summary">
@@ -821,6 +929,28 @@ export function SyncSettings({
           </div>
         </div>
       )}
+
+      {CONTROL_DATASETS_WIRED &&
+        activeProfile &&
+        !activeIsLocal &&
+        (activeProfile.role === "owner" || activeProfile.role === "admin") &&
+        activeProfile.controlEnrollment !== "enrolled" && (
+          <div className="sync-notice info">
+            <div>
+              <strong>Set up sharing coordination</strong>
+              <span>
+                This encrypted control file coordinates verified membership and future migrations.
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void enrollControlDataset()}
+            >
+              {busy === "control-enrollment" ? "Setting up…" : "Set up"}
+            </button>
+          </div>
+        )}
 
       {sharedSyncState && activeProfile && !activeIsLocal && isSplitProfile(activeProfile) && (
         <div className="dataset-access-panel">
@@ -1080,10 +1210,7 @@ export function SyncSettings({
               const name =
                 participant.emailAddress ||
                 (participant.isCurrentDevice ? "You (this identity)" : "Unknown participant");
-              const canManage =
-                participant.role !== "owner" &&
-                !participant.isCurrentDevice &&
-                Boolean(participant.emailAddress);
+              const canManage = canManageParticipantAccess(activeProfile?.role, participant);
               const summary = split
                 ? DATASET_PARTS.filter((part) => participant.datasetRoles?.[part])
                     .map((part) => `${DATASET_PART_LABELS[part]} (${participant.datasetRoles![part]})`)
@@ -1096,6 +1223,11 @@ export function SyncSettings({
                   name={name}
                   email={participant.emailAddress}
                   colorKey={participant.emailAddress ?? participant.keyId}
+                  trust={
+                    participant.role === "owner" || participant.isCurrentDevice
+                      ? undefined
+                      : participant.trust
+                  }
                 >
                   <div className="participant-summary">
                     <span className="field-hint">

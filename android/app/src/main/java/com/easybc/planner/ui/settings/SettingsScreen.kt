@@ -6,6 +6,7 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.ComponentActivity
 import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -101,6 +102,11 @@ fun SettingsScreen(
             .onSuccess { token -> key?.let { vm.switchProfile(token, it) } }
             .onFailure { vm.cloudError(it.message ?: "Google authorization failed.") }
     }
+    val avatarLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        uri?.let(vm::updateActiveProfileAvatar)
+    }
 
     fun switchTo(key: String) {
         val currentState = sharedState ?: return
@@ -176,9 +182,31 @@ fun SettingsScreen(
                     },
                     colorKey = state.activeProfileKey,
                     badge = hubProfileBadge(state, activeProfile),
+                    photoBase64 = activeProfile.avatarWebp,
                     actionLabel = "Switch",
                     onAction = { showSwitcher = true },
                 )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            avatarLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                        enabled = !busy,
+                    ) {
+                        Text(if (activeProfile.avatarWebp == null) "Add photo" else "Change photo")
+                    }
+                    if (activeProfile.avatarWebp != null) {
+                        TextButton(
+                            onClick = { vm.updateActiveProfileAvatar(null) },
+                            enabled = !busy,
+                        ) { Text("Remove photo") }
+                    }
+                }
             }
             when (val s = status) {
                 is SettingsViewModel.SyncStatus.Running ->
@@ -219,8 +247,12 @@ fun SettingsScreen(
                         hubProfileMeta(state, activeProfile)
                 },
                 icon = Icons.Filled.Group,
-                tone = if (activeProfile != null && state != null &&
-                    hubProfileBadge(state, activeProfile) == EbProfileBadge.SHARED
+                tone = if (
+                    activeProfile?.let { profile ->
+                        state?.let { current ->
+                            hubProfileBadge(current, profile) == EbProfileBadge.SHARED
+                        }
+                    } == true
                 ) {
                     EbRowTone.SHARED
                 } else {
@@ -320,6 +352,7 @@ fun SettingsScreen(
                                 colorKey = key,
                                 size = 36.dp,
                                 badge = hubProfileBadge(state, profile),
+                                photoBase64 = profile.avatarWebp,
                             )
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(label, style = MaterialTheme.typography.titleSmall)
@@ -427,6 +460,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     var pendingProfileDisplayName by remember { mutableStateOf<String?>(null) }
     var pendingProfileDeleteKey by remember { mutableStateOf<String?>(null) }
     var pendingProfileParticipantsRefresh by remember { mutableStateOf(false) }
+    var pendingControlEnrollment by remember { mutableStateOf(false) }
     var pendingParticipantRoleChange by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingParticipantRevoke by remember { mutableStateOf<Pair<String, String>?>(null) }
     var participantRevokeConfirm by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -479,6 +513,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         val profileDisplayName = pendingProfileDisplayName
         val profileDeleteKey = pendingProfileDeleteKey
         val refreshParticipants = pendingProfileParticipantsRefresh
+        val controlEnrollment = pendingControlEnrollment
         val participantRoleChange = pendingParticipantRoleChange
         val participantDatasetRoleChange = pendingParticipantDatasetRoleChange
         val participantRevoke = pendingParticipantRevoke
@@ -491,6 +526,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         pendingProfileDisplayName = null
         pendingProfileDeleteKey = null
         pendingProfileParticipantsRefresh = false
+        pendingControlEnrollment = false
         pendingParticipantRoleChange = null
         pendingParticipantDatasetRoleChange = null
         pendingParticipantRevoke = null
@@ -510,6 +546,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                         newProfileName = ""
                     }
                     profileDeleteKey != null -> vm.deleteProfile(token, profileDeleteKey, false)
+                    controlEnrollment -> vm.enrollControlDataset(token)
                     refreshParticipants -> vm.refreshProfileParticipants(token)
                     participantRoleChange != null ->
                         vm.updateParticipantRole(
@@ -644,6 +681,25 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
 
+    fun authorizeAndEnrollControlDataset() {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.enrollControlDataset(step.accessToken)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingControlEnrollment = true
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
     fun authorizeAndChangeParticipantDatasetRole(
         keyId: String,
         email: String,
@@ -758,6 +814,22 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         )
     }
     Spacer(Modifier.height(4.dp))
+
+    if (
+        selectedProfile != null &&
+        !selectedIsLocal &&
+        (selectedProfile.role == "owner" || selectedProfile.role == "admin") &&
+        selectedProfile.controlEnrollment != "enrolled"
+    ) {
+        EbBanner(
+            tone = EbBannerTone.INFO,
+            title = "Set up sharing coordination",
+            text = "This encrypted control file coordinates verified membership and future migrations.",
+            actionLabel = if (busy) "Setting up…" else "Set up",
+            onAction = { if (!busy) authorizeAndEnrollControlDataset() },
+        )
+        Spacer(Modifier.height(8.dp))
+    }
 
     // Status + Sync now
     if (!selectedIsLocal) {
@@ -1048,6 +1120,15 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    if (participant.role != "owner" && !participant.isCurrentDevice) {
+                        com.easybc.planner.ui.kit.EbTrustBadge(
+                            if (participant.accountVerified) {
+                                com.easybc.planner.ui.kit.EbTrust.VERIFIED
+                            } else {
+                                com.easybc.planner.ui.kit.EbTrust.INVITE
+                            },
+                        )
+                    }
                     if (
                         participant.role != "owner" &&
                         !participant.isCurrentDevice &&

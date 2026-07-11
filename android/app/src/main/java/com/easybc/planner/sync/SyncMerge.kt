@@ -66,6 +66,16 @@ object SyncMerge {
                 b.androidPreferences.updatedAt,
             )
         }
+        val profileMeta = when {
+            a.profileMeta == null -> b.profileMeta
+            b.profileMeta == null -> a.profileMeta
+            else -> newer(
+                a.profileMeta,
+                a.profileMeta.updatedAt,
+                b.profileMeta,
+                b.profileMeta.updatedAt,
+            )
+        }
         val selectedPlanner = newer(a.planner, a.planner.updatedAt, b.planner, b.planner.updatedAt)
         val otherPlanner = if (selectedPlanner === a.planner) b.planner else a.planner
         val planner = when {
@@ -85,6 +95,7 @@ object SyncMerge {
             voluntaryAbstinenceUpdatedAt = activeAbstinenceTimes,
             deletedVoluntaryAbstinenceDates = deletedAbstinence,
             ecJournal = newer(a.ecJournal, a.ecJournal.updatedAt, b.ecJournal, b.ecJournal.updatedAt),
+            profileMeta = profileMeta,
             androidPreferences = androidPreferences,
         )
     }

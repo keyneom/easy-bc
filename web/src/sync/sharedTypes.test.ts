@@ -84,6 +84,32 @@ describe("shared sync payload", () => {
     expect(payload.schemaVersion).toBe(1);
   });
 
+  it("publishes the newest cached avatar and preserves removal tombstones", () => {
+    const prior = {
+      ...session(),
+      profileMeta: {
+        avatarWebp: "old-photo",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    };
+    const updated = buildSharedSyncPayload(options(32) as WasmOptions, [], prior, {
+      avatarWebp: "new-photo",
+      avatarUpdatedAt: "2026-02-01T00:00:00.000Z",
+    });
+    expect(updated.profileMeta).toEqual({
+      avatarWebp: "new-photo",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+    });
+
+    const removed = buildSharedSyncPayload(options(32) as WasmOptions, [], prior, {
+      avatarUpdatedAt: "2026-03-01T00:00:00.000Z",
+    });
+    expect(removed.profileMeta).toEqual({
+      avatarWebp: undefined,
+      updatedAt: "2026-03-01T00:00:00.000Z",
+    });
+  });
+
   it("merges the same way as full sync payloads", () => {
     const wasmOld = options(30) as WasmOptions;
     const wasmNew = options(35) as WasmOptions;

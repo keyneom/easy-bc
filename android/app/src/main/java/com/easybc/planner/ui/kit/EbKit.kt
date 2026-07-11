@@ -1,6 +1,8 @@
 package com.easybc.planner.ui.kit
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,11 +40,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -140,21 +145,38 @@ fun EbAvatar(
     colorKey: String = name,
     size: Dp = 36.dp,
     badge: EbProfileBadge? = null,
+    photoBitmap: Bitmap? = null,
+    photoBase64: String? = null,
 ) {
+    val decoded = remember(photoBase64) {
+        photoBase64?.let(::decodeAvatarBase64)
+    }
+    val photo = photoBitmap ?: decoded
     Box(modifier = modifier.size(size)) {
-        Box(
-            modifier = Modifier
-                .size(size)
-                .clip(CircleShape)
-                .background(avatarColor(colorKey)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                avatarInitials(name),
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = (size.value * 0.38f).sp,
+        if (photo != null) {
+            Image(
+                bitmap = photo.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape),
             )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape)
+                    .background(avatarColor(colorKey)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    avatarInitials(name),
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = (size.value * 0.38f).sp,
+                )
+            }
         }
         badge?.let {
             val (icon, tint) = badgeVisuals(it)
@@ -184,6 +206,8 @@ fun EbProfileChip(
     colorKey: String = name,
     badge: EbProfileBadge? = null,
     showName: Boolean = true,
+    photoBitmap: Bitmap? = null,
+    photoBase64: String? = null,
 ) {
     Surface(
         onClick = onClick,
@@ -197,7 +221,14 @@ fun EbProfileChip(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            EbAvatar(name, colorKey = colorKey, size = 28.dp, badge = badge)
+            EbAvatar(
+                name,
+                colorKey = colorKey,
+                size = 28.dp,
+                badge = badge,
+                photoBitmap = photoBitmap,
+                photoBase64 = photoBase64,
+            )
             if (showName) {
                 Text(name, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
             }
@@ -303,6 +334,8 @@ fun EbProfileHeaderCard(
     badge: EbProfileBadge? = null,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
+    photoBitmap: Bitmap? = null,
+    photoBase64: String? = null,
 ) {
     Surface(
         shape = RoundedCornerShape(18.dp),
@@ -315,7 +348,14 @@ fun EbProfileHeaderCard(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            EbAvatar(name, colorKey = colorKey, size = 52.dp, badge = badge)
+            EbAvatar(
+                name,
+                colorKey = colorKey,
+                size = 52.dp,
+                badge = badge,
+                photoBitmap = photoBitmap,
+                photoBase64 = photoBase64,
+            )
             Column(modifier = Modifier.weight(1f)) {
                 Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
@@ -560,6 +600,8 @@ fun EbPersonCard(
     modifier: Modifier = Modifier,
     email: String? = null,
     trust: EbTrust? = null,
+    photoBitmap: Bitmap? = null,
+    photoBase64: String? = null,
     content: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     Surface(
@@ -576,7 +618,13 @@ fun EbPersonCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(11.dp),
             ) {
-                EbAvatar(name, colorKey = email ?: name, size = 36.dp)
+                EbAvatar(
+                    name,
+                    colorKey = email ?: name,
+                    size = 36.dp,
+                    photoBitmap = photoBitmap,
+                    photoBase64 = photoBase64,
+                )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(name, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     email?.let {

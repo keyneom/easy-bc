@@ -1344,11 +1344,22 @@ h3 {
   gap: 0.75rem;
 }
 
+/* Avatar (optional) · name field · rename — flex so the photo appearing
+   doesn't reflow the field/button into new grid tracks. */
 .profile-name-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
-  align-items: end;
+  align-items: flex-end;
+}
+
+.profile-name-row .field {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.profile-name-row .profile-photo-preview {
+  align-self: center;
 }
 
 .profile-storage-summary,
@@ -1414,6 +1425,14 @@ h3 {
   justify-content: space-between;
   gap: 0.5rem;
   margin-top: 0.35rem;
+}
+
+.profile-photo-preview {
+  width: 3rem;
+  height: 3rem;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  object-fit: cover;
 }
 
 .participant-grid,
@@ -1490,8 +1509,7 @@ h3 {
 }
 
 @media (max-width: 640px) {
-  .profile-manager-heading,
-  .profile-name-row {
+  .profile-manager-heading {
     grid-template-columns: 1fr;
   }
 
