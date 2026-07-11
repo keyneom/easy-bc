@@ -96,7 +96,9 @@ fun ReconcileScreen(
                         onToggleSelect = { vm.toggleSelection(row.date) },
                         onAsPlanned = { vm.acceptAsPlanned(row.date) },
                         onReconcile = { action -> vm.reconcileOne(row.date, action) },
-                        onCondomBreak = { vm.logCondomBreak(row.date) },
+                        onLogEvent = { kind, ecType, hours ->
+                            vm.logEvent(row.date, kind, ecType, hours)
+                        },
                     )
                 }
             }
@@ -163,8 +165,16 @@ private fun ReconcileRow(
     onToggleSelect: () -> Unit,
     onAsPlanned: () -> Unit,
     onReconcile: (String) -> Unit,
-    onCondomBreak: () -> Unit,
+    onLogEvent: (kind: String, ecType: String?, hoursFromAct: Double?) -> Unit,
 ) {
+    var showEventDialog by remember { mutableStateOf(false) }
+    if (showEventDialog) {
+        com.easybc.planner.ui.kit.DayEventDialog(
+            title = "Log an event for ${row.date.format(dateFmt)}",
+            onLog = onLogEvent,
+            onDismiss = { showEventDialog = false },
+        )
+    }
     val containerColor = if (selected) {
         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
     } else {
@@ -217,10 +227,10 @@ private fun ReconcileRow(
                     Text("Abstained", style = MaterialTheme.typography.labelSmall)
                 }
                 OutlinedButton(
-                    onClick = onCondomBreak,
+                    onClick = { showEventDialog = true },
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Cond. broke", style = MaterialTheme.typography.labelSmall)
+                    Text("Event…", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }

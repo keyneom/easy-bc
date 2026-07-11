@@ -4,6 +4,7 @@ import type { PlannerDayMeta } from "../tracker/plannerWallMeta";
 import { X } from "lucide-react";
 import type { CalendarDayLog, DayEvent, EcType, PlannerAction } from "../sessionUtils";
 import { EC_CYCLE_EFFECTS_COPY } from "../strings";
+import { todayIsoLocal } from "./MonthCalendar";
 
 type AddEventKind = "condom_broke" | "unplanned_unprotected" | "plan_b_taken";
 
@@ -120,6 +121,15 @@ export function DayDetailPanel({
 
   function commitEvent() {
     if (!iso || !addingEvent) return;
+    // Events are per-act records; a future date is almost always a mistap on
+    // the calendar. Confirm before saving one ahead of today.
+    if (iso > todayIsoLocal()) {
+      const confirmed = window.confirm(
+        `${iso} hasn't happened yet. Events are records of what actually ` +
+          "occurred — are you sure you meant this date?",
+      );
+      if (!confirmed) return;
+    }
     const baseEvent = {
       id: createId(),
       occurredAt: timestampOnSelectedDate(iso),

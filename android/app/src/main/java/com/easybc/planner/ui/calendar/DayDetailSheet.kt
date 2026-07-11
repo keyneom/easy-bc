@@ -313,6 +313,7 @@ fun DayDetailSheet(
                 onLogEvent = onLogEvent,
                 onDeleteEvent = onDeleteEvent,
                 allowSensitive = "sensitive" !in restricted,
+                isFutureDay = cell.date.isAfter(java.time.LocalDate.now()),
             )
 
             HorizontalDivider()
@@ -473,6 +474,8 @@ private fun formatRiskPercent(value: Double): String {
 @Composable
 private fun DayEventsSection(
     allowSensitive: Boolean = true,
+    /** True when the sheet's day is after today — saving asks for confirmation. */
+    isFutureDay: Boolean = false,
     events: List<DayEventEntity>,
     onLogEvent: (kind: String, ecType: String?, hoursFromAct: Double?) -> Unit,
     onDeleteEvent: (DayEventEntity) -> Unit,
@@ -480,6 +483,7 @@ private fun DayEventsSection(
     var addingKind by remember { mutableStateOf<String?>(null) }
     var ecType by remember { mutableStateOf("levonorgestrel") }
     var hoursText by remember { mutableStateOf("") }
+    var confirmFutureEvent by remember { mutableStateOf(false) }
 
     Text("Events", style = MaterialTheme.typography.titleSmall)
     Text(
@@ -569,21 +573,47 @@ private fun DayEventsSection(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+            fun saveEvent() {
+                val hours = hoursText.toDoubleOrNull()?.coerceIn(0.0, 120.0)
+                onLogEvent(
+                    addingKind!!,
+                    ecType.takeIf { addingKind == "plan_b_taken" },
+                    hours,
+                )
+                addingKind = null
+                hoursText = ""
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = {
-                    val hours = hoursText.toDoubleOrNull()?.coerceIn(0.0, 120.0)
-                    onLogEvent(
-                        addingKind!!,
-                        ecType.takeIf { addingKind == "plan_b_taken" },
-                        hours,
-                    )
-                    addingKind = null
-                    hoursText = ""
+                    // Events are per-act records; a future date is almost
+                    // always a mistap on the calendar. Confirm before saving.
+                    if (isFutureDay) confirmFutureEvent = true else saveEvent()
                 }) { Text("Save event") }
                 TextButton(onClick = {
                     addingKind = null
                     hoursText = ""
                 }) { Text("Cancel") }
+            }
+            if (confirmFutureEvent) {
+                AlertDialog(
+                    onDismissRequest = { confirmFutureEvent = false },
+                    title = { Text("Log an event in the future?") },
+                    text = {
+                        Text(
+                            "This day hasn't happened yet. Events are records of what " +
+                                "actually occurred — are you sure you meant this date?",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmFutureEvent = false
+                            saveEvent()
+                        }) { Text("Log it anyway") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmFutureEvent = false }) { Text("Cancel") }
+                    },
+                )
             }
             if (addingKind == "plan_b_taken") {
                 Text(

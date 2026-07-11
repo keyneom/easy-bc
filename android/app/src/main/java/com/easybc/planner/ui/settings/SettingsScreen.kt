@@ -437,6 +437,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         mutableStateOf<Triple<String, String, Map<String, String>?>?>(null)
     }
     var invitePresetId by remember { mutableStateOf("cycle-only") }
+    var dangerZoneOpen by remember { mutableStateOf(false) }
     var pendingJoin by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingLinkJoin by remember { mutableStateOf<String?>(null) }
     var pendingLinkAccept by remember { mutableStateOf<String?>(null) }
@@ -647,50 +648,126 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
 
-    Text(
-        "Encrypt planner settings, period records, and day logs in your own Google Drive folder " +
-            "(EasyBC — you@email). Share read or write access with others by email. " +
-            "Open a join link on this device to accept someone else's share.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-    Spacer(Modifier.height(8.dp))
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Icon(if (sharedConfigured) Icons.Default.Cloud else Icons.Default.Key, null)
-            Column {
-                Text(
-                    when {
-                        sharedConfigured -> "Encrypted sync enabled on this device"
-                        legacyPresent -> "Legacy encrypted sync on this device"
-                        else -> "Passkey-protected encrypted sync"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                Text(
-                    when {
-                        sharedConfigured || legacyPresent -> lastSync?.let { "Last encrypted update ${formatSyncTime(it)}" }
-                            ?: "No encrypted sync has completed on this device."
-                        else -> "No encrypted sync has completed on this device."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-    Spacer(Modifier.height(8.dp))
-
     val busy = status is SettingsViewModel.SyncStatus.Running
     val selectedProfile = vm.activeProfile()
     val selectedIsLocal = selectedProfile?.let {
         com.easybc.planner.sync.shared.isLocalProfile(it)
     } == true
+    val isSharedWithYou = sharedState != null && selectedProfile != null &&
+        !selectedProfile.ownerEmail.equals(sharedState!!.ownerEmail, ignoreCase = true)
+    val participantCount = selectedProfile?.participantEmails.orEmpty().size
+
+    // ── Where does this profile live? (docs/settings-profiles-redesign.md §6.1)
+    val currentMode = when {
+        selectedIsLocal || selectedProfile == null -> com.easybc.planner.ui.kit.EbStorageMode.LOCAL
+        isSharedWithYou || participantCount > 0 -> com.easybc.planner.ui.kit.EbStorageMode.SHARED
+        else -> com.easybc.planner.ui.kit.EbStorageMode.PRIVATE
+    }
+    com.easybc.planner.ui.kit.EbModeCard(
+        mode = com.easybc.planner.ui.kit.EbStorageMode.LOCAL,
+        title = "This device",
+        description = "Stays on this phone. No account needed.",
+        selected = currentMode == com.easybc.planner.ui.kit.EbStorageMode.LOCAL,
+        pending = busy,
+        enabled = !isSharedWithYou,
+        onSelect = {
+            if (currentMode != com.easybc.planner.ui.kit.EbStorageMode.LOCAL) {
+                profileActionConfirm = "disconnect"
+            }
+        },
+    )
+    com.easybc.planner.ui.kit.EbModeCard(
+        mode = com.easybc.planner.ui.kit.EbStorageMode.PRIVATE,
+        title = "Private cloud",
+        description = "Encrypted in your Google Drive; your other devices unlock it " +
+            "with your passkey. Only you.",
+        selected = currentMode == com.easybc.planner.ui.kit.EbStorageMode.PRIVATE,
+        pending = busy,
+        enabled = !isSharedWithYou,
+        onSelect = {
+            if (currentMode == com.easybc.planner.ui.kit.EbStorageMode.LOCAL) {
+                authorizeAndRun(CloudSyncOperation.SETUP)
+            }
+        },
+    )
+    com.easybc.planner.ui.kit.EbModeCard(
+        mode = com.easybc.planner.ui.kit.EbStorageMode.SHARED,
+        title = "Shared",
+        description = "Private cloud, plus invited people can view or edit what you choose.",
+        selected = currentMode == com.easybc.planner.ui.kit.EbStorageMode.SHARED,
+        pending = busy,
+        enabled = !isSharedWithYou,
+        onSelect = {
+            if (currentMode == com.easybc.planner.ui.kit.EbStorageMode.LOCAL) {
+                authorizeAndRun(CloudSyncOperation.SETUP)
+            }
+        },
+    )
+    if (isSharedWithYou) {
+        Text(
+            "Storage is controlled by the owner of this shared profile.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    } else if (currentMode == com.easybc.planner.ui.kit.EbStorageMode.PRIVATE) {
+        Text(
+            "To share this profile, invite someone below — you choose exactly what they see.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Spacer(Modifier.height(4.dp))
+
+    // Status + Sync now
+    if (!selectedIsLocal) {
+        com.easybc.planner.ui.kit.EbStatusRow(
+            tone = if (busy) {
+                com.easybc.planner.ui.kit.EbStatusTone.BUSY
+            } else if (lastSync != null) {
+                com.easybc.planner.ui.kit.EbStatusTone.OK
+            } else {
+                com.easybc.planner.ui.kit.EbStatusTone.WARN
+            },
+            text = when {
+                busy -> "Working…"
+                lastSync != null -> "Last encrypted update ${formatSyncTime(lastSync!!)}"
+                else -> "No encrypted sync has completed on this device."
+            },
+        )
+        if (sharedConfigured) {
+            Button(
+                onClick = { authorizeAndRun(CloudSyncOperation.SYNC) },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Sync, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Sync now")
+            }
+        }
+    }
+
+    // Contextual recovery paths — rendered only while their condition holds.
+    if (legacyPresent && !sharedConfigured) {
+        com.easybc.planner.ui.kit.EbBanner(
+            tone = com.easybc.planner.ui.kit.EbBannerTone.WARN,
+            title = "Legacy encrypted sync found",
+            text = "This device has records from the older encrypted sync. Migrating merges " +
+                "them into the current format — nothing is lost.",
+            actionLabel = "Migrate",
+            onAction = { if (!busy) authorizeAndRun(CloudSyncOperation.ENABLE) },
+        )
+    }
+    if (connected && !sharedConfigured) {
+        com.easybc.planner.ui.kit.EbBanner(
+            tone = com.easybc.planner.ui.kit.EbBannerTone.ERROR,
+            title = "A cloud copy exists that this device can't unlock",
+            text = "Reset deletes that copy and starts fresh with this device's data.",
+            actionLabel = "Reset",
+            onAction = { if (!busy) confirming = CloudSyncOperation.RESET },
+        )
+    }
+    Spacer(Modifier.height(4.dp))
     sharedState?.let { state ->
         Spacer(Modifier.height(8.dp))
         Text("Profile management", style = MaterialTheme.typography.titleMedium)
@@ -835,21 +912,6 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                 enabled = !busy && profileName.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Rename profile") }
-            if (com.easybc.planner.sync.shared.isLocalProfile(profile)) {
-                if (state.profiles.size > 1) {
-                    TextButton(
-                        onClick = { profileActionConfirm = "delete-local" },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Delete local profile") }
-                }
-            } else {
-                OutlinedButton(
-                    onClick = { profileActionConfirm = "disconnect" },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Keep local copy & disconnect") }
-            }
         }
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
@@ -899,16 +961,6 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     }
     Spacer(modifier = Modifier.height(8.dp))
     if (sharedConfigured && !selectedIsLocal) {
-        Button(
-            onClick = { authorizeAndRun(CloudSyncOperation.SYNC) },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Icon(Icons.Default.Sync, null)
-            Spacer(Modifier.width(8.dp))
-            Text("Merge encrypted changes")
-        }
-        Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = {
                 scope.launch {
@@ -1122,71 +1174,45 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                 }
             }
         }
-        if (vm.activeProfile()?.role == "owner") {
-            OutlinedButton(
+    }
+    // The setup/enable/migrate/reset entry points now live in the mode
+    // selector cards and contextual banners at the top of this screen.
+
+    // ── Danger zone — every action names its blast radius.
+    Spacer(Modifier.height(8.dp))
+    com.easybc.planner.ui.kit.EbExpanderRow(
+        label = "Danger zone — disconnect, reset, delete",
+        tone = com.easybc.planner.ui.kit.EbExpanderTone.DANGER,
+        expanded = dangerZoneOpen,
+        onToggle = { dangerZoneOpen = !dangerZoneOpen },
+    ) {
+        if (selectedIsLocal) {
+            if ((sharedState?.profiles?.size ?: 0) > 1) {
+                com.easybc.planner.ui.kit.EbDangerTextButton(
+                    label = "Delete local profile (this device only)",
+                    onClick = { profileActionConfirm = "delete-local" },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        } else {
+            com.easybc.planner.ui.kit.EbDangerTextButton(
+                label = "Keep local copy & disconnect (cloud copy untouched)",
+                onClick = { profileActionConfirm = "disconnect" },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        if (!selectedIsLocal && vm.activeProfile()?.role == "owner") {
+            com.easybc.planner.ui.kit.EbDangerTextButton(
+                label = "Reset encrypted sync (replaces the Drive copy)",
                 onClick = { confirming = CloudSyncOperation.RESET },
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Reset encrypted sync") }
-        }
-    } else if (selectedIsLocal) {
-        Button(
-            onClick = { authorizeAndRun(CloudSyncOperation.SETUP) },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Icon(Icons.Default.Key, null)
-            Spacer(Modifier.width(8.dp))
-            Text("Enable private encrypted sync")
-        }
-    } else if (legacyPresent) {
-        // This device still has legacy snapshot metadata: migrating is the
-        // one correct action, so it is the only one offered.
-        Button(
-            onClick = { authorizeAndRun(CloudSyncOperation.ENABLE) },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Icon(Icons.Default.Sync, null)
-            Spacer(Modifier.width(8.dp))
-            Text("Migrate legacy encrypted sync")
-        }
-        Text(
-            "This device has records from the older encrypted sync. Migrating merges them " +
-                "into the current format — nothing is lost.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    } else {
-        Button(
-            onClick = { authorizeAndRun(CloudSyncOperation.SETUP) },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Icon(Icons.Default.Key, null)
-            Spacer(Modifier.width(8.dp))
-            Text("Set up encrypted sync")
+            )
         }
     }
-    if (connected && !sharedConfigured) {
-        // Escape hatch for an un-adoptable cloud copy (a dataset owned by an
-        // identity this device can't produce — e.g. an orphan from before the
-        // app-data identity scheme). "Set up" keeps failing on it; Reset deletes
-        // it and recreates from this device's data.
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(
-            onClick = { confirming = CloudSyncOperation.RESET },
-            enabled = !busy,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Reset encrypted sync") }
-        Text(
-            "If setup says a cloud copy already exists that this device can't " +
-                "unlock, Reset deletes that copy and starts fresh with this " +
-                "device's data.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
+
     // Joining a profile someone shared with you is always available — with or
     // without your own encrypted sync — so it lives in its own subsection.
     Spacer(Modifier.height(16.dp))
