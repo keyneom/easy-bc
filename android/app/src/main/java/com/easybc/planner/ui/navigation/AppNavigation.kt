@@ -140,7 +140,7 @@ fun AppNavigation(
                 vm = chipVm,
                 onOpenManageProfiles = {
                     navController.navigate(Screen.Settings.route) { launchSingleTop = true }
-                    navController.navigate("settings/storage") { launchSingleTop = true }
+                    navController.navigate("settings/profiles") { launchSingleTop = true }
                 },
             )
             NavHost(
@@ -171,6 +171,14 @@ fun AppNavigation(
             }
             composable("settings/storage") {
                 StorageSharingScreen(onBack = { navController.popBackStack() })
+            }
+            composable("settings/profiles") {
+                com.easybc.planner.ui.settings.ManageProfilesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenStorage = {
+                        navController.navigate("settings/storage") { launchSingleTop = true }
+                    },
+                )
             }
             composable("settings/reminders") {
                 RemindersScreen(onBack = { navController.popBackStack() })

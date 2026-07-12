@@ -261,6 +261,17 @@ fun SettingsScreen(
                 onClick = { onOpen("settings/storage") },
             )
 
+            // ── Profiles ──
+            EbGroupLabel("Profiles")
+            EbNavRow(
+                title = "Manage profiles",
+                value = state?.profiles?.size?.let { count ->
+                    "$count profile${if (count == 1) "" else "s"} on this device"
+                } ?: "Create, switch, or join profiles",
+                icon = Icons.Filled.Person,
+                onClick = { onOpen("settings/profiles") },
+            )
+
             // ── This device ──
             EbGroupLabel("This device")
             EbNavRow(
@@ -376,10 +387,10 @@ fun SettingsScreen(
                 TextButton(
                     onClick = {
                         showSwitcher = false
-                        onOpen("settings/storage")
+                        onOpen("settings/profiles")
                     },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Manage profiles, storage & sharing") }
+                ) { Text("Manage profiles — new, join, storage & sharing") }
             }
         }
     }
