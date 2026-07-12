@@ -39,7 +39,7 @@ device from publishing full payloads into what is now the plan file).
 **Shared legacy profiles** use the protocol-native hard-cutover ceremony
 (sync-kit `docs/sharing-control-datasets.md`), never re-invites: existing
 participants keep their identity keypairs, and the owner grants the new
-files to their **stored public keys** with sync-kit rc.14's
+files to their **stored public keys** with sync-kit rc.15's
 `addDatasetParticipant` — the one thing participants must do themselves is
 the Google Picker re-selection, because `drive.file` scope requires the
 user in the loop for file access. Each new dataset file gets a fresh
@@ -90,7 +90,7 @@ open migration lists the profile's dataset as a source.
 **Owner — close:** `migrationStatus` drives a status card (acked vs
 pending, by person). When every required ack is present the owner closes
 (`closeMigration`) and the source file is **trashed, not deleted**
-(rc.14 `trashDataset`; recoverable from Drive trash ~30 days). A blocked
+(rc.15 `trashDataset`; recoverable from Drive trash ~30 days). A blocked
 migration stays visible — silence is never treated as success.
 
 **Residual risks (accepted, documented):** clients older than this release
