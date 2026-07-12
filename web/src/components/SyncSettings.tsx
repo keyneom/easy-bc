@@ -1369,6 +1369,62 @@ export function SyncSettings({
             onChange={(event) => setJoinLinkInput(event.target.value)}
           />
         </label>
+        {(() => {
+          // Structured preview (docs/join-flow.md, mockup J1): show exactly
+          // what the link grants before anything runs — never a blind join.
+          const source = joinLinkInput.trim();
+          if (!source) return null;
+          const parsed = parseSharingJoinLinkV1(source);
+          if (!parsed || parsed.files.length === 0) return null;
+          let previewOwner: string | null = null;
+          try {
+            previewOwner =
+              new URLSearchParams(
+                source.includes("://") ? new URL(source).search : source,
+              )
+                .get("owner")
+                ?.trim() ?? null;
+          } catch {
+            previewOwner = null;
+          }
+          return (
+            <div className="dataset-access-panel">
+              <p className="eyebrow">
+                {previewOwner ?? "The owner"} is sharing these with you
+              </p>
+              {parsed.files.map((file) => {
+                const isControl = file.datasetId.endsWith(".control");
+                const part = isControl
+                  ? null
+                  : (["cycle", "intimacy", "sensitive"] as const).find(
+                      (candidate) => file.datasetId.endsWith(`.${candidate}`),
+                    ) ?? ("plan" as const);
+                return (
+                  <EbDatasetRow
+                    key={file.fileId}
+                    dataset={part ?? "plan"}
+                    title={
+                      isControl
+                        ? "Sharing coordination file"
+                        : DATASET_PART_LABELS[part ?? "plan"]
+                    }
+                    summary={
+                      isControl
+                        ? "Keeps your access up to date"
+                        : file.role === "writer"
+                          ? "You can edit"
+                          : "View only"
+                    }
+                  />
+                );
+              })}
+              <p className="field-hint">
+                Joining confirms it's you (Google + passkey) first, then Google
+                asks you to select these files yourself — the one manual step.
+              </p>
+            </div>
+          );
+        })()}
         <button
           type="button"
           disabled={
