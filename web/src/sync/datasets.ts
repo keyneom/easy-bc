@@ -57,6 +57,75 @@ export function partForDatasetId(baseDatasetId: string, datasetId: string): Data
   return null;
 }
 
+/**
+ * Base dataset ids are generational: "primary" → "primary.g2" →
+ * "primary.g3". A hard-cutover migration cannot reuse the source's id
+ * (sync-kit refuses duplicate dataset ids in one folder, and the source
+ * must stay readable until the migration closes), so each cutover targets
+ * the next generation. The ".g" marker lives in the dot namespace —
+ * display-name slugs are [a-z0-9-], so a user profile id can never collide
+ * with a generation of another profile (e.g. "emma-2" is a second profile
+ * named Emma, never generation 2 of "emma").
+ */
+export function splitBaseRoot(baseDatasetId: string): string {
+  return baseDatasetIdOf(baseDatasetId).replace(/\.g\d+$/, "");
+}
+
+function splitBaseGeneration(root: string, baseDatasetId: string): number | null {
+  if (baseDatasetId === root) return 1;
+  const match = baseDatasetId.match(/^(.*)\.g(\d+)$/);
+  if (!match || match[1] !== root) return null;
+  return Number(match[2]);
+}
+
+/** The next unused generation for a cutover from `sourceBaseId`. */
+export function nextSplitBaseId(
+  sourceBaseId: string,
+  existingDatasetIds: string[],
+): string {
+  const root = splitBaseRoot(sourceBaseId);
+  let max = 1;
+  for (const id of existingDatasetIds) {
+    const generation = splitBaseGeneration(root, baseDatasetIdOf(id));
+    if (generation !== null) max = Math.max(max, generation);
+  }
+  return `${root}.g${max + 1}`;
+}
+
+/**
+ * The highest existing generation strictly newer than `currentBaseId`, or
+ * null. Non-null means another device already created (or completed) a
+ * cutover this device hasn't adopted yet — or that an interrupted cutover
+ * on this device should resume into that generation instead of minting a
+ * new one.
+ */
+export function newerSplitBaseId(
+  currentBaseId: string,
+  existingDatasetIds: string[],
+): string | null {
+  const root = splitBaseRoot(currentBaseId);
+  const current = splitBaseGeneration(root, baseDatasetIdOf(currentBaseId)) ?? 1;
+  let best: number | null = null;
+  for (const id of existingDatasetIds) {
+    const generation = splitBaseGeneration(root, baseDatasetIdOf(id));
+    if (generation !== null && generation > current) {
+      best = Math.max(best ?? 0, generation);
+    }
+  }
+  return best === null ? null : `${root}.g${best}`;
+}
+
+/**
+ * Two dataset ids belong to the same profile when their bases share a
+ * generation root: "primary", "primary-2.cycle", and "primary-3" are one
+ * family. Registry scoping uses this so a migration's target datasets are
+ * recorded inside the migrating profile record instead of surfacing as
+ * foreign profiles.
+ */
+export function sameSplitFamily(a: string, b: string): boolean {
+  return splitBaseRoot(a) === splitBaseRoot(b);
+}
+
 /** "primary.cycle" -> "primary"; plain ids map to themselves. */
 export function baseDatasetIdOf(datasetId: string): string {
   for (const part of DATASET_PARTS) {

@@ -3,7 +3,7 @@ import type {
   SharedDatasetRegistryRecord,
 } from "@keyneom/sync-kit/sharing/controller";
 import { idbDelete, idbGet, idbSet, KV_SHARED_SYNC_STATE } from "../idbStore";
-import { partForDatasetId } from "./datasets";
+import { partForDatasetId, sameSplitFamily } from "./datasets";
 import { parseProfileKey, profileKey } from "./sharedFolderName";
 import {
   defaultOwnedProfileKey,
@@ -106,7 +106,10 @@ export class ProfileScopedSharedBackupRegistry implements SharedBackupRegistry {
       if (
         existing &&
         (partForDatasetId(scopedDatasetId, record.datasetId) !== null ||
-          record.datasetId === existing.controlDatasetId)
+          record.datasetId === existing.controlDatasetId ||
+          // A hard-cutover migration's target generation ("primary-2",
+          // "primary-2.cycle", …) is the same profile, not a foreign one.
+          sameSplitFamily(scopedDatasetId, record.datasetId))
       ) {
         // Companion dataset of a split profile: its state stays inside the
         // scoped profile record and never surfaces as a profile of its own.

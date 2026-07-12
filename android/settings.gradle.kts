@@ -17,6 +17,9 @@ dependencyResolutionManagement {
                 password = githubPackagesPassword()
             }
         }
+        // Last resort so local development can build against a sync-kit
+        // release candidate before it is published (publishToMavenLocal).
+        mavenLocal()
     }
 }
 rootProject.name = "EasyBCPlanner"

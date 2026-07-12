@@ -69,6 +69,27 @@ export type ProfileRecord = {
    * using the top-level fileId/lastRevisionId fields.
    */
   datasetRecords?: Record<string, CompanionDatasetRecord>;
+  /**
+   * Participant side of an open hard-cutover migration
+   * (docs/sync-kit-multi-file-datasets.md §ceremony): the owner reorganized
+   * this profile into new dataset files, and this device must re-select
+   * them in the Picker and acknowledge before it may publish again. While
+   * present, the source dataset is treated as read-only (the freeze).
+   */
+  pendingMigration?: {
+    migrationId: string;
+    targetBaseId: string;
+    /** Target files this device was granted and must open via the Picker. */
+    requiredFileIds: string[];
+    targets: Array<{ datasetId: string; fileId: string }>;
+  };
+  /**
+   * Owner side of an open migration: the retired source dataset id, kept
+   * until every required acknowledgement arrives and the owner closes the
+   * migration — at which point the source file is trashed (not deleted).
+   */
+  retiredDatasetId?: string;
+  openMigrationId?: string;
 };
 
 export type CompanionDatasetRecord = {

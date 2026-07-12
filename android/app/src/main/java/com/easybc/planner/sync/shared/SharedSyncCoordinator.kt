@@ -18,6 +18,9 @@ import com.keyneom.synckit.sharing.SharingJoinParams
 import com.keyneom.synckit.sharing.SharingRole
 import com.keyneom.synckit.sharing.SharingControlDataset
 import com.keyneom.synckit.sharing.SharingControlMemberMetadataV1
+import com.keyneom.synckit.sharing.SharingControlMigrationRequirementV1
+import com.keyneom.synckit.sharing.SharingControlMigrationTargetV1
+import com.keyneom.synckit.sharing.SharingControlMigrationV1
 import com.keyneom.synckit.sharing.SharingControlStateV1
 import com.keyneom.synckit.sharing.createSharingControlCodec
 import com.keyneom.synckit.sharing.VerifySharedBackupOptions
@@ -261,18 +264,30 @@ class SharedSyncCoordinator(
 
     suspend fun sync(accessToken: String): SharedSyncState {
         rememberAccess(accessToken)
-        val state = registry.load() ?: error("Shared sync is not configured on this device.")
-        val profile = registry.activeProfile(state)
+        var state = registry.load() ?: error("Shared sync is not configured on this device.")
+        var profile = registry.activeProfile(state)
         require(!isLocalProfile(profile)) {
             "This profile is local only. Connect encrypted sync before syncing it."
         }
-        val controller = controllerFor(state, profile)
+        var controller = controllerFor(state, profile)
+        // An open hard-cutover this device hasn't followed yet: adopt/rebase
+        // (owner or already-acked participant) or freeze until acknowledged.
+        var freeze = false
+        val reconciled = reconcileOpenMigration(controller, state, profile)
+        if (reconciled.rebased) {
+            state = registry.load() ?: state
+            profile = registry.activeProfile(state)
+            controller = controllerFor(state, profile)
+        } else {
+            profile = reconciled.profile
+            freeze = reconciled.freeze
+        }
         val local = sharedPayload(store.localPayload()).withProfileAvatar(profile)
         val result = syncProfileDatasetGroup(
             controller,
             profile,
             local,
-            loadOnly = shouldLoadRemoteBeforePublish(profile),
+            loadOnly = freeze || shouldLoadRemoteBeforePublish(profile),
         )
         store.apply(result.payload.withLocalAndroidPreferences(store.localPayload()))
         val syncedAt = java.time.Instant.now().toString()
@@ -795,6 +810,391 @@ class SharedSyncCoordinator(
         val next = registry.upsertProfile(nextProfile)
         store.rememberSync(created.fileId, syncedAt)
         return next
+    }
+
+    /* ---------- Hard-cutover split migration (docs/sync-kit-multi-file-datasets.md §ceremony) ---------- */
+
+    private fun participantPublicKey(
+        participant: com.keyneom.synckit.sharing.SharedBackupParticipantV1,
+    ): com.keyneom.synckit.sharing.SharingPublicKeyV1 =
+        com.keyneom.synckit.sharing.SharingPublicKeyV1(
+            keyId = participant.keyId,
+            encryptionAlgorithm = participant.encryptionAlgorithm,
+            encryptionPublicKey = participant.encryptionPublicKey,
+            signatureAlgorithm = participant.signatureAlgorithm,
+            signingPublicKey = participant.signingPublicKey,
+        )
+
+    /**
+     * Replace a profile record whose base dataset id changed generation. The
+     * profile key derives from the dataset id, so the active key moves with
+     * it; the control dataset id (and control event continuity) is untouched.
+     */
+    private suspend fun rebaseProfileRecord(oldKey: String, next: ProfileRecord): SharedSyncState {
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val newKey = profileKey(next.ownerEmail, next.datasetId)
+        val rebased = state.copy(
+            activeProfileKey = if (state.activeProfileKey == oldKey) newKey else state.activeProfileKey,
+            profiles = state.profiles.filter {
+                profileKey(it.ownerEmail, it.datasetId) != oldKey
+            } + next,
+        )
+        registry.save(rebased)
+        registry.clearCheckpoint()
+        return rebased
+    }
+
+    /**
+     * Owner side, phase 1 (announce). Resumable: every step is an upsert or
+     * a skip-if-present, and an already-announced migration is reused. Ends
+     * with this device rebased onto the target generation — the owner never
+     * writes the retired source again (the structural freeze).
+     */
+    suspend fun beginSplitMigration(
+        accessToken: String,
+        grantsByKeyId: Map<String, Map<String, String>>,
+    ): SharedSyncState {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile)) { "Turn on encrypted sync for this profile first." }
+        require(profile.role == "owner") { "Only the profile owner can reorganize its sharing layout." }
+        require(!isSplitProfile(profile)) { "This profile already uses per-dataset sharing." }
+        val emails = profile.participantEmails.orEmpty()
+        require(emails.isNotEmpty()) {
+            "This profile has no participants — use the direct upgrade instead."
+        }
+        val controller = controllerFor(state, profile)
+
+        val participants = controller.getDatasetParticipants(profile.datasetId).participants
+            .filter { it.role != SharingRole.OWNER }
+        for (participant in participants) {
+            require(emails[participant.keyId] != null) {
+                "No email is known for key ${participant.keyId.take(10)}… — EasyBC cannot safely update their Drive access."
+            }
+            val grants = grantsByKeyId[participant.keyId]
+            require(grants != null && DATASET_PARTS.any { grants[it] != null }) {
+                "Choose access for every person first. To cut someone off entirely, remove their access before upgrading."
+            }
+        }
+
+        // Final publish of the source — the last write before the freeze.
+        val local = sharedPayload(store.localPayload()).withProfileAvatar(profile)
+        val payload = controller.syncDataset(profile.datasetId, local).value
+
+        // The control dataset is the coordination channel; make sure it
+        // exists and every participant can write to it (acks are signed).
+        val controlDatasetId = profile.controlDatasetId ?: controlDatasetIdFor(profile.datasetId)
+        var currentProfile = profile
+        if (currentProfile.controlDatasetId != controlDatasetId) {
+            currentProfile = currentProfile.copy(controlDatasetId = controlDatasetId)
+            registry.upsertProfile(currentProfile)
+        }
+        if (refreshedProfile(currentProfile).datasetRecords?.get(controlDatasetId)?.fileId == null) {
+            controlDatasetFor(registry.load()!!, currentProfile).create(
+                SharingControlMemberMetadataV1(email = state.ownerEmail),
+            )
+        }
+        for (participant in participants) {
+            controller.addDatasetParticipant(
+                datasetId = controlDatasetId,
+                publicKey = participantPublicKey(participant),
+                role = SharingRole.WRITER,
+                emailAddress = emails.getValue(participant.keyId),
+            )
+        }
+
+        // Target generation: reuse an announced migration's targets or an
+        // interrupted attempt's files before minting a new generation.
+        val control = controlDatasetFor(registry.load()!!, currentProfile)
+        val verified = runCatching { control.read() }.getOrNull()
+        val open = verified?.migrations?.values?.firstOrNull {
+            !verified.closedMigrations.contains(it.migrationId) &&
+                it.sourceDatasetIds.contains(profile.datasetId)
+        }
+        var files = controller.listDatasets()
+        val datasetIds = files.map { it.datasetId }
+        val targetBase = when {
+            open != null -> baseDatasetIdOf(open.targets.first().datasetId)
+            else -> newerSplitBaseId(profile.datasetId, datasetIds)
+                ?: nextSplitBaseId(profile.datasetId, datasetIds)
+        }
+        for (part in DATASET_PARTS) {
+            val datasetId = datasetIdForPart(targetBase, part)
+            if (files.any { it.datasetId == datasetId }) continue
+            controller.createDataset(datasetId, projectDatasetPart(payload, part))
+        }
+        files = controller.listDatasets()
+        val targets = DATASET_PARTS.map { part ->
+            val datasetId = datasetIdForPart(targetBase, part)
+            val file = files.firstOrNull { it.datasetId == datasetId }
+                ?: error("The $part dataset was not created.")
+            datasetId to file.fileId
+        }
+
+        // Share each target with its intended recipients — their existing
+        // public keys, fresh per-file content keys, no re-invites.
+        for (participant in participants) {
+            val grants = grantsByKeyId.getValue(participant.keyId)
+            for (part in DATASET_PARTS) {
+                val role = grants[part] ?: continue
+                if (role == "owner") continue
+                controller.addDatasetParticipant(
+                    datasetId = datasetIdForPart(targetBase, part),
+                    publicKey = participantPublicKey(participant),
+                    role = sharingRoleFromString(role),
+                    emailAddress = emails.getValue(participant.keyId),
+                )
+            }
+        }
+
+        var migrationId = open?.migrationId
+        if (migrationId == null) {
+            migrationId = java.util.UUID.randomUUID().toString()
+            control.announceMigration(
+                SharingControlMigrationV1(
+                    migrationId = migrationId,
+                    sourceDatasetIds = listOf(profile.datasetId),
+                    targets = targets.map { (datasetId, fileId) ->
+                        SharingControlMigrationTargetV1(datasetId = datasetId, fileId = fileId)
+                    },
+                    requiredAcks = participants.map { participant ->
+                        SharingControlMigrationRequirementV1(
+                            keyId = participant.keyId,
+                            targetFileIds = DATASET_PARTS.filter { part ->
+                                val role = grantsByKeyId.getValue(participant.keyId)[part]
+                                role != null && role != "owner"
+                            }.map { part ->
+                                targets.first { it.first == datasetIdForPart(targetBase, part) }.second
+                            },
+                        )
+                    },
+                    mode = "hard-cutover",
+                ),
+            )
+        }
+
+        // Rebase this device onto the target generation; promote the base
+        // target's head from datasetRecords to the top-level fields.
+        val persisted = refreshedProfile(currentProfile)
+        val baseHead = persisted.datasetRecords?.get(targetBase)
+        val rebased = persisted.copy(
+            datasetId = targetBase,
+            datasetGrants = OWNER_DATASET_GRANTS,
+            datasetRecords = persisted.datasetRecords.orEmpty() - targetBase,
+            fileId = baseHead?.fileId,
+            lastRevisionId = baseHead?.lastRevisionId,
+            lastSyncedAt = java.time.Instant.now().toString(),
+            retiredDatasetId = profile.datasetId,
+            openMigrationId = migrationId,
+        )
+        val next = rebaseProfileRecord(profileKey(profile.ownerEmail, profile.datasetId), rebased)
+        store.apply(payload.withLocalAndroidPreferences(store.localPayload()))
+        baseHead?.fileId?.let { store.rememberSync(it, rebased.lastSyncedAt!!) }
+        return next
+    }
+
+    /**
+     * Participant side, after the browser Picker grant: adopt and verify
+     * every granted target, acknowledge through the control file, and
+     * rebase onto the target generation with the roles read from the
+     * adopted envelopes.
+     */
+    suspend fun acknowledgeSplitMigration(accessToken: String): SharedSyncState {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        val pending = profile.pendingMigration
+            ?: error("This profile has no migration waiting for you.")
+        val controller = controllerFor(state, profile)
+        val myKeyId = identityStore.getOrCreate().publicKey.keyId
+
+        val grants = mutableMapOf<String, String>()
+        for (target in pending.targets) {
+            if (!pending.requiredFileIds.contains(target.fileId)) continue
+            val part = partForDatasetId(pending.targetBaseId, target.datasetId) ?: continue
+            controller.adoptDataset(target.datasetId)
+            val me = controller.getDatasetParticipants(target.datasetId)
+                .participants.firstOrNull { it.keyId == myKeyId }
+                ?: error(
+                    "You have no key for the ${datasetPartLabel(part)} file — ask the owner to re-run the upgrade.",
+                )
+            if (me.role != SharingRole.OWNER) grants[part] = me.role.name.lowercase()
+        }
+        require(grants.isNotEmpty()) {
+            "None of the reorganized files could be opened yet — grant access in the browser first."
+        }
+
+        controlDatasetFor(state, profile).acknowledgeMigration(
+            migrationId = pending.migrationId,
+            openedFileIds = pending.requiredFileIds,
+        )
+
+        val persisted = refreshedProfile(profile)
+        val baseHead = persisted.datasetRecords?.get(pending.targetBaseId)
+        val rebased = persisted.copy(
+            datasetId = pending.targetBaseId,
+            datasetGrants = grants,
+            datasetRecords = persisted.datasetRecords.orEmpty() - pending.targetBaseId,
+            fileId = baseHead?.fileId,
+            lastRevisionId = baseHead?.lastRevisionId,
+            pendingMigration = null,
+            needsInitialLoad = true,
+        )
+        rebaseProfileRecord(profileKey(profile.ownerEmail, profile.datasetId), rebased)
+
+        // Load the new group immediately so the user's data continues.
+        val freshState = registry.load()!!
+        val fresh = registry.activeProfile(freshState)
+        val freshController = controllerFor(freshState, fresh)
+        val loaded = syncProfileDatasetGroup(
+            freshController,
+            fresh,
+            sharedPayload(store.localPayload()),
+            loadOnly = true,
+        )
+        store.apply(loaded.payload.withLocalAndroidPreferences(store.localPayload()))
+        val syncedAt = java.time.Instant.now().toString()
+        val final = refreshedProfile(fresh).copy(
+            fileId = loaded.fileId,
+            lastRevisionId = loaded.revisionId,
+            lastSyncedAt = syncedAt,
+            needsInitialLoad = false,
+        )
+        val next = registry.upsertProfile(final)
+        store.rememberSync(loaded.fileId, syncedAt)
+        return next
+    }
+
+    data class MigrationAckStatus(
+        val acknowledged: List<Pair<String, String?>>,
+        val pending: List<Pair<String, String?>>,
+        val closed: Boolean,
+    )
+
+    /** Owner: who has completed the Picker re-selection and acknowledged. */
+    suspend fun splitMigrationStatus(accessToken: String): MigrationAckStatus {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        val migrationId = profile.openMigrationId ?: error("This profile has no open migration.")
+        val status = controlDatasetFor(state, profile).migrationStatus(migrationId)
+        val emails = profile.participantEmails.orEmpty()
+        return MigrationAckStatus(
+            acknowledged = status.acknowledgedKeyIds.map { it to emails[it] },
+            pending = status.pendingKeyIds.map { it to emails[it] },
+            closed = status.closed,
+        )
+    }
+
+    /**
+     * Owner: close the migration once every required acknowledgement is
+     * present and trash (not delete) the retired source file.
+     */
+    suspend fun closeSplitMigration(accessToken: String): SharedSyncState {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        val migrationId = profile.openMigrationId ?: error("This profile has no open migration.")
+        val retired = profile.retiredDatasetId ?: error("This profile has no open migration.")
+        require(profile.role == "owner") { "Only the owner can close a migration." }
+        val control = controlDatasetFor(state, profile)
+        val status = control.migrationStatus(migrationId)
+        if (!status.closed) {
+            require(status.pendingKeyIds.isEmpty()) {
+                "Waiting for everyone to reselect the new files — closing now would cut them off."
+            }
+            control.closeMigration(migrationId = migrationId)
+        }
+        controllerFor(registry.load()!!, refreshedProfile(profile)).trashDataset(retired)
+        val persisted = refreshedProfile(profile)
+        return registry.upsertProfile(
+            persisted.copy(retiredDatasetId = null, openMigrationId = null),
+        )
+    }
+
+    private data class MigrationReconcileOutcome(
+        val profile: ProfileRecord,
+        val freeze: Boolean,
+        val rebased: Boolean,
+    )
+
+    /**
+     * Runs before a legacy profile syncs: detect an open hard-cutover this
+     * device hasn't followed. Owners and post-ack participants adopt +
+     * rebase immediately; participants who still owe an acknowledgement get
+     * a persisted pendingMigration marker and a frozen (load-only) source.
+     * Memoized per coordinator instance.
+     */
+    private val migrationReconcileChecked = mutableSetOf<String>()
+    private suspend fun reconcileOpenMigration(
+        controller: SharedBackupController<SyncPayloadV1>,
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ): MigrationReconcileOutcome {
+        val none = MigrationReconcileOutcome(profile, freeze = false, rebased = false)
+        val controlFileKnown = profile.controlDatasetId != null &&
+            profile.datasetRecords?.get(profile.controlDatasetId)?.fileId != null
+        if (isSplitProfile(profile) || isLocalProfile(profile) || !controlFileKnown) return none
+        if (profile.pendingMigration != null) return none.copy(freeze = true)
+        val memoKey = profileKey(profile.ownerEmail, profile.datasetId)
+        if (!migrationReconcileChecked.add(memoKey)) return none
+        val verified = runCatching { controlDatasetFor(state, profile).read() }.getOrNull()
+            ?: return none
+        val open = verified.migrations.values.firstOrNull {
+            !verified.closedMigrations.contains(it.migrationId) &&
+                it.sourceDatasetIds.contains(profile.datasetId)
+        } ?: return none
+        val myKeyId = identityStore.getOrCreate().publicKey.keyId
+        val targetBase = baseDatasetIdOf(open.targets.first().datasetId)
+        val myAck = verified.acknowledgements[open.migrationId]?.containsKey(myKeyId) == true
+        val myRequirement = open.requiredAcks.firstOrNull { it.keyId == myKeyId }
+
+        if (profile.role == "owner" || myAck) {
+            // Stale device of the owner (or of a participant who already
+            // acknowledged elsewhere): adopt what we can decrypt and rebase.
+            val grants = mutableMapOf<String, String>()
+            for (target in open.targets) {
+                val part = partForDatasetId(targetBase, target.datasetId) ?: continue
+                try {
+                    controller.adoptDataset(target.datasetId, requireOwned = profile.role == "owner")
+                    val me = controller.getDatasetParticipants(target.datasetId)
+                        .participants.firstOrNull { it.keyId == myKeyId }
+                    if (me != null) grants[part] = me.role.name.lowercase()
+                } catch (_: Exception) {
+                    // A dataset this identity was not granted — structural.
+                }
+            }
+            if (grants.isEmpty()) return none.copy(freeze = true)
+            val persisted = refreshedProfile(profile)
+            val baseHead = persisted.datasetRecords?.get(targetBase)
+            val rebasedProfile = persisted.copy(
+                datasetId = targetBase,
+                datasetGrants = if (profile.role == "owner") OWNER_DATASET_GRANTS else grants,
+                datasetRecords = persisted.datasetRecords.orEmpty() - targetBase,
+                fileId = baseHead?.fileId,
+                lastRevisionId = baseHead?.lastRevisionId,
+                retiredDatasetId = if (profile.role == "owner") profile.datasetId else persisted.retiredDatasetId,
+                openMigrationId = if (profile.role == "owner") open.migrationId else persisted.openMigrationId,
+                needsInitialLoad = profile.role != "owner",
+            )
+            rebaseProfileRecord(memoKey, rebasedProfile)
+            return MigrationReconcileOutcome(rebasedProfile, freeze = false, rebased = true)
+        }
+
+        if (myRequirement != null) {
+            val marked = refreshedProfile(profile).copy(
+                pendingMigration = PendingMigrationRecord(
+                    migrationId = open.migrationId,
+                    targetBaseId = targetBase,
+                    requiredFileIds = myRequirement.targetFileIds,
+                    targets = open.targets.map { MigrationTargetRecord(it.datasetId, it.fileId) },
+                ),
+            )
+            registry.upsertProfile(marked)
+            return MigrationReconcileOutcome(marked, freeze = true, rebased = false)
+        }
+        return none
     }
 
     suspend fun listPendingResponses(accessToken: String): List<PendingResponse> {
@@ -1615,6 +2015,18 @@ class SharedSyncCoordinator(
         val controlDatasetId = profile.controlDatasetId
             ?: error("This profile has no sharing control dataset.")
         val scopeKey = profileKey(profile.ownerEmail, profile.datasetId)
+        // The control profileId must survive hard-cutover rebases (the
+        // profile's base dataset id changes generation, the control dataset
+        // never does), so it derives from the control id's base — identical
+        // to the profile key at creation time, stable forever after.
+        val controlProfileId = profileKey(
+            profile.ownerEmail,
+            if (controlDatasetId.endsWith(CONTROL_DATASET_SUFFIX)) {
+                controlDatasetId.removeSuffix(CONTROL_DATASET_SUFFIX)
+            } else {
+                profile.datasetId
+            },
+        )
         val controller = SharedBackupController<SharingControlStateV1>(
             appId = EASY_BC_APP_ID,
             codec = createSharingControlCodec(),
@@ -1627,7 +2039,7 @@ class SharedSyncCoordinator(
         return SharingControlDataset(
             controller = controller,
             datasetId = controlDatasetId,
-            profileId = scopeKey,
+            profileId = controlProfileId,
             identity = { identityStore.getOrCreate() },
         )
     }

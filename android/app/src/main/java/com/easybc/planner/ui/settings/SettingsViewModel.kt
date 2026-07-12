@@ -545,6 +545,73 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    private val _migrationStatus =
+        MutableStateFlow<SharedSyncCoordinator.MigrationAckStatus?>(null)
+    val migrationStatus: StateFlow<SharedSyncCoordinator.MigrationAckStatus?> = _migrationStatus
+
+    fun beginSplitMigration(accessToken: String, grants: Map<String, Map<String, String>>) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _sharedSyncState.value = sharedSync.beginSplitMigration(accessToken, grants)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "The new files are live and shared. You'll see confirmations " +
+                        "here as each person reselects them.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Per-dataset upgrade", error, "Upgrade failed")
+            }
+        }
+    }
+
+    fun refreshMigrationStatus(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _migrationStatus.value = sharedSync.splitMigrationStatus(accessToken)
+                _cloudStatus.value = SyncStatus.Idle
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Upgrade status", error, "Status check failed")
+            }
+        }
+    }
+
+    fun closeSplitMigration(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _sharedSyncState.value = sharedSync.closeSplitMigration(accessToken)
+                _migrationStatus.value = null
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "Upgrade complete — the old file is in Drive's trash.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Finish upgrade", error, "Finish failed")
+            }
+        }
+    }
+
+    fun acknowledgeSplitMigration(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _sharedSyncState.value = sharedSync.acknowledgeSplitMigration(accessToken)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "You're on the reorganized profile now — everything synced.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure(
+                    "Finish reorganization",
+                    error,
+                    "Reorganization failed",
+                )
+            }
+        }
+    }
+
     fun upgradeProfileToSplit(accessToken: String) {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {

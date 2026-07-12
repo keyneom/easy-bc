@@ -36,16 +36,68 @@ sync (`maybeAdoptSplitLayout`: owner-only, memoized per session, lists the
 folder's datasets and adopts the companions — this also stops a stale legacy
 device from publishing full payloads into what is now the plan file).
 
-**Shared legacy profiles** cannot use the in-place upgrade: new files with
-new keys strand existing participants. The UI routes owners through remove
-access → upgrade → re-invite with the per-section presets, which lands on
-the same end state as the protocol cutover because participants must
-re-grant the new files via the Picker either way. The protocol-native
-migration (control-dataset `announceMigration` → participant Picker adopt →
-`acknowledgeMigration` → owner `closeMigration`; primitives shipped in
-sync-kit rc.12+ on both platforms) preserves provenance and removes the
-manual re-invite, and remains the tracked follow-up — it needs two-account
-on-device validation before it can be trusted.
+**Shared legacy profiles** use the protocol-native hard-cutover ceremony
+(sync-kit `docs/sharing-control-datasets.md`), never re-invites: existing
+participants keep their identity keypairs, and the owner grants the new
+files to their **stored public keys** with sync-kit rc.14's
+`addDatasetParticipant` — the one thing participants must do themselves is
+the Google Picker re-selection, because `drive.file` scope requires the
+user in the loop for file access. Each new dataset file gets a fresh
+*content* key (that per-file key is what makes a cycle-only grant real
+rather than advisory); identity keys never rotate.
+
+### Ceremony state machine (both platforms)
+
+Base dataset ids are generational: `primary` → `primary-2` → `primary-3`
+(`nextSplitBaseId`). The new base cannot reuse `primary` because sync-kit
+refuses duplicate dataset ids in one folder and the source must stay
+readable until close. The control dataset id (`<original-base>.control`)
+**never changes** across migrations — it is the coordination channel — and
+the control `profileId` is derived from the control id's base, not the
+profile's current base id, so signed events stay valid across rebases.
+
+**Owner — announce (`beginSplitMigration`, resumable by re-running):**
+1. Guards: owner, encrypted, legacy, has participants.
+2. Final publish of the source file (last write before the freeze).
+3. Ensure the control dataset exists; backfill control **writer** access
+   for every participant via `addDatasetParticipant` (fixes participants
+   who joined before control datasets existed, without re-inviting).
+4. Create the four target datasets under the next generation base id from
+   the freshest merged payload (skip any that already exist).
+5. For every participant × granted part, `addDatasetParticipant` on the
+   target (upsert — resume-safe). Default grants = their current
+   single-file role on all four parts; the owner narrows per part in the
+   walkthrough.
+6. `announceMigration` (skip if an open migration already lists the same
+   source): sources `[oldBase]`, targets = the four new files, requiredAcks
+   = each participant keyId → the target file ids they were granted.
+7. Rebase the owner's own registry record to the new base id (owner devices
+   write only to targets from now on — the owner-side freeze is
+   structural). Record `retiredDatasetId` + `openMigrationId` so the close
+   phase knows what to poll and trash.
+
+**Participant — detect/ack:** on sync of a non-owner legacy profile with a
+control dataset, read verified control state; an open migration whose
+requiredAcks contain this device's keyId surfaces as a persistent card.
+The card opens the Picker pre-loaded with the expected target file ids
+(multi-select; ignore extras; reopen listing what's missing), adopts and
+verifies each target envelope, writes `acknowledgeMigration` with the
+opened file ids, then rebases the local record to the new base id with
+datasetRoles read from the adopted envelopes. Until then the client treats
+the source as **read-only** (freeze): publishes are suppressed while an
+open migration lists the profile's dataset as a source.
+
+**Owner — close:** `migrationStatus` drives a status card (acked vs
+pending, by person). When every required ack is present the owner closes
+(`closeMigration`) and the source file is **trashed, not deleted**
+(rc.14 `trashDataset`; recoverable from Drive trash ~30 days). A blocked
+migration stays visible — silence is never treated as success.
+
+**Residual risks (accepted, documented):** clients older than this release
+do not recognize the freeze and may keep writing to the source until
+updated (sync-kit doc §hard-cutover step 1); a participant who could
+decrypt the consolidated legacy file may retain its historical plaintext —
+the migration protects future data, not past disclosure.
 
 **v0.1.52 (sync-kit 0.2.0-rc.12):** control datasets are wired on both
 platforms (`<base>.control` enrolled as a writer grant alongside data

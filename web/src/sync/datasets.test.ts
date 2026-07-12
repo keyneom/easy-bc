@@ -7,11 +7,15 @@ import {
   datasetIdForPart,
   grantsFromRequestedGrants,
   highestGrantedRole,
+  newerSplitBaseId,
+  nextSplitBaseId,
   partForDatasetId,
   projectDatasetPart,
   requestedGrantsFromDatasetGrants,
   requestedGrantsWithControl,
+  sameSplitFamily,
   SHARING_PRESETS,
+  splitBaseRoot,
 } from "./datasets";
 import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
 import { sharedPayloadFingerprint, type SharedSyncPayloadV1 } from "./sharedTypes";
@@ -198,5 +202,39 @@ describe("projection & combination", () => {
     expect(plan.planner.configured).toBe(true);
     expect(plan.periodRecords).toHaveLength(0);
     expect(Object.keys(plan.calendarDayLogs)).toHaveLength(0);
+  });
+});
+
+describe("split base generations", () => {
+  it("derives roots across generations and companions", () => {
+    expect(splitBaseRoot("primary")).toBe("primary");
+    expect(splitBaseRoot("primary.g2")).toBe("primary");
+    expect(splitBaseRoot("primary.g2.cycle")).toBe("primary");
+    // A hyphen-suffixed id is a distinct profile, never a generation.
+    expect(splitBaseRoot("emma-2")).toBe("emma-2");
+  });
+
+  it("mints the next unused generation", () => {
+    expect(nextSplitBaseId("primary", ["primary"])).toBe("primary.g2");
+    expect(
+      nextSplitBaseId("primary", ["primary", "primary.g2", "primary.g2.cycle"]),
+    ).toBe("primary.g3");
+    // Sibling profiles with hyphen ids do not bump the generation.
+    expect(nextSplitBaseId("emma", ["emma", "emma-2"])).toBe("emma.g2");
+  });
+
+  it("detects a newer generation this device has not adopted", () => {
+    expect(newerSplitBaseId("primary", ["primary"])).toBeNull();
+    expect(
+      newerSplitBaseId("primary", ["primary", "primary.g2.cycle"]),
+    ).toBe("primary.g2");
+    expect(newerSplitBaseId("primary.g2", ["primary", "primary.g2"])).toBeNull();
+  });
+
+  it("keeps generations in one family and separate profiles out of it", () => {
+    expect(sameSplitFamily("primary", "primary.g2")).toBe(true);
+    expect(sameSplitFamily("primary", "primary.g2.sensitive")).toBe(true);
+    expect(sameSplitFamily("emma", "emma-2")).toBe(false);
+    expect(sameSplitFamily("primary", "primary.control")).toBe(false);
   });
 });

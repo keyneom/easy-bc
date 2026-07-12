@@ -70,6 +70,64 @@ fun baseDatasetIdOf(datasetId: String): String {
     return datasetId
 }
 
+/*
+ * Base dataset ids are generational: "primary" → "primary.g2" →
+ * "primary.g3" (KEEP IN SYNC with web datasets.ts). A hard-cutover
+ * migration cannot reuse the source's id — sync-kit refuses duplicate
+ * dataset ids in one folder and the source must stay readable until the
+ * migration closes — so each cutover targets the next generation. The
+ * ".g" marker lives in the dot namespace; display-name slugs are
+ * [a-z0-9-], so "emma-2" is always a second profile named Emma, never
+ * generation 2 of "emma".
+ */
+private val GENERATION_SUFFIX = Regex("""\.g\d+$""")
+private val GENERATION_ID = Regex("""^(.*)\.g(\d+)$""")
+
+fun splitBaseRoot(baseDatasetId: String): String =
+    baseDatasetIdOf(baseDatasetId).replace(GENERATION_SUFFIX, "")
+
+private fun splitBaseGeneration(root: String, baseDatasetId: String): Int? {
+    if (baseDatasetId == root) return 1
+    val match = GENERATION_ID.matchEntire(baseDatasetId) ?: return null
+    if (match.groupValues[1] != root) return null
+    return match.groupValues[2].toInt()
+}
+
+/** The next unused generation for a cutover from `sourceBaseId`. */
+fun nextSplitBaseId(sourceBaseId: String, existingDatasetIds: List<String>): String {
+    val root = splitBaseRoot(sourceBaseId)
+    var max = 1
+    for (id in existingDatasetIds) {
+        splitBaseGeneration(root, baseDatasetIdOf(id))?.let { max = maxOf(max, it) }
+    }
+    return "$root.g${max + 1}"
+}
+
+/**
+ * The highest existing generation strictly newer than `currentBaseId`, or
+ * null. Non-null means another device already created (or completed) a
+ * cutover this device hasn't adopted yet — or that an interrupted cutover
+ * on this device should resume into that generation.
+ */
+fun newerSplitBaseId(currentBaseId: String, existingDatasetIds: List<String>): String? {
+    val root = splitBaseRoot(currentBaseId)
+    val current = splitBaseGeneration(root, baseDatasetIdOf(currentBaseId)) ?: 1
+    var best: Int? = null
+    for (id in existingDatasetIds) {
+        val generation = splitBaseGeneration(root, baseDatasetIdOf(id)) ?: continue
+        if (generation > current) best = maxOf(best ?: 0, generation)
+    }
+    return best?.let { "$root.g$it" }
+}
+
+/**
+ * Two dataset ids belong to the same profile when their bases share a
+ * generation root. Registry scoping uses this so a migration's target
+ * datasets are recorded inside the migrating profile record instead of
+ * surfacing as foreign profiles.
+ */
+fun sameSplitFamily(a: String, b: String): Boolean = splitBaseRoot(a) == splitBaseRoot(b)
+
 data class ParsedDatasetGrants(
     val baseDatasetId: String,
     /** part -> lowercase role name */

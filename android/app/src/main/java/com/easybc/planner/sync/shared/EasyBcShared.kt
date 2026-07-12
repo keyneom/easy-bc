@@ -95,6 +95,36 @@ data class ProfileRecord(
      * using the top-level fileId/lastRevisionId fields.
      */
     val datasetRecords: Map<String, CompanionDatasetRecord>? = null,
+    /**
+     * Participant side of an open hard-cutover migration
+     * (docs/sync-kit-multi-file-datasets.md §ceremony): the owner
+     * reorganized this profile into new dataset files and this device must
+     * re-select them in the Picker and acknowledge before it may publish
+     * again. While present the source dataset is read-only (the freeze).
+     */
+    val pendingMigration: PendingMigrationRecord? = null,
+    /**
+     * Owner side of an open migration: the retired source dataset id, kept
+     * until every required acknowledgement arrives and the owner closes the
+     * migration — at which point the source file is trashed (not deleted).
+     */
+    val retiredDatasetId: String? = null,
+    val openMigrationId: String? = null,
+)
+
+@Serializable
+data class PendingMigrationRecord(
+    val migrationId: String,
+    val targetBaseId: String,
+    /** Target files this device was granted and must open via the Picker. */
+    val requiredFileIds: List<String>,
+    val targets: List<MigrationTargetRecord>,
+)
+
+@Serializable
+data class MigrationTargetRecord(
+    val datasetId: String,
+    val fileId: String,
 )
 
 @Serializable

@@ -33,7 +33,10 @@ class ProfileScopedSharedBackupRegistry(
         if (record.datasetId != profile.datasetId) {
             if (
                 partForDatasetId(profile.datasetId, record.datasetId) != null ||
-                record.datasetId == profile.controlDatasetId
+                record.datasetId == profile.controlDatasetId ||
+                // A hard-cutover migration's target generation ("primary.g2",
+                // "primary.g2.cycle", …) is the same profile, never foreign.
+                sameSplitFamily(profile.datasetId, record.datasetId)
             ) {
                 // Companion dataset state stays inside the scoped profile
                 // record — it must never surface as a profile of its own.

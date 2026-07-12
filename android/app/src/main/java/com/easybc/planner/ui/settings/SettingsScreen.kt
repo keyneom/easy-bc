@@ -452,6 +452,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     val joinUrl by vm.joinUrl.collectAsState()
     val responseLink by vm.responseLink.collectAsState()
     val profileParticipants by vm.profileParticipants.collectAsState()
+    val migrationAckStatus by vm.migrationStatus.collectAsState()
     var responseLinkInput by remember { mutableStateOf("") }
     var deepLinkResponse by remember { mutableStateOf<String?>(null) }
     val clipboard = LocalClipboardManager.current
@@ -463,6 +464,19 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     var pendingControlEnrollment by remember { mutableStateOf(false) }
     var pendingSplitUpgrade by remember { mutableStateOf(false) }
     var splitUpgradeConfirm by remember { mutableStateOf(false) }
+    // Hard-cutover migration ceremony (docs/sync-kit-multi-file-datasets.md).
+    var pendingMigrationBegin by remember {
+        mutableStateOf<Map<String, Map<String, String>>?>(null)
+    }
+    var pendingMigrationStatus by remember { mutableStateOf(false) }
+    var pendingMigrationClose by remember { mutableStateOf(false) }
+    var pendingMigrationAck by remember { mutableStateOf(false) }
+    var migrationSetupOpen by remember { mutableStateOf(false) }
+    var migrationGrants by remember {
+        mutableStateOf<Map<String, Map<String, String>>>(emptyMap())
+    }
+    var migrationBeginConfirm by remember { mutableStateOf(false) }
+    var migrationCloseConfirm by remember { mutableStateOf(false) }
     var pendingParticipantRoleChange by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingParticipantRevoke by remember { mutableStateOf<Pair<String, String>?>(null) }
     var participantRevokeConfirm by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -517,6 +531,10 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         val refreshParticipants = pendingProfileParticipantsRefresh
         val controlEnrollment = pendingControlEnrollment
         val splitUpgrade = pendingSplitUpgrade
+        val migrationBegin = pendingMigrationBegin
+        val migrationStatusCheck = pendingMigrationStatus
+        val migrationClose = pendingMigrationClose
+        val migrationAck = pendingMigrationAck
         val participantRoleChange = pendingParticipantRoleChange
         val participantDatasetRoleChange = pendingParticipantDatasetRoleChange
         val participantRevoke = pendingParticipantRevoke
@@ -531,6 +549,10 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         pendingProfileParticipantsRefresh = false
         pendingControlEnrollment = false
         pendingSplitUpgrade = false
+        pendingMigrationBegin = null
+        pendingMigrationStatus = false
+        pendingMigrationClose = false
+        pendingMigrationAck = false
         pendingParticipantRoleChange = null
         pendingParticipantDatasetRoleChange = null
         pendingParticipantRevoke = null
@@ -552,6 +574,10 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                     profileDeleteKey != null -> vm.deleteProfile(token, profileDeleteKey, false)
                     controlEnrollment -> vm.enrollControlDataset(token)
                     splitUpgrade -> vm.upgradeProfileToSplit(token)
+                    migrationBegin != null -> vm.beginSplitMigration(token, migrationBegin)
+                    migrationStatusCheck -> vm.refreshMigrationStatus(token)
+                    migrationClose -> vm.closeSplitMigration(token)
+                    migrationAck -> vm.acknowledgeSplitMigration(token)
                     refreshParticipants -> vm.refreshProfileParticipants(token)
                     participantRoleChange != null ->
                         vm.updateParticipantRole(
@@ -724,6 +750,84 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
 
+    fun authorizeAndBeginMigration(grants: Map<String, Map<String, String>>) {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized ->
+                        vm.beginSplitMigration(step.accessToken, grants)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingMigrationBegin = grants
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndCheckMigrationStatus() {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.refreshMigrationStatus(step.accessToken)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingMigrationStatus = true
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndCloseMigration() {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.closeSplitMigration(step.accessToken)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingMigrationClose = true
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
+    fun authorizeAndAckMigration() {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized ->
+                        vm.acknowledgeSplitMigration(step.accessToken)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingMigrationAck = true
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
     fun authorizeAndChangeParticipantDatasetRole(
         keyId: String,
         email: String,
@@ -858,15 +962,224 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         } else {
             EbBanner(
                 tone = EbBannerTone.INFO,
-                title = "Per-dataset sharing needs an upgrade",
-                text = "This profile predates per-dataset sharing, so access is " +
-                    "all-or-nothing. Upgrading creates new files with new keys, which " +
-                    "the people you share with cannot follow automatically yet: remove " +
-                    "their access below, upgrade, then re-invite them with the " +
-                    "per-section presets.",
+                title = "Upgrade to per-dataset sharing",
+                text = "Your data splits into four encrypted files so you control " +
+                    "exactly what each person sees. Everyone keeps their access — " +
+                    "their app asks them to reselect the new files in Google, the " +
+                    "one step Google requires. No re-invites.",
+                actionLabel = if (migrationSetupOpen) "Cancel" else "Choose access…",
+                onAction = {
+                    if (busy) return@EbBanner
+                    if (migrationSetupOpen) {
+                        migrationSetupOpen = false
+                    } else {
+                        migrationGrants = profileParticipants
+                            .filter { !it.isCurrentDevice && it.role != "owner" }
+                            .associate { participant ->
+                                participant.keyId to
+                                    com.easybc.planner.sync.shared.DATASET_PARTS
+                                        .associateWith { participant.role }
+                            }
+                        migrationSetupOpen = true
+                        if (profileParticipants.none { !it.isCurrentDevice && it.role != "owner" }) {
+                            scope.launch {
+                                try {
+                                    when (val step = vm.beginCloudAuthorization(activity)) {
+                                        is AuthorizationStep.Authorized ->
+                                            vm.refreshProfileParticipants(step.accessToken)
+                                        is AuthorizationStep.NeedsResolution -> {
+                                            pendingProfileParticipantsRefresh = true
+                                            resolutionLauncher.launch(
+                                                IntentSenderRequest.Builder(
+                                                    step.pendingIntent.intentSender,
+                                                ).build(),
+                                            )
+                                        }
+                                    }
+                                } catch (error: Exception) {
+                                    vm.cloudError(error.message ?: "Google authorization failed.")
+                                }
+                            }
+                        }
+                    }
+                },
             )
+            if (migrationSetupOpen) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "What each person will see after the upgrade",
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                val migrationPeople = profileParticipants.filter {
+                    !it.isCurrentDevice && it.role != "owner"
+                }
+                if (migrationPeople.isEmpty()) {
+                    Text(
+                        "Loading people with access…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                migrationPeople.forEach { participant ->
+                    val email = participant.emailAddress ?: "Key ${participant.keyId.take(10)}…"
+                    // Seed anyone who appeared after the panel opened.
+                    if (migrationGrants[participant.keyId] == null) {
+                        migrationGrants = migrationGrants + (
+                            participant.keyId to
+                                com.easybc.planner.sync.shared.DATASET_PARTS
+                                    .associateWith { participant.role }
+                            )
+                    }
+                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                        Text(email, style = MaterialTheme.typography.titleSmall)
+                        com.easybc.planner.sync.shared.DATASET_PARTS.forEach { part ->
+                            val role = migrationGrants[participant.keyId]?.get(part)
+                            com.easybc.planner.ui.kit.EbDatasetRow(
+                                dataset = when (part) {
+                                    com.easybc.planner.sync.shared.PART_CYCLE ->
+                                        com.easybc.planner.ui.kit.EbDataset.CYCLE
+                                    com.easybc.planner.sync.shared.PART_INTIMACY ->
+                                        com.easybc.planner.ui.kit.EbDataset.INTIMACY
+                                    com.easybc.planner.sync.shared.PART_SENSITIVE ->
+                                        com.easybc.planner.ui.kit.EbDataset.SENSITIVE
+                                    else -> com.easybc.planner.ui.kit.EbDataset.PLAN
+                                },
+                                title = com.easybc.planner.sync.shared.datasetPartLabel(part),
+                                summary = com.easybc.planner.sync.shared.datasetPartSummary(part),
+                                modifier = Modifier.padding(vertical = 2.dp),
+                                trailing = {
+                                    com.easybc.planner.ui.kit.EbAccessSegmented(
+                                        value = when (role) {
+                                            "writer", "admin" ->
+                                                com.easybc.planner.ui.kit.EbAccessLevel.EDIT
+                                            "viewer" ->
+                                                com.easybc.planner.ui.kit.EbAccessLevel.VIEW
+                                            else ->
+                                                com.easybc.planner.ui.kit.EbAccessLevel.NONE
+                                        },
+                                        enabled = !busy,
+                                        onChange = { level ->
+                                            val grants =
+                                                migrationGrants[participant.keyId].orEmpty()
+                                                    .toMutableMap()
+                                            when (level) {
+                                                com.easybc.planner.ui.kit.EbAccessLevel.NONE ->
+                                                    grants.remove(part)
+                                                com.easybc.planner.ui.kit.EbAccessLevel.VIEW ->
+                                                    grants[part] = "viewer"
+                                                com.easybc.planner.ui.kit.EbAccessLevel.EDIT ->
+                                                    grants[part] = "writer"
+                                            }
+                                            migrationGrants =
+                                                migrationGrants + (participant.keyId to grants)
+                                        },
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
+                Button(
+                    onClick = { if (!busy) migrationBeginConfirm = true },
+                    enabled = !busy && migrationPeople.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (busy) "Reorganizing…" else "Start upgrade") }
+                Text(
+                    "Creates the new files with fresh keys, shares them to everyone's " +
+                        "existing keys per your choices, and freezes the old file. The old " +
+                        "file is kept until everyone confirms, then moved to Drive's trash.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         Spacer(Modifier.height(8.dp))
+    }
+
+    // Owner: an announced migration waiting on acknowledgements.
+    if (
+        selectedProfile != null &&
+        !selectedIsLocal &&
+        selectedProfile.role == "owner" &&
+        selectedProfile.openMigrationId != null
+    ) {
+        EbBanner(
+            tone = EbBannerTone.INFO,
+            title = "Upgrade in progress",
+            text = migrationAckStatus?.let { status ->
+                if (status.pending.isEmpty()) {
+                    "Everyone has reselected the new files — you can finish now."
+                } else {
+                    "Waiting on " + status.pending.joinToString(", ") { (keyId, email) ->
+                        email ?: "key ${keyId.take(8)}…"
+                    } + " to reselect the new files."
+                }
+            } ?: "Waiting for people to reselect the new files in Google. " +
+                "Their edits pause until they do.",
+            actionLabel = if (busy) "Working…" else "Check status",
+            onAction = { if (!busy) authorizeAndCheckMigrationStatus() },
+        )
+        if (migrationAckStatus?.pending?.isEmpty() == true) {
+            TextButton(
+                onClick = { if (!busy) migrationCloseConfirm = true },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Finish upgrade — move the old file to Drive's trash") }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+
+    // Participant: the owner reorganized this profile; reselect + confirm.
+    selectedProfile?.pendingMigration?.let { pending ->
+        if (!selectedIsLocal) {
+            EbBanner(
+                tone = EbBannerTone.INFO,
+                title = "${selectedProfile.ownerEmail} reorganized this profile",
+                text = "Pick the new files in Google to keep your access — nothing else " +
+                    "changes, and your edits pause until you do. Grant access in the " +
+                    "browser first, then finish here.",
+                actionLabel = "Open browser",
+                onAction = {
+                    if (busy) return@EbBanner
+                    val targets = pending.targets.filter {
+                        pending.requiredFileIds.contains(it.fileId)
+                    }
+                    val json = kotlinx.serialization.json.Json.encodeToString(
+                        kotlinx.serialization.builtins.ListSerializer(
+                            com.easybc.planner.sync.shared.MigrationTargetRecord.serializer(),
+                        ),
+                        targets,
+                    )
+                    val encoded = android.util.Base64.encodeToString(
+                        json.toByteArray(Charsets.UTF_8),
+                        android.util.Base64.URL_SAFE or
+                            android.util.Base64.NO_PADDING or
+                            android.util.Base64.NO_WRAP,
+                    )
+                    val grantUrl = android.net.Uri
+                        .parse(com.easybc.planner.sync.shared.EASY_BC_JOIN_LANDING_URL)
+                        .buildUpon()
+                        .appendQueryParameter("grant-files", "1")
+                        .appendQueryParameter("owner", selectedProfile.ownerEmail)
+                        .appendQueryParameter("sk-mfiles", encoded)
+                        .build()
+                        .toString()
+                    if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
+                        clipboard.setText(AnnotatedString(grantUrl))
+                        vm.cloudError(
+                            "No browser was available. The file-access link was copied; " +
+                                "paste it into Chrome, select the files, then return here.",
+                        )
+                    }
+                },
+            )
+            OutlinedButton(
+                onClick = { if (!busy) authorizeAndAckMigration() },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (busy) "Working…" else "I granted access — finish reorganization") }
+            Spacer(Modifier.height(8.dp))
+        }
     }
 
     if (
@@ -1640,6 +1953,57 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { participantRevokeConfirm = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (migrationBeginConfirm) {
+        AlertDialog(
+            onDismissRequest = { migrationBeginConfirm = false },
+            title = { Text("Reorganize this profile into per-dataset files?") },
+            text = {
+                Text(
+                    "Everyone keeps access according to your choices — no re-invites. " +
+                        "Their app will ask them to reselect the new files in Google; " +
+                        "their edits pause until they do. The old file stays until " +
+                        "everyone confirms, then moves to Drive's trash.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        migrationBeginConfirm = false
+                        migrationSetupOpen = false
+                        authorizeAndBeginMigration(migrationGrants)
+                    },
+                ) { Text("Start upgrade") }
+            },
+            dismissButton = {
+                TextButton(onClick = { migrationBeginConfirm = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (migrationCloseConfirm) {
+        AlertDialog(
+            onDismissRequest = { migrationCloseConfirm = false },
+            title = { Text("Finish the upgrade?") },
+            text = {
+                Text(
+                    "The old combined file moves to your Drive trash (recoverable for " +
+                        "about 30 days). Everyone is already on the new files.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        migrationCloseConfirm = false
+                        authorizeAndCloseMigration()
+                    },
+                ) { Text("Finish") }
+            },
+            dismissButton = {
+                TextButton(onClick = { migrationCloseConfirm = false }) { Text("Cancel") }
             },
         )
     }

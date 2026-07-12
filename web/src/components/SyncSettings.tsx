@@ -44,10 +44,16 @@ import {
   setupSharedSync,
   sharedSyncConfigFromEnv,
   submitJoinFromLink,
+  acknowledgeSplitMigration,
+  beginSplitMigration,
+  closeSplitMigration,
+  splitMigrationStatusForActive,
   switchManagedProfile,
   syncActiveDataset,
   upgradeActiveProfileToSplit,
   updateParticipantDatasetRole,
+  type SplitMigrationGrantChoices,
+  type SplitMigrationStatus,
   updateParticipantRole,
   updateManagedProfileAvatar,
 } from "../sync/sharedSync";
@@ -140,6 +146,10 @@ export function SyncSettings({
   const [customGrants, setCustomGrants] = useState<DatasetGrants>({ cycle: "viewer" });
   // Which participant's per-dataset access grid is expanded (keyId).
   const [expandedParticipant, setExpandedParticipant] = useState<string | null>(null);
+  // Hard-cutover migration walkthrough (owner side): per-person choices.
+  const [migrationSetupOpen, setMigrationSetupOpen] = useState(false);
+  const [migrationGrants, setMigrationGrants] = useState<SplitMigrationGrantChoices>({});
+  const [migrationStatus, setMigrationStatus] = useState<SplitMigrationStatus | null>(null);
   const [lastJoinUrl, setLastJoinUrl] = useState<string | null>(null);
   const [joinLinkInput, setJoinLinkInput] = useState("");
   const [responseLink, setResponseLink] = useState<string | null>(null);
@@ -298,6 +308,123 @@ export function SyncSettings({
         kind: "success",
         message:
           "Each data section now lives in its own encrypted file — invites and person cards control access per section.",
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const openMigrationSetup = () => {
+    const seeded: SplitMigrationGrantChoices = {};
+    for (const participant of participants) {
+      if (participant.isCurrentDevice || participant.role === "owner") continue;
+      const role = participant.role;
+      seeded[participant.keyId] = {
+        plan: role,
+        cycle: role,
+        intimacy: role,
+        sensitive: role,
+      };
+    }
+    setMigrationGrants(seeded);
+    setMigrationSetupOpen(true);
+  };
+
+  const setMigrationGrant = (keyId: string, part: DatasetPart, level: EbAccessLevel) => {
+    setMigrationGrants((current) => {
+      const grants = { ...(current[keyId] ?? {}) };
+      if (level === "none") delete grants[part];
+      else grants[part] = level === "view" ? "viewer" : "writer";
+      return { ...current, [keyId]: grants };
+    });
+  };
+
+  const startSplitMigration = async () => {
+    if (!config) return;
+    if (
+      !window.confirm(
+        "Reorganize this profile into per-dataset files?\n\n" +
+          "Everyone keeps access according to your choices — no re-invites. " +
+          "Their app will ask them to reselect the new files in Google; their " +
+          "edits pause until they do. The old file stays until everyone " +
+          "confirms, then moves to Drive's trash.",
+      )
+    ) {
+      return;
+    }
+    setBusy("migration-begin");
+    setNotice({ kind: "info", message: "Creating the new files and sharing them…" });
+    try {
+      const result = await beginSplitMigration(config, localShared(), migrationGrants);
+      await applyShared(result.payload);
+      onSharedSyncStateChange(result.state);
+      onSyncComplete?.(
+        sharedPayloadToSyncPayload(result.payload, session.androidPreferences),
+      );
+      setMigrationSetupOpen(false);
+      setNotice({
+        kind: "success",
+        message:
+          "The new files are live and shared. You'll see confirmations here as each person reselects them.",
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const refreshMigrationStatus = async () => {
+    if (!config) return;
+    setBusy("migration-status");
+    try {
+      setMigrationStatus(await splitMigrationStatusForActive(config));
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const finishSplitMigration = async () => {
+    if (!config) return;
+    if (
+      !window.confirm(
+        "Finish the upgrade?\n\nThe old combined file moves to your Drive trash " +
+          "(recoverable for about 30 days). Everyone is already on the new files.",
+      )
+    ) {
+      return;
+    }
+    setBusy("migration-close");
+    try {
+      const result = await closeSplitMigration(config);
+      onSharedSyncStateChange(result.state);
+      setMigrationStatus(null);
+      setNotice({ kind: "success", message: "Upgrade complete — the old file is in Drive's trash." });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const reselectMigrationFiles = async () => {
+    if (!config) return;
+    setBusy("migration-ack");
+    setNotice({ kind: "info", message: "Opening Google to reselect the profile's files…" });
+    try {
+      const result = await acknowledgeSplitMigration(config);
+      await applyShared(result.payload);
+      onSharedSyncStateChange(result.state);
+      onSyncComplete?.(
+        sharedPayloadToSyncPayload(result.payload, session.androidPreferences),
+      );
+      setNotice({
+        kind: "success",
+        message: "You're on the reorganized profile now — everything synced.",
       });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -988,20 +1115,145 @@ export function SyncSettings({
               {busy === "split-upgrade" ? "Upgrading…" : "Upgrade"}
             </button>
           </div>
-        ) : (
+        ) : activeProfile.openMigrationId ? null : (
+          <>
+            <div className="sync-notice info">
+              <div>
+                <strong>Upgrade to per-dataset sharing</strong>
+                <span>
+                  Your data splits into four encrypted files so you control
+                  exactly what each person sees. Everyone keeps their access —
+                  their app will ask them to reselect the new files in Google,
+                  the one step Google requires. No re-invites.
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={busy !== null}
+                onClick={() =>
+                  migrationSetupOpen ? setMigrationSetupOpen(false) : openMigrationSetup()
+                }
+              >
+                {migrationSetupOpen ? "Cancel" : "Choose access…"}
+              </button>
+            </div>
+            {migrationSetupOpen && (
+              <div className="dataset-access-panel">
+                <p className="eyebrow">What each person will see after the upgrade</p>
+                {participants
+                  .filter(
+                    (participant) =>
+                      !participant.isCurrentDevice && participant.role !== "owner",
+                  )
+                  .map((participant) => (
+                    <EbPersonCard
+                      key={participant.keyId}
+                      name={participant.emailAddress || "Unknown participant"}
+                      email={participant.emailAddress}
+                      colorKey={participant.emailAddress ?? participant.keyId}
+                    >
+                      <div className="participant-grid">
+                        {DATASET_PARTS.map((part) => (
+                          <EbDatasetRow
+                            key={part}
+                            dataset={part}
+                            title={DATASET_PART_LABELS[part]}
+                            summary={DATASET_PART_SUMMARIES[part]}
+                            trailing={
+                              <EbAccessSegmented
+                                label={`${participant.emailAddress}'s access to ${DATASET_PART_LABELS[part]}`}
+                                value={roleToLevel(
+                                  migrationGrants[participant.keyId]?.[part],
+                                )}
+                                disabled={busy !== null}
+                                onChange={(level) =>
+                                  setMigrationGrant(participant.keyId, part, level)
+                                }
+                              />
+                            }
+                          />
+                        ))}
+                      </div>
+                    </EbPersonCard>
+                  ))}
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => void startSplitMigration()}
+                >
+                  {busy === "migration-begin" ? "Reorganizing…" : "Start upgrade"}
+                </button>
+                <p className="field-hint">
+                  Creates the new files with fresh keys, shares them to
+                  everyone's existing keys per your choices, and freezes the old
+                  file. The old file is kept until everyone confirms, then moved
+                  to Drive's trash — never deleted outright.
+                </p>
+              </div>
+            )}
+          </>
+        ))}
+
+      {sharedSyncState &&
+        activeProfile &&
+        !activeIsLocal &&
+        activeProfile.role === "owner" &&
+        activeProfile.openMigrationId && (
           <div className="sync-notice info">
             <div>
-              <strong>Per-dataset sharing needs an upgrade</strong>
+              <strong>Upgrade in progress</strong>
               <span>
-                This profile predates per-dataset sharing, so access is
-                all-or-nothing. Upgrading creates new files with new keys, which
-                the people you share with cannot follow automatically yet: remove
-                their access below, upgrade, then re-invite them with the
-                per-section presets.
+                {migrationStatus
+                  ? migrationStatus.pending.length === 0
+                    ? "Everyone has reselected the new files — you can finish now."
+                    : `Waiting on ${migrationStatus.pending
+                        .map((entry) => entry.email ?? `key ${entry.keyId.slice(0, 8)}…`)
+                        .join(", ")} to reselect the new files.`
+                  : "Waiting for people to reselect the new files in Google. Their edits pause until they do."}
               </span>
             </div>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void refreshMigrationStatus()}
+            >
+              {busy === "migration-status" ? "Checking…" : "Check status"}
+            </button>
+            <button
+              type="button"
+              disabled={
+                busy !== null ||
+                !migrationStatus ||
+                migrationStatus.pending.length > 0
+              }
+              onClick={() => void finishSplitMigration()}
+            >
+              {busy === "migration-close" ? "Finishing…" : "Finish upgrade"}
+            </button>
           </div>
-        ))}
+        )}
+
+      {sharedSyncState && activeProfile?.pendingMigration && (
+        <div className="sync-notice info">
+          <div>
+            <strong>{activeProfile.ownerEmail} reorganized this profile</strong>
+            <span>
+              Pick the new files in Google to keep your access — nothing else
+              changes, and your edits pause until you do. On a computer, hold
+              Ctrl (⌘ on Mac) to select several files at once; on a phone the
+              picker may only take one at a time — just tap Reselect again
+              until every file is picked.
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={busy !== null}
+            onClick={() => void reselectMigrationFiles()}
+          >
+            {busy === "migration-ack" ? "Opening Google…" : "Reselect files"}
+          </button>
+        </div>
+      )}
 
       {CONTROL_DATASETS_WIRED &&
         activeProfile &&

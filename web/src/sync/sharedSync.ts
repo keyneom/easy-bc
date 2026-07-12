@@ -59,11 +59,15 @@ import {
   upsertProfile,
 } from "./sharedRegistry";
 import {
+  baseDatasetIdOf,
   combineDatasetParts,
   DATASET_PARTS,
   datasetIdForPart,
   grantsFromRequestedGrants,
   highestGrantedRole,
+  newerSplitBaseId,
+  nextSplitBaseId,
+  partForDatasetId,
   projectDatasetPart,
   requestedGrantsFromDatasetGrants,
   requestedGrantsWithControl,
@@ -411,6 +415,16 @@ function buildControlDataset(
   const datasetId = profile.controlDatasetId;
   if (!datasetId) throw new Error("This profile has no sharing control dataset.");
   const scopeKey = profileKey(profile.ownerEmail, profile.datasetId);
+  // The control profileId must survive hard-cutover rebases (the profile's
+  // base dataset id changes generation, the control dataset never does), so
+  // it derives from the control id's base — identical to the profile key at
+  // creation time, stable forever after.
+  const controlProfileId = profileKey(
+    profile.ownerEmail,
+    datasetId.endsWith(CONTROL_DATASET_SUFFIX)
+      ? datasetId.slice(0, -CONTROL_DATASET_SUFFIX.length)
+      : profile.datasetId,
+  );
   const controller = createSharedBackupController<SharingControlStateV1>({
     appId: EASY_BC_APP_ID,
     codec: sharingControlCodec,
@@ -422,7 +436,7 @@ function buildControlDataset(
   return createSharingControlDataset({
     controller,
     datasetId,
-    profileId: scopeKey,
+    profileId: controlProfileId,
     identity: () => identityProvider.getOrCreate(),
   });
 }
@@ -915,17 +929,39 @@ export async function syncActiveDataset(
   config: SharedSyncConfig,
   local: SharedSyncPayloadV1,
 ): Promise<SharedSyncRunResult> {
-  return serialized(async () => {
+  return serialized(() => syncActiveDatasetInternal(config, local, true));
+}
+
+async function syncActiveDatasetInternal(
+  config: SharedSyncConfig,
+  local: SharedSyncPayloadV1,
+  allowMigrationReconcile: boolean,
+): Promise<SharedSyncRunResult> {
+  {
     const active = await ensureRuntime(config, local);
-    const profile = profileForActive(active.state);
+    let profile = profileForActive(active.state);
     if (isLocalProfile(profile)) {
       throw new Error("This profile is local only. Connect encrypted sync before syncing it.");
+    }
+    let freeze = false;
+    if (allowMigrationReconcile) {
+      const reconciled = await reconcileOpenMigration(active, profile);
+      if (
+        profileKey(reconciled.profile.ownerEmail, reconciled.profile.datasetId) !==
+        profileKey(profile.ownerEmail, profile.datasetId)
+      ) {
+        // The record was rebased onto a new generation; the runtime was
+        // disposed, so rebuild against the fresh state and sync once more.
+        return syncActiveDatasetInternal(config, local, false);
+      }
+      profile = reconciled.profile;
+      freeze = reconciled.freeze;
     }
     const result = await syncProfileDatasetGroup(
       active.controller,
       profile,
       local,
-      shouldLoadRemoteBeforePublish(profile) ? "load" : "sync",
+      freeze || shouldLoadRemoteBeforePublish(profile) ? "load" : "sync",
     );
     // Pick up companion registry records the controller persisted mid-sync.
     const refreshed = (await refreshCachedState()) ?? active.state;
@@ -952,7 +988,7 @@ export async function syncActiveDataset(
       revisionId: result.revisionId,
       profileKey: nextState.activeProfileKey,
     };
-  });
+  }
 }
 
 export async function loadActiveProfileDataset(
@@ -1200,6 +1236,553 @@ export async function upgradeActiveProfileToSplit(
     await saveSharedSyncState(nextState);
     return { state: nextState, payload };
   });
+}
+
+/* ---------- Hard-cutover split migration (docs/sync-kit-multi-file-datasets.md §ceremony) ---------- */
+
+/** Per-participant per-dataset choices the owner makes in the walkthrough. */
+export type SplitMigrationGrantChoices = Record<string, DatasetGrants>;
+
+function participantPublicKey(participant: SharedBackupParticipantV1) {
+  const { role: _role, accepted: _accepted, ...publicKey } = participant;
+  return publicKey;
+}
+
+function findOpenMigration(
+  verified: Awaited<ReturnType<SharingControlDataset["read"]>> | null,
+  sourceDatasetId: string,
+) {
+  if (!verified) return null;
+  for (const migration of verified.migrations.values()) {
+    if (verified.closedMigrations.has(migration.migrationId)) continue;
+    if (migration.sourceDatasetIds.includes(sourceDatasetId)) return migration;
+  }
+  return null;
+}
+
+/**
+ * Replace a profile record whose base dataset id changed generation. The
+ * profile key is derived from the dataset id, so the active key and every
+ * key-scoped cache moves with it; the control dataset id (and therefore
+ * control event continuity) is untouched.
+ */
+async function rebaseProfileRecord(
+  state: SharedSyncState,
+  oldKey: string,
+  next: ProfileRecord,
+): Promise<SharedSyncState> {
+  const newKey = profileKey(next.ownerEmail, next.datasetId);
+  const nextState: SharedSyncState = {
+    ...state,
+    activeProfileKey: state.activeProfileKey === oldKey ? newKey : state.activeProfileKey,
+    profiles: state.profiles
+      .filter((entry) => profileKey(entry.ownerEmail, entry.datasetId) !== oldKey)
+      .concat(next),
+  };
+  cachedState = nextState;
+  await Promise.all([
+    saveSharedSyncState(nextState),
+    sharedAuthCache.delete(oldKey),
+    clearSharingSyncCheckpoint(),
+  ]);
+  disposeRuntime();
+  return nextState;
+}
+
+/**
+ * Owner side, phase 1 (announce). Resumable: every step is an upsert or a
+ * skip-if-present, and an already-announced migration is reused instead of
+ * re-announced. Ends with this device rebased onto the target generation —
+ * the owner never writes the retired source again (the structural freeze).
+ */
+export async function beginSplitMigration(
+  config: SharedSyncConfig,
+  local: SharedSyncPayloadV1,
+  grantsByKeyId: SplitMigrationGrantChoices,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    const active = await ensureRuntime(config, local);
+    const state = active.state;
+    const profile = profileForActive(state);
+    if (!isEncryptedProfile(profile)) {
+      throw new Error("Turn on encrypted sync for this profile first.");
+    }
+    if (profile.role !== "owner") {
+      throw new Error("Only the profile owner can reorganize its sharing layout.");
+    }
+    if (isSplitProfile(profile)) {
+      throw new Error("This profile already uses per-dataset sharing.");
+    }
+    const emails = profile.participantEmails ?? {};
+    if (Object.keys(emails).length === 0) {
+      throw new Error(
+        "This profile has no participants — use the direct upgrade instead.",
+      );
+    }
+    const controller = active.controller;
+
+    // Participants come from the source envelope — the cryptographic truth.
+    const { participants } = await controller.getDatasetParticipants(profile.datasetId);
+    const others = participants.filter((participant) => participant.role !== "owner");
+    for (const participant of others) {
+      if (!emails[participant.keyId]) {
+        throw new Error(
+          `No email is known for key ${participant.keyId.slice(0, 10)}… — EasyBC cannot safely update their Drive access.`,
+        );
+      }
+      const grants = grantsByKeyId[participant.keyId];
+      if (!grants || !DATASET_PARTS.some((part) => grants[part])) {
+        throw new Error(
+          "Choose access for every person first. To cut someone off entirely, remove their access before upgrading.",
+        );
+      }
+    }
+
+    // Final publish of the source — the last write before the freeze.
+    const synced = await controller.syncDataset(profile.datasetId, local);
+    const payload = synced.value as SharedSyncPayloadV1;
+
+    // The control dataset is the coordination channel; make sure it exists
+    // and every participant can write to it (their acks are signed events).
+    let currentProfile = profile;
+    const controlDatasetId =
+      profile.controlDatasetId ?? controlDatasetIdFor(profile.datasetId);
+    if (currentProfile.controlDatasetId !== controlDatasetId) {
+      currentProfile = { ...currentProfile, controlDatasetId };
+      const withControl = upsertProfile(state, currentProfile);
+      cachedState = withControl;
+      await saveSharedSyncState(withControl);
+    }
+    const control = buildControlDataset(
+      (await getCachedState())!,
+      currentProfile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
+    const refreshedForControl = (await refreshCachedState())!;
+    const controlRecord = findProfile(refreshedForControl, state.activeProfileKey);
+    if (!controlRecord?.datasetRecords?.[controlDatasetId]?.fileId) {
+      await control.create({ email: state.ownerEmail });
+    }
+    for (const participant of others) {
+      await controller.addDatasetParticipant({
+        datasetId: controlDatasetId,
+        participant: { publicKey: participantPublicKey(participant), role: "writer" },
+        emailAddress: emails[participant.keyId],
+      });
+    }
+
+    // Target generation: reuse an already-announced migration's targets, or
+    // an interrupted attempt's files, before minting a new generation.
+    const verified = await control.read().catch(() => null);
+    const open = findOpenMigration(verified, profile.datasetId);
+    let files = await controller.listDatasets();
+    const datasetIds = files.map((file) => file.datasetId);
+    const targetBase = open
+      ? baseDatasetIdOf(open.targets[0]!.datasetId)
+      : newerSplitBaseId(profile.datasetId, datasetIds) ??
+        nextSplitBaseId(profile.datasetId, datasetIds);
+    for (const part of DATASET_PARTS) {
+      const datasetId = datasetIdForPart(targetBase, part);
+      if (files.some((file) => file.datasetId === datasetId)) continue;
+      await controller.createDataset(datasetId, projectDatasetPart(payload, part));
+    }
+    files = await controller.listDatasets();
+    const targets = DATASET_PARTS.map((part) => {
+      const datasetId = datasetIdForPart(targetBase, part);
+      const file = files.find((entry) => entry.datasetId === datasetId);
+      if (!file) throw new Error(`The ${part} dataset was not created.`);
+      return { datasetId, fileId: file.fileId };
+    });
+
+    // Share each target with its intended recipients — their existing
+    // public keys, fresh per-file content keys, no re-invites.
+    for (const participant of others) {
+      const grants = grantsByKeyId[participant.keyId];
+      for (const part of DATASET_PARTS) {
+        const role = grants[part];
+        if (!role || role === "owner") continue;
+        await controller.addDatasetParticipant({
+          datasetId: datasetIdForPart(targetBase, part),
+          participant: { publicKey: participantPublicKey(participant), role },
+          emailAddress: emails[participant.keyId],
+        });
+      }
+    }
+
+    let migrationId = open?.migrationId;
+    if (!migrationId) {
+      migrationId = crypto.randomUUID();
+      await control.announceMigration({
+        migrationId,
+        sourceDatasetIds: [profile.datasetId],
+        targets,
+        requiredAcks: others.map((participant) => ({
+          keyId: participant.keyId,
+          targetFileIds: DATASET_PARTS.filter((part) => {
+            const role = grantsByKeyId[participant.keyId]?.[part];
+            return role !== undefined && role !== "owner";
+          }).map(
+            (part) =>
+              targets.find(
+                (target) => target.datasetId === datasetIdForPart(targetBase, part),
+              )!.fileId,
+          ),
+        })),
+        mode: "hard-cutover",
+      });
+    }
+    await synchronizeProfileControlMembers(
+      active,
+      { ...currentProfile, controlDatasetId },
+      Object.fromEntries(
+        Object.entries(emails).map(([keyId, email]) => [keyId, { email }]),
+      ),
+    );
+
+    // Rebase this device onto the target generation. The base target's head
+    // was recorded under datasetRecords while the old base id was scoped —
+    // promote it to the top-level fields the split machinery expects.
+    const refreshed = (await refreshCachedState()) ?? state;
+    const persisted = findProfile(refreshed, state.activeProfileKey) ?? currentProfile;
+    const baseHead = persisted.datasetRecords?.[targetBase];
+    const { [targetBase]: _promoted, ...datasetRecords } =
+      persisted.datasetRecords ?? {};
+    const rebased: ProfileRecord = {
+      ...persisted,
+      datasetId: targetBase,
+      datasetGrants: { ...OWNER_DATASET_GRANTS },
+      datasetRecords,
+      ...(baseHead?.fileId ? { fileId: baseHead.fileId } : {}),
+      ...(baseHead?.lastRevisionId ? { lastRevisionId: baseHead.lastRevisionId } : {}),
+      lastSyncedAt: new Date().toISOString(),
+      retiredDatasetId: profile.datasetId,
+      openMigrationId: migrationId,
+    };
+    const nextState = await rebaseProfileRecord(refreshed, state.activeProfileKey, rebased);
+    return { state: nextState, payload };
+  });
+}
+
+/**
+ * Participant side, after the Picker re-selection: adopt and verify every
+ * granted target, acknowledge through the control file, and rebase this
+ * record onto the target generation with the roles read from the adopted
+ * envelopes.
+ */
+export async function acknowledgeSplitMigration(
+  config: SharedSyncConfig,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    const active = await ensureRuntime(config, createEmptySharedSyncPayload());
+    const state = active.state;
+    const profile = profileForActive(state);
+    const pending = profile.pendingMigration;
+    if (!pending) throw new Error("This profile has no migration waiting for you.");
+    const controller = active.controller;
+    const identity = await active.identityProvider.getOrCreate();
+
+    // Google requires the user to re-select the new files themselves —
+    // drive.file scope never grants silently. Multi-select is enabled;
+    // a partial pick names what's missing and this action can simply run
+    // again to pick up the rest.
+    const authorization = await active.authorizationProvider.authorize();
+    await pickSharedDatasetFiles(
+      authorization,
+      pending.targets
+        .filter((target) => pending.requiredFileIds.includes(target.fileId))
+        .map((target) => ({
+          datasetId: target.datasetId,
+          fileId: target.fileId,
+          role: "viewer" as const,
+        })),
+    );
+
+    const grants: DatasetGrants = {};
+    for (const target of pending.targets) {
+      if (!pending.requiredFileIds.includes(target.fileId)) continue;
+      const part = partForDatasetId(pending.targetBaseId, target.datasetId);
+      if (!part) continue;
+      await controller.adoptDataset(target.datasetId);
+      const { participants } = await controller.getDatasetParticipants(target.datasetId);
+      const me = participants.find(
+        (participant) => participant.keyId === identity.publicKey.keyId,
+      );
+      if (!me) {
+        throw new Error(
+          `You have no key for the ${DATASET_PART_LABELS_INTERNAL[part]} file — ask the owner to re-run the upgrade.`,
+        );
+      }
+      if (me.role !== "owner") grants[part] = me.role;
+    }
+    if (!DATASET_PARTS.some((part) => grants[part])) {
+      throw new Error("None of the reorganized files could be opened yet — pick them in Google first.");
+    }
+
+    const control = buildControlDataset(
+      state,
+      profile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
+    await control.acknowledgeMigration({
+      migrationId: pending.migrationId,
+      openedFileIds: pending.requiredFileIds,
+    });
+
+    const refreshed = (await refreshCachedState()) ?? state;
+    const persisted = findProfile(refreshed, state.activeProfileKey) ?? profile;
+    const targetBase = pending.targetBaseId;
+    const baseHead = persisted.datasetRecords?.[targetBase];
+    const { [targetBase]: _promoted, ...datasetRecords } =
+      persisted.datasetRecords ?? {};
+    const { pendingMigration: _cleared, ...rest } = persisted;
+    const rebased: ProfileRecord = {
+      ...rest,
+      datasetId: targetBase,
+      datasetGrants: grants,
+      datasetRecords,
+      ...(baseHead?.fileId
+        ? { fileId: baseHead.fileId, ...(baseHead.lastRevisionId ? { lastRevisionId: baseHead.lastRevisionId } : {}) }
+        : { fileId: undefined, lastRevisionId: undefined }),
+      needsInitialLoad: true,
+      lastSyncedAt: new Date().toISOString(),
+    };
+    const nextState = await rebaseProfileRecord(refreshed, state.activeProfileKey, rebased);
+
+    // Load the new group immediately so the user sees their data continue.
+    const loadRuntime = createRuntimeForProfile(
+      config,
+      nextState,
+      nextState.activeProfileKey,
+      createEmptySharedSyncPayload(),
+    );
+    try {
+      const target = findProfile(nextState, nextState.activeProfileKey)!;
+      const loaded = await syncProfileDatasetGroup(
+        loadRuntime.controller,
+        target,
+        createEmptySharedSyncPayload(),
+        "load",
+      );
+      const after = (await refreshCachedState()) ?? nextState;
+      const final: ProfileRecord = {
+        ...(findProfile(after, nextState.activeProfileKey) ?? target),
+        ...(loaded.fileId ? { fileId: loaded.fileId } : {}),
+        ...(loaded.revisionId ? { lastRevisionId: loaded.revisionId } : {}),
+        needsInitialLoad: false,
+        lastSyncedAt: new Date().toISOString(),
+      };
+      const finalState = upsertProfile(after, final);
+      cachedState = finalState;
+      await saveSharedSyncState(finalState);
+      return { state: finalState, payload: loaded.payload };
+    } finally {
+      loadRuntime.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
+const DATASET_PART_LABELS_INTERNAL: Record<DatasetPart, string> = {
+  plan: "Plan & settings",
+  cycle: "Cycle & periods",
+  intimacy: "Intimacy log",
+  sensitive: "Sensitive events",
+};
+
+export type SplitMigrationStatus = {
+  migrationId: string;
+  acknowledged: Array<{ keyId: string; email?: string }>;
+  pending: Array<{ keyId: string; email?: string }>;
+  closed: boolean;
+};
+
+/** Owner: who has completed the Picker re-selection and acknowledged. */
+export async function splitMigrationStatusForActive(
+  config: SharedSyncConfig,
+): Promise<SplitMigrationStatus> {
+  return serialized(async () => {
+    const active = await ensureRuntime(config, createEmptySharedSyncPayload());
+    const profile = profileForActive(active.state);
+    if (!profile.openMigrationId) {
+      throw new Error("This profile has no open migration.");
+    }
+    const control = buildControlDataset(
+      active.state,
+      profile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
+    const status = await control.migrationStatus(profile.openMigrationId);
+    const emails = profile.participantEmails ?? {};
+    return {
+      migrationId: profile.openMigrationId,
+      acknowledged: status.acknowledgedKeyIds.map((keyId) => ({
+        keyId,
+        ...(emails[keyId] ? { email: emails[keyId] } : {}),
+      })),
+      pending: status.pendingKeyIds.map((keyId) => ({
+        keyId,
+        ...(emails[keyId] ? { email: emails[keyId] } : {}),
+      })),
+      closed: status.closed,
+    };
+  });
+}
+
+/**
+ * Owner: close the migration once every required acknowledgement is present
+ * and trash (not delete) the retired source file.
+ */
+export async function closeSplitMigration(
+  config: SharedSyncConfig,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    const active = await ensureRuntime(config, createEmptySharedSyncPayload());
+    const state = active.state;
+    const profile = profileForActive(state);
+    if (!profile.openMigrationId || !profile.retiredDatasetId) {
+      throw new Error("This profile has no open migration.");
+    }
+    if (profile.role !== "owner") {
+      throw new Error("Only the owner can close a migration.");
+    }
+    const control = buildControlDataset(
+      state,
+      profile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
+    const status = await control.migrationStatus(profile.openMigrationId);
+    if (!status.closed) {
+      if (status.pendingKeyIds.length > 0) {
+        throw new Error(
+          "Waiting for everyone to reselect the new files — closing now would cut them off.",
+        );
+      }
+      await control.closeMigration({ migrationId: profile.openMigrationId });
+    }
+    await active.controller.trashDataset(profile.retiredDatasetId);
+    const refreshed = (await refreshCachedState()) ?? state;
+    const persisted = findProfile(refreshed, state.activeProfileKey) ?? profile;
+    const {
+      retiredDatasetId: _retired,
+      openMigrationId: _open,
+      ...rest
+    } = persisted;
+    const nextState = upsertProfile(refreshed, rest as ProfileRecord);
+    cachedState = nextState;
+    await saveSharedSyncState(nextState);
+    return { state: nextState, payload: createEmptySharedSyncPayload() };
+  });
+}
+
+/**
+ * Runs before a legacy profile syncs: detect an open (or completed)
+ * hard-cutover this device hasn't followed yet. Owners and post-ack
+ * participants adopt + rebase immediately; participants who still owe an
+ * acknowledgement get a persisted pendingMigration marker and a frozen
+ * (load-only) source. Memoized per session — the control file is also read
+ * on other paths, this is only the safety net for stale devices.
+ */
+const migrationReconcileChecked = new Set<string>();
+async function reconcileOpenMigration(
+  runtime: Runtime,
+  profile: ProfileRecord,
+): Promise<{ profile: ProfileRecord; freeze: boolean }> {
+  if (
+    isSplitProfile(profile) ||
+    !isEncryptedProfile(profile) ||
+    !profile.controlDatasetId ||
+    !profile.datasetRecords?.[profile.controlDatasetId]?.fileId
+  ) {
+    return { profile, freeze: false };
+  }
+  const memoKey = profileKey(profile.ownerEmail, profile.datasetId);
+  if (profile.pendingMigration) {
+    // Already surfaced; stay frozen until acknowledged.
+    return { profile, freeze: true };
+  }
+  if (migrationReconcileChecked.has(memoKey)) return { profile, freeze: false };
+  migrationReconcileChecked.add(memoKey);
+  const control = buildControlDataset(
+    runtime.state,
+    profile,
+    runtime.identityProvider,
+    runtime.authorizationProvider,
+  );
+  const verified = await control.read().catch(() => null);
+  const open = findOpenMigration(verified, profile.datasetId);
+  if (!open) return { profile, freeze: false };
+  const identity = await runtime.identityProvider.getOrCreate();
+  const myKeyId = identity.publicKey.keyId;
+  const targetBase = baseDatasetIdOf(open.targets[0]!.datasetId);
+  const myAck = verified!.acknowledgements
+    .get(open.migrationId)
+    ?.has(myKeyId) ?? false;
+  const myRequirement = open.requiredAcks.find((ack) => ack.keyId === myKeyId);
+
+  if (profile.role === "owner" || myAck) {
+    // Stale device of the owner (or of a participant who already
+    // acknowledged elsewhere): adopt the targets we can decrypt and rebase.
+    const grants: DatasetGrants = {};
+    for (const target of open.targets) {
+      const part = partForDatasetId(targetBase, target.datasetId);
+      if (!part) continue;
+      try {
+        await runtime.controller.adoptDataset(target.datasetId, {
+          requireOwned: profile.role === "owner",
+        });
+        const { participants } = await runtime.controller.getDatasetParticipants(
+          target.datasetId,
+        );
+        const me = participants.find((participant) => participant.keyId === myKeyId);
+        if (me) grants[part] = me.role === "owner" ? "owner" : me.role;
+      } catch {
+        // A dataset this identity was not granted — structural partial access.
+      }
+    }
+    if (!DATASET_PARTS.some((part) => grants[part])) return { profile, freeze: true };
+    const refreshed = (await refreshCachedState()) ?? runtime.state;
+    const persisted = findProfile(refreshed, memoKey) ?? profile;
+    const baseHead = persisted.datasetRecords?.[targetBase];
+    const { [targetBase]: _promoted, ...datasetRecords } =
+      persisted.datasetRecords ?? {};
+    const rebased: ProfileRecord = {
+      ...persisted,
+      datasetId: targetBase,
+      datasetGrants:
+        profile.role === "owner" ? { ...OWNER_DATASET_GRANTS } : grants,
+      datasetRecords,
+      ...(baseHead?.fileId ? { fileId: baseHead.fileId } : { fileId: undefined }),
+      ...(baseHead?.lastRevisionId
+        ? { lastRevisionId: baseHead.lastRevisionId }
+        : { lastRevisionId: undefined }),
+      ...(profile.role === "owner"
+        ? { retiredDatasetId: profile.datasetId, openMigrationId: open.migrationId }
+        : { needsInitialLoad: true }),
+    };
+    await rebaseProfileRecord(refreshed, memoKey, rebased);
+    return { profile: rebased, freeze: false };
+  }
+
+  if (myRequirement) {
+    const pendingMigration: NonNullable<ProfileRecord["pendingMigration"]> = {
+      migrationId: open.migrationId,
+      targetBaseId: targetBase,
+      requiredFileIds: myRequirement.targetFileIds,
+      targets: open.targets.map(({ datasetId, fileId }) => ({ datasetId, fileId })),
+    };
+    const refreshed = (await refreshCachedState()) ?? runtime.state;
+    const persisted = findProfile(refreshed, memoKey) ?? profile;
+    const marked: ProfileRecord = { ...persisted, pendingMigration };
+    const nextState = upsertProfile(refreshed, marked);
+    cachedState = nextState;
+    await saveSharedSyncState(nextState);
+    return { profile: marked, freeze: true };
+  }
+  return { profile, freeze: false };
 }
 
 export async function createLocalProfile(

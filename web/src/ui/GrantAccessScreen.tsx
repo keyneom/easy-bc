@@ -36,7 +36,50 @@ const DATASET_LABELS: Record<string, string> = {
 };
 
 export function datasetLabel(datasetId: string): string {
-  return DATASET_LABELS[datasetId] ?? datasetId;
+  if (DATASET_LABELS[datasetId]) return DATASET_LABELS[datasetId];
+  // Suffixed ids: "primary.cycle" → cycle; generation bases "primary.g2"
+  // (hard-cutover migrations) → the plan/base label.
+  const tail = datasetId.split(".").pop() ?? datasetId;
+  if (DATASET_LABELS[tail]) return DATASET_LABELS[tail];
+  if (/^g\d+$/.test(tail)) return DATASET_LABELS.primary;
+  return datasetId;
+}
+
+/**
+ * Migration re-grant hand-off: the Android app opens this page with
+ * `grant-files=1&sk-mfiles=<base64url JSON [{fileId,datasetId,role?}]>`
+ * when the owner reorganized a shared profile (hard cutover) and Google
+ * requires the user to reselect the new files. The list is built by the
+ * app from its verified control state — this page just runs the Picker.
+ */
+export function parseMigrationFilesParam(raw: string | null): SharingDatasetFileV1[] {
+  if (!raw) return [];
+  try {
+    const decoded = JSON.parse(
+      atob(raw.replace(/-/g, "+").replace(/_/g, "/")),
+    ) as unknown;
+    if (!Array.isArray(decoded)) return [];
+    return decoded.flatMap((entry) => {
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof (entry as { fileId?: unknown }).fileId !== "string" ||
+        typeof (entry as { datasetId?: unknown }).datasetId !== "string"
+      ) {
+        return [];
+      }
+      const candidate = entry as { fileId: string; datasetId: string; role?: string };
+      return [
+        {
+          datasetId: candidate.datasetId,
+          fileId: candidate.fileId,
+          role: candidate.role === "writer" ? ("writer" as const) : ("viewer" as const),
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -79,7 +122,13 @@ export function GrantAccessScreen() {
   const [grantedIds, setGrantedIds] = useState<Set<string>>(new Set());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const files: SharingDatasetFileV1[] = parsed?.files ?? [];
+  const migrationFiles = useMemo(
+    () => parseMigrationFilesParam(params.get("sk-mfiles")),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [href],
+  );
+  const migrationMode = !parsed && migrationFiles.length > 0;
+  const files: SharingDatasetFileV1[] = parsed?.files ?? migrationFiles;
   const missing = files.filter((file) => !grantedIds.has(file.fileId));
   const returnLinks = useMemo(() => buildReturnToAppLinks(href), [href]);
 
@@ -128,16 +177,27 @@ export function GrantAccessScreen() {
     }
   };
 
-  const invalidLink = !legacyFolderMode && (!parsed || files.length === 0);
+  const invalidLink =
+    !legacyFolderMode && ((!parsed && !migrationMode) || files.length === 0);
   const busy = phase === "authorizing" || phase === "picking";
   const complete = phase === "complete";
 
   return (
     <div className="grant-screen">
       <header className="grant-header">
-        <h1>Give EasyBC access to the shared files</h1>
+        <h1>
+          {migrationMode
+            ? "Reselect this profile's files"
+            : "Give EasyBC access to the shared files"}
+        </h1>
         <p>
-          {ownerEmail ? (
+          {migrationMode ? (
+            <>
+              {ownerEmail ? <strong>{ownerEmail}</strong> : "The owner"} reorganized the
+              shared profile into separate files. Pick the new files to keep your access —
+              nothing else changes.
+            </>
+          ) : ownerEmail ? (
             <>
               <strong>{ownerEmail}</strong> shared an encrypted profile with you.
             </>
@@ -148,11 +208,15 @@ export function GrantAccessScreen() {
           step. EasyBC can never see any other file in your Drive.
         </p>
         <div className="grant-steps" aria-hidden>
-          <EbStepDots count={3} active={complete ? 1 : 0} />
+          <EbStepDots count={migrationMode ? 2 : 3} active={complete ? 1 : 0} />
           <span className="grant-steps-caption">
-            {complete
-              ? "Step 2 of 3 — return to the app"
-              : "Step 1 of 3 — choose the files · then return to the app · then send your reply"}
+            {migrationMode
+              ? complete
+                ? "Step 2 of 2 — return to the app"
+                : "Step 1 of 2 — choose the files · then return to the app"
+              : complete
+                ? "Step 2 of 3 — return to the app"
+                : "Step 1 of 3 — choose the files · then return to the app · then send your reply"}
           </span>
         </div>
       </header>
@@ -186,6 +250,13 @@ export function GrantAccessScreen() {
                   );
                 })}
               </ul>
+              {files.length > 1 && (
+                <p className="grant-multiselect-hint">
+                  In the picker, hold <strong>Ctrl</strong> (<strong>⌘</strong> on Mac) to
+                  select several files at once. On a phone the picker may only take one at
+                  a time — pick what you can and it reopens for the rest.
+                </p>
+              )}
             </>
           )}
 
