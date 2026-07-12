@@ -725,6 +725,78 @@ class SharedSyncCoordinator(
         )
     }
 
+    /**
+     * Upgrade the active owned legacy profile to the per-dataset split
+     * layout (docs/sync-kit-multi-file-datasets.md). Hard replace, no
+     * dual-writing: the freshest merged payload is split into the four
+     * dataset files, the three companions are created first (so an
+     * interrupted run is resumable by running the upgrade again), and the
+     * old single file is deleted only after its content has a new home.
+     * Every file gets a fresh key — merely republishing a plan projection
+     * into the old file would leave the full legacy payload readable in its
+     * revision history once the plan file is later shared.
+     *
+     * Restricted to profiles nobody else can access. With participants this
+     * must run the control-dataset cutover ceremony (announce → Picker
+     * adopt → ack → close) instead, which EasyBC has not shipped yet; the
+     * UI routes owners through remove access → upgrade → re-invite in the
+     * meantime, which lands on the same end state because participants must
+     * re-grant the new files via the Picker either way.
+     */
+    suspend fun upgradeActiveProfileToSplit(accessToken: String): SharedSyncState {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile)) {
+            "Turn on encrypted sync for this profile first — the split layout lives in your Drive."
+        }
+        require(profile.role == "owner") {
+            "Only the profile owner can upgrade its sharing layout."
+        }
+        require(!isSplitProfile(profile)) {
+            "This profile already uses per-dataset sharing."
+        }
+        require(profile.participantEmails.orEmpty().isEmpty()) {
+            "Remove everyone's access first. Upgrading creates new files with new keys, " +
+                "so the people you share with must be re-invited with per-dataset access afterward."
+        }
+        val controller = controllerFor(state, profile)
+        val local = sharedPayload(store.localPayload()).withProfileAvatar(profile)
+        val files = controller.listDatasets()
+        val hasBase = files.any { it.datasetId == profile.datasetId }
+        // Freshest snapshot: merge local + remote through the normal sync.
+        // When the base file is already gone we are resuming an interrupted
+        // upgrade and the local store is the source of truth.
+        val payload = if (hasBase) {
+            controller.syncDataset(profile.datasetId, local).value
+        } else {
+            local
+        }
+        for (part in DATASET_PARTS) {
+            if (part == PART_PLAN) continue
+            val datasetId = datasetIdForPart(profile.datasetId, part)
+            if (files.any { it.datasetId == datasetId }) continue
+            controller.createDataset(datasetId, projectDatasetPart(payload, part))
+        }
+        if (hasBase) controller.deleteDataset(profile.datasetId)
+        val created = controller.createDataset(
+            profile.datasetId,
+            projectDatasetPart(payload, PART_PLAN),
+        )
+        store.apply(payload.withLocalAndroidPreferences(store.localPayload()))
+        val syncedAt = java.time.Instant.now().toString()
+        val nextProfile = refreshedProfile(profile).withAvatarFrom(payload).copy(
+            datasetGrants = OWNER_DATASET_GRANTS,
+            fileId = created.fileId,
+            lastRevisionId = created.revisionId,
+            lastSyncedAt = syncedAt,
+            needsInitialLoad = false,
+        )
+        val next = registry.upsertProfile(nextProfile)
+        store.rememberSync(created.fileId, syncedAt)
+        return next
+    }
+
     suspend fun listPendingResponses(accessToken: String): List<PendingResponse> {
         rememberAccess(accessToken)
         val state = registry.load() ?: return emptyList()
@@ -1344,6 +1416,40 @@ class SharedSyncCoordinator(
      * published, and sections without a grant are never projected out —
      * partial access is structural, not advisory.
      */
+    /**
+     * Detect that another of this owner's devices upgraded a legacy profile
+     * to the split layout (companion dataset files exist in the Drive
+     * folder) and adopt it here, so this device never publishes a full
+     * payload into what is now the plan file. Checked once per coordinator
+     * per profile; the explicit upgrade path sets datasetGrants directly and
+     * never reaches this. Only the owner runs detection — participants
+     * can't list or adopt files they were never granted.
+     */
+    private val splitLayoutChecked = mutableSetOf<String>()
+    private suspend fun maybeAdoptSplitLayout(
+        controller: SharedBackupController<SyncPayloadV1>,
+        profile: ProfileRecord,
+    ): ProfileRecord? {
+        if (isSplitProfile(profile) || isLocalProfile(profile) || profile.role != "owner") {
+            return null
+        }
+        if (!splitLayoutChecked.add(profileKey(profile.ownerEmail, profile.datasetId))) {
+            return null
+        }
+        val files = controller.listDatasets()
+        val companionParts = DATASET_PARTS.filter { part ->
+            part != PART_PLAN &&
+                files.any { it.datasetId == datasetIdForPart(profile.datasetId, part) }
+        }
+        if (companionParts.isEmpty()) return null
+        for (part in companionParts) {
+            controller.adoptDataset(datasetIdForPart(profile.datasetId, part), requireOwned = true)
+        }
+        val upgraded = refreshedProfile(profile).copy(datasetGrants = OWNER_DATASET_GRANTS)
+        registry.upsertProfile(upgraded)
+        return upgraded
+    }
+
     private suspend fun syncProfileDatasetGroup(
         controller: SharedBackupController<SyncPayloadV1>,
         profile: ProfileRecord,
@@ -1351,6 +1457,10 @@ class SharedSyncCoordinator(
         loadOnly: Boolean,
     ): GroupResult {
         if (!isSplitProfile(profile)) {
+            val upgraded = maybeAdoptSplitLayout(controller, profile)
+            if (upgraded != null) {
+                return syncProfileDatasetGroup(controller, upgraded, local, loadOnly)
+            }
             val result = if (loadOnly) {
                 controller.loadDataset(profile.datasetId)
             } else {

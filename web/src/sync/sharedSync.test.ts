@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertAcceptedDatasetResults, sharedSyncConfigFromEnv } from "./sharedSync";
+import {
+  assertAcceptedDatasetResults,
+  assertSplitUpgradeAllowed,
+  sharedSyncConfigFromEnv,
+} from "./sharedSync";
 
 describe("sharedSyncConfigFromEnv", () => {
   afterEach(() => {
@@ -35,5 +39,50 @@ describe("assertAcceptedDatasetResults", () => {
     expect(() =>
       assertAcceptedDatasetResults([{ datasetId: "primary", status: "accepted" }]),
     ).not.toThrow();
+  });
+});
+
+describe("assertSplitUpgradeAllowed", () => {
+  const ownedLegacy = {
+    datasetId: "primary",
+    ownerEmail: "leslie@example.com",
+    folderName: "EasyBC — leslie@example.com",
+    role: "owner" as const,
+    trustedOwnerKeyId: "owner-key",
+    syncMode: "encrypted" as const,
+  };
+
+  it("allows an owned encrypted legacy profile with no participants", () => {
+    expect(() => assertSplitUpgradeAllowed(ownedLegacy)).not.toThrow();
+  });
+
+  it("rejects local profiles — the split layout lives in Drive", () => {
+    expect(() =>
+      assertSplitUpgradeAllowed({ ...ownedLegacy, syncMode: "local" as const }),
+    ).toThrow(/encrypted sync/i);
+  });
+
+  it("rejects non-owners: writers, admins, viewers", () => {
+    for (const role of ["writer", "admin", "viewer"] as const) {
+      expect(() => assertSplitUpgradeAllowed({ ...ownedLegacy, role })).toThrow(/owner/i);
+    }
+  });
+
+  it("rejects profiles already using the split layout", () => {
+    expect(() =>
+      assertSplitUpgradeAllowed({
+        ...ownedLegacy,
+        datasetGrants: { plan: "owner" as const, cycle: "owner" as const },
+      }),
+    ).toThrow(/already/i);
+  });
+
+  it("rejects shared profiles until access is removed — new keys strand participants", () => {
+    expect(() =>
+      assertSplitUpgradeAllowed({
+        ...ownedLegacy,
+        participantEmails: { "key-1": "mark@example.com" },
+      }),
+    ).toThrow(/remove everyone's access/i);
   });
 });

@@ -524,15 +524,20 @@ async function syncProfileDatasetGroup(
   mode: "sync" | "load",
 ): Promise<{ payload: SharedSyncPayloadV1; fileId: string; revisionId: string }> {
   if (!isSplitProfile(profile)) {
-    const result =
-      mode === "load"
-        ? await controller.loadDataset(profile.datasetId)
-        : await controller.syncDataset(profile.datasetId, local);
-    return {
-      payload: result.value as SharedSyncPayloadV1,
-      fileId: result.fileId,
-      revisionId: result.revisionId,
-    };
+    const upgraded = await maybeAdoptSplitLayout(controller, profile);
+    if (upgraded) {
+      profile = upgraded;
+    } else {
+      const result =
+        mode === "load"
+          ? await controller.loadDataset(profile.datasetId)
+          : await controller.syncDataset(profile.datasetId, local);
+      return {
+        payload: result.value as SharedSyncPayloadV1,
+        fileId: result.fileId,
+        revisionId: result.revisionId,
+      };
+    }
   }
   const values: Partial<Record<DatasetPart, SharedSyncPayloadV1>> = {};
   // Prefer the base (plan) file's head for the profile record; a partial
@@ -558,6 +563,54 @@ async function syncProfileDatasetGroup(
     fileId: baseInfo.fileId,
     revisionId: baseInfo.revisionId,
   };
+}
+
+/**
+ * Detect that another of this owner's devices upgraded a legacy profile to
+ * the split layout (companion dataset files exist in the Drive folder) and
+ * adopt it here, so this device never publishes a full payload into what is
+ * now the plan file. Checked once per session per profile; the explicit
+ * upgrade path sets datasetGrants directly and never reaches this. Only the
+ * owner runs detection — participants can't list or adopt files they were
+ * never granted.
+ */
+const splitLayoutChecked = new Set<string>();
+async function maybeAdoptSplitLayout(
+  controller: EasyBcController,
+  profile: ProfileRecord,
+): Promise<ProfileRecord | null> {
+  if (
+    isSplitProfile(profile) ||
+    !isEncryptedProfile(profile) ||
+    profile.role !== "owner"
+  ) {
+    return null;
+  }
+  const memoKey = profileKey(profile.ownerEmail, profile.datasetId);
+  if (splitLayoutChecked.has(memoKey)) return null;
+  splitLayoutChecked.add(memoKey);
+  const files = await controller.listDatasets();
+  const companionParts = DATASET_PARTS.filter(
+    (part) =>
+      part !== "plan" &&
+      files.some((file) => file.datasetId === datasetIdForPart(profile.datasetId, part)),
+  );
+  if (companionParts.length === 0) return null;
+  for (const part of companionParts) {
+    await controller.adoptDataset(datasetIdForPart(profile.datasetId, part), {
+      requireOwned: true,
+    });
+  }
+  const refreshed = (await refreshCachedState()) ?? cachedState;
+  if (!refreshed) return null;
+  const upgraded: ProfileRecord = {
+    ...(findProfile(refreshed, memoKey) ?? profile),
+    datasetGrants: { ...OWNER_DATASET_GRANTS },
+  };
+  const nextState = upsertProfile(refreshed, upgraded);
+  cachedState = nextState;
+  await saveSharedSyncState(nextState);
+  return upgraded;
 }
 
 /**
@@ -1065,6 +1118,87 @@ export async function switchManagedProfile(
       targetRuntime.identityProvider.clear();
       disposeRuntime();
     }
+  });
+}
+
+/**
+ * Upgrade the active owned legacy profile to the per-dataset split layout
+ * (docs/sync-kit-multi-file-datasets.md). Hard replace, no dual-writing:
+ * the freshest merged payload is split into the four dataset files, the
+ * three companions are created first (so an interrupted run is resumable
+ * by running the upgrade again), and the old single file is deleted only
+ * after its content has a new home. Every file gets a fresh key — merely
+ * republishing a plan projection into the old file would leave the full
+ * legacy payload readable in its revision history once the plan file is
+ * later shared.
+ *
+ * Restricted to profiles nobody else can access. With participants this
+ * must run the control-dataset cutover ceremony (announce → Picker adopt →
+ * ack → close) instead, which EasyBC has not shipped yet; the UI routes
+ * owners through remove access → upgrade → re-invite in the meantime,
+ * which lands on the same end state because participants must re-grant the
+ * new files via the Picker either way.
+ */
+export function assertSplitUpgradeAllowed(profile: ProfileRecord): void {
+  if (!isEncryptedProfile(profile)) {
+    throw new Error(
+      "Turn on encrypted sync for this profile first — the split layout lives in your Drive.",
+    );
+  }
+  if (profile.role !== "owner") {
+    throw new Error("Only the profile owner can upgrade its sharing layout.");
+  }
+  if (isSplitProfile(profile)) {
+    throw new Error("This profile already uses per-dataset sharing.");
+  }
+  if (Object.keys(profile.participantEmails ?? {}).length > 0) {
+    throw new Error(
+      "Remove everyone's access first. Upgrading creates new files with new keys, so the people you share with must be re-invited with per-dataset access afterward.",
+    );
+  }
+}
+
+export async function upgradeActiveProfileToSplit(
+  config: SharedSyncConfig,
+  local: SharedSyncPayloadV1,
+): Promise<ManagedProfileResult> {
+  return serialized(async () => {
+    const active = await ensureRuntime(config, local);
+    const state = active.state;
+    const profile = profileForActive(state);
+    assertSplitUpgradeAllowed(profile);
+    const controller = active.controller;
+    const files = await controller.listDatasets();
+    const hasBase = files.some((file) => file.datasetId === profile.datasetId);
+    // Freshest snapshot: merge local + remote through the normal sync. When
+    // the base file is already gone we are resuming an interrupted upgrade
+    // and the local store is the source of truth.
+    const payload = hasBase
+      ? ((await controller.syncDataset(profile.datasetId, local)).value as SharedSyncPayloadV1)
+      : local;
+    for (const part of DATASET_PARTS) {
+      if (part === "plan") continue;
+      const datasetId = datasetIdForPart(profile.datasetId, part);
+      if (files.some((file) => file.datasetId === datasetId)) continue;
+      await controller.createDataset(datasetId, projectDatasetPart(payload, part));
+    }
+    if (hasBase) await controller.deleteDataset(profile.datasetId);
+    const created = await controller.createDataset(
+      profile.datasetId,
+      projectDatasetPart(payload, "plan"),
+    );
+    const refreshed = (await refreshCachedState()) ?? state;
+    const upgraded: ProfileRecord = {
+      ...(findProfile(refreshed, state.activeProfileKey) ?? profile),
+      datasetGrants: { ...OWNER_DATASET_GRANTS },
+      fileId: created.fileId,
+      lastRevisionId: created.revisionId,
+      lastSyncedAt: new Date().toISOString(),
+    };
+    const nextState = upsertProfile(refreshed, upgraded);
+    cachedState = nextState;
+    await saveSharedSyncState(nextState);
+    return { state: nextState, payload };
   });
 }
 

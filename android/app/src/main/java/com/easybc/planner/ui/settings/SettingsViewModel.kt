@@ -104,6 +104,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /** Reload registry-backed state; the global profile chip calls this on navigation changes. */
+    fun refreshSharedState() {
+        viewModelScope.launch { refreshSharedSyncState() }
+    }
+
     private suspend fun refreshSharedSyncState() {
         sharedSync.clearIncompleteSetup()
         val state = sharedSync.loadState()
@@ -535,6 +540,26 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     "Set up sharing coordination",
                     error,
                     "Coordination setup failed",
+                )
+            }
+        }
+    }
+
+    fun upgradeProfileToSplit(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _sharedSyncState.value = sharedSync.upgradeActiveProfileToSplit(accessToken)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "Each data section now lives in its own encrypted file — " +
+                        "invites and person cards control access per section.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure(
+                    "Per-dataset upgrade",
+                    error,
+                    "Upgrade failed",
                 )
             }
         }

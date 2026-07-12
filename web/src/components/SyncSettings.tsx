@@ -46,6 +46,7 @@ import {
   submitJoinFromLink,
   switchManagedProfile,
   syncActiveDataset,
+  upgradeActiveProfileToSplit,
   updateParticipantDatasetRole,
   updateParticipantRole,
   updateManagedProfileAvatar,
@@ -263,6 +264,40 @@ export function SyncSettings({
           findProfile(next, next.activeProfileKey)?.controlEnrollment === "enrolled"
             ? "Sharing coordination is ready."
             : "Coordination file created. Re-invite existing participants so they can enroll.",
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const upgradeToSplit = async () => {
+    if (!config) return;
+    if (
+      !window.confirm(
+        "Upgrade this profile to per-dataset sharing?\n\n" +
+          "Your data is split into four encrypted files (plan, cycle, intimacy, sensitive), " +
+          "each with fresh keys, and the old single cloud file is replaced. Your data is " +
+          "merged and preserved. Other devices signed into this profile pick the change up " +
+          "on their next sync.",
+      )
+    ) {
+      return;
+    }
+    setBusy("split-upgrade");
+    setNotice({ kind: "info", message: "Upgrading this profile to per-dataset sharing…" });
+    try {
+      const result = await upgradeActiveProfileToSplit(config, localShared());
+      await applyShared(result.payload);
+      onSharedSyncStateChange(result.state);
+      onSyncComplete?.(
+        sharedPayloadToSyncPayload(result.payload, session.androidPreferences),
+      );
+      setNotice({
+        kind: "success",
+        message:
+          "Each data section now lives in its own encrypted file — invites and person cards control access per section.",
       });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -929,6 +964,44 @@ export function SyncSettings({
           </div>
         </div>
       )}
+
+      {sharedSyncState &&
+        activeProfile &&
+        !activeIsLocal &&
+        activeProfile.role === "owner" &&
+        !isSplitProfile(activeProfile) &&
+        (Object.keys(activeProfile.participantEmails ?? {}).length === 0 ? (
+          <div className="sync-notice info">
+            <div>
+              <strong>Upgrade to per-dataset sharing</strong>
+              <span>
+                Splits this profile into four encrypted files — cycle, plan,
+                intimacy, sensitive — each with its own keys, so you can share
+                each section separately. The old single file is replaced.
+              </span>
+            </div>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void upgradeToSplit()}
+            >
+              {busy === "split-upgrade" ? "Upgrading…" : "Upgrade"}
+            </button>
+          </div>
+        ) : (
+          <div className="sync-notice info">
+            <div>
+              <strong>Per-dataset sharing needs an upgrade</strong>
+              <span>
+                This profile predates per-dataset sharing, so access is
+                all-or-nothing. Upgrading creates new files with new keys, which
+                the people you share with cannot follow automatically yet: remove
+                their access below, upgrade, then re-invite them with the
+                per-section presets.
+              </span>
+            </div>
+          </div>
+        ))}
 
       {CONTROL_DATASETS_WIRED &&
         activeProfile &&

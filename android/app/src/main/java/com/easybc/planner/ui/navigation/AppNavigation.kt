@@ -64,6 +64,15 @@ fun AppNavigation(
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
 
+    // Activity-scoped view model backing the global profile chip. Screens keep
+    // their own back-stack-scoped instances; refreshing on every navigation
+    // change keeps the chip in step with mutations made inside those screens.
+    val chipVm: com.easybc.planner.ui.settings.SettingsViewModel =
+        androidx.lifecycle.viewmodel.compose.viewModel()
+    androidx.compose.runtime.LaunchedEffect(navBackStackEntry) {
+        chipVm.refreshSharedState()
+    }
+
     // Handle the reminder notification deep-link. We push the reconcile
     // route onto the back stack so hitting back still returns to the
     // Calendar tab, which is the mental model the user expects.
@@ -125,6 +134,13 @@ fun AppNavigation(
                 .padding(innerPadding),
         ) {
             UpdateAvailableBanner()
+            ProfileChipHost(
+                vm = chipVm,
+                onOpenManageProfiles = {
+                    navController.navigate(Screen.Settings.route) { launchSingleTop = true }
+                    navController.navigate("settings/storage") { launchSingleTop = true }
+                },
+            )
             NavHost(
                 navController = navController,
                 startDestination = Screen.Calendar.route,

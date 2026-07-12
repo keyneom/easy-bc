@@ -20,9 +20,32 @@ companions and group-syncs. Partial access is structural in the UI: hidden
 day-sheet sections, "what you can see" dataset rows, and a calendar banner.
 
 **Legacy profiles** (created before v0.1.50) keep their single file and
-all-or-nothing sharing; migrating them to the split layout is exactly the
-hard-cutover topology migration below and waits on the control-dataset
-integration.
+all-or-nothing sharing until upgraded.
+
+**Legacy→split upgrade (shipped, unreleased):** an owned legacy profile with
+no participants can be upgraded in place from Storage & sharing
+(`upgradeActiveProfileToSplit` on both platforms). Order of operations makes
+an interrupted run resumable by simply running the upgrade again: freshest
+merged payload via a normal sync → the three companion files are created
+first → the old single file is deleted → the base is recreated as the plan
+file. Every file gets a fresh key; the base is deleted-and-recreated rather
+than republished so the full legacy payload does not survive in the plan
+file's revision history once that file is later shared. Other devices signed
+into the same owned profile adopt the new layout automatically on their next
+sync (`maybeAdoptSplitLayout`: owner-only, memoized per session, lists the
+folder's datasets and adopts the companions — this also stops a stale legacy
+device from publishing full payloads into what is now the plan file).
+
+**Shared legacy profiles** cannot use the in-place upgrade: new files with
+new keys strand existing participants. The UI routes owners through remove
+access → upgrade → re-invite with the per-section presets, which lands on
+the same end state as the protocol cutover because participants must
+re-grant the new files via the Picker either way. The protocol-native
+migration (control-dataset `announceMigration` → participant Picker adopt →
+`acknowledgeMigration` → owner `closeMigration`; primitives shipped in
+sync-kit rc.12+ on both platforms) preserves provenance and removes the
+manual re-invite, and remains the tracked follow-up — it needs two-account
+on-device validation before it can be trusted.
 
 **v0.1.52 (sync-kit 0.2.0-rc.12):** control datasets are wired on both
 platforms (`<base>.control` enrolled as a writer grant alongside data

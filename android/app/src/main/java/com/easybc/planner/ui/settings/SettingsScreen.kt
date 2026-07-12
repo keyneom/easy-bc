@@ -461,6 +461,8 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
     var pendingProfileDeleteKey by remember { mutableStateOf<String?>(null) }
     var pendingProfileParticipantsRefresh by remember { mutableStateOf(false) }
     var pendingControlEnrollment by remember { mutableStateOf(false) }
+    var pendingSplitUpgrade by remember { mutableStateOf(false) }
+    var splitUpgradeConfirm by remember { mutableStateOf(false) }
     var pendingParticipantRoleChange by remember { mutableStateOf<Triple<String, String, String>?>(null) }
     var pendingParticipantRevoke by remember { mutableStateOf<Pair<String, String>?>(null) }
     var participantRevokeConfirm by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -514,6 +516,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         val profileDeleteKey = pendingProfileDeleteKey
         val refreshParticipants = pendingProfileParticipantsRefresh
         val controlEnrollment = pendingControlEnrollment
+        val splitUpgrade = pendingSplitUpgrade
         val participantRoleChange = pendingParticipantRoleChange
         val participantDatasetRoleChange = pendingParticipantDatasetRoleChange
         val participantRevoke = pendingParticipantRevoke
@@ -527,6 +530,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         pendingProfileDeleteKey = null
         pendingProfileParticipantsRefresh = false
         pendingControlEnrollment = false
+        pendingSplitUpgrade = false
         pendingParticipantRoleChange = null
         pendingParticipantDatasetRoleChange = null
         pendingParticipantRevoke = null
@@ -547,6 +551,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                     }
                     profileDeleteKey != null -> vm.deleteProfile(token, profileDeleteKey, false)
                     controlEnrollment -> vm.enrollControlDataset(token)
+                    splitUpgrade -> vm.upgradeProfileToSplit(token)
                     refreshParticipants -> vm.refreshProfileParticipants(token)
                     participantRoleChange != null ->
                         vm.updateParticipantRole(
@@ -700,6 +705,25 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         }
     }
 
+    fun authorizeAndUpgradeSplit() {
+        vm.cloudWaiting()
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> vm.upgradeProfileToSplit(step.accessToken)
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingSplitUpgrade = true
+                        resolutionLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                vm.cloudError(error.message ?: "Google authorization failed.")
+            }
+        }
+    }
+
     fun authorizeAndChangeParticipantDatasetRole(
         keyId: String,
         email: String,
@@ -814,6 +838,36 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         )
     }
     Spacer(Modifier.height(4.dp))
+
+    if (
+        selectedProfile != null &&
+        !selectedIsLocal &&
+        selectedProfile.role == "owner" &&
+        !com.easybc.planner.sync.shared.isSplitProfile(selectedProfile)
+    ) {
+        if (selectedProfile.participantEmails.orEmpty().isEmpty()) {
+            EbBanner(
+                tone = EbBannerTone.INFO,
+                title = "Upgrade to per-dataset sharing",
+                text = "Splits this profile into four encrypted files — cycle, plan, " +
+                    "intimacy, sensitive — each with its own keys, so you can share " +
+                    "each section separately. The old single file is replaced.",
+                actionLabel = if (busy) "Upgrading…" else "Upgrade",
+                onAction = { if (!busy) splitUpgradeConfirm = true },
+            )
+        } else {
+            EbBanner(
+                tone = EbBannerTone.INFO,
+                title = "Per-dataset sharing needs an upgrade",
+                text = "This profile predates per-dataset sharing, so access is " +
+                    "all-or-nothing. Upgrading creates new files with new keys, which " +
+                    "the people you share with cannot follow automatically yet: remove " +
+                    "their access below, upgrade, then re-invite them with the " +
+                    "per-section presets.",
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+    }
 
     if (
         selectedProfile != null &&
@@ -1586,6 +1640,32 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
             },
             dismissButton = {
                 TextButton(onClick = { participantRevokeConfirm = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    if (splitUpgradeConfirm) {
+        AlertDialog(
+            onDismissRequest = { splitUpgradeConfirm = false },
+            title = { Text("Upgrade to per-dataset sharing?") },
+            text = {
+                Text(
+                    "Your data is split into four encrypted files (plan, cycle, intimacy, " +
+                        "sensitive), each with fresh keys, and the old single cloud file is " +
+                        "replaced. Your data is merged and preserved. Other devices signed " +
+                        "into this profile pick the change up on their next sync.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        splitUpgradeConfirm = false
+                        authorizeAndUpgradeSplit()
+                    },
+                ) { Text("Upgrade") }
+            },
+            dismissButton = {
+                TextButton(onClick = { splitUpgradeConfirm = false }) { Text("Cancel") }
             },
         )
     }

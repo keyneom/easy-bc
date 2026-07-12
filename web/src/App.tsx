@@ -97,12 +97,19 @@ import { DATASET_PART_LABELS, type DatasetPart } from "./sync/datasets";
 import { profileDisplayLabel } from "./sync/profileLabels";
 import { shouldOpenSyncSettings } from "./sync/sharedRoute";
 import {
+  createLocalProfile,
   ensureProfileState,
   listPendingKeyResponses,
   loadSharedSyncState,
   sharedSyncConfigFromEnv,
+  switchManagedProfile,
   syncActiveDataset,
 } from "./sync/sharedSync";
+import { profileKey } from "./sync/sharedFolderName";
+import {
+  ProfileChipSwitcher,
+  type SwitcherProfileRow,
+} from "./components/ProfileChipSwitcher";
 import { updateProfileByKey } from "./sync/sharedRegistry";
 import { avatarDataUrl } from "./ui/avatarEncode";
 import { bindEasyBcSharingPoll } from "./sync/sharedSyncLifecycle";
@@ -117,8 +124,10 @@ import {
   type InFlightDay,
 } from "./tracker/realizedRisk";
 import {
+  EbButton,
   EbGroupLabel,
   EbNavRow,
+  EbPersonCard,
   EbProfileHeaderCard,
   EbThemeModeToggle,
   type EbProfileBadge,
@@ -552,7 +561,14 @@ const WITHDRAWAL_MODE_OPTIONS: ChoiceOption<WithdrawalMode>[] = [
 ];
 
 /** Settings hub views — parity with the Android settings routes. */
-type SettingsView = "hub" | "basics" | "protection" | "risk" | "sharing" | "about";
+type SettingsView =
+  | "hub"
+  | "basics"
+  | "protection"
+  | "risk"
+  | "sharing"
+  | "profiles"
+  | "about";
 
 function optionLabel<T extends string>(options: ChoiceOption<T>[], value: T): string {
   return options.find((option) => option.value === value)?.label ?? value;
@@ -1052,6 +1068,109 @@ export default function App() {
       ? sharedPayloadFingerprint(extractSharedPayload(payload))
       : "";
   }, []);
+
+  // Global profile chip + switcher (docs/settings-profiles-redesign.md §1).
+  // Runs the same publish-before-switch routine as the sharing screen so
+  // switching from any tab is safe; the sheet stays open until confirmed.
+  const [profileSwitchingKey, setProfileSwitchingKey] = useState<string | null>(null);
+  const [profileSwitchNotice, setProfileSwitchNotice] = useState<string | null>(null);
+  const [newProfileName, setNewProfileName] = useState("");
+  const switcherProfiles = useMemo<SwitcherProfileRow[]>(() => {
+    if (!sharedSyncState) return [];
+    return sharedSyncState.profiles.map((record) => {
+      const key = profileKey(record.ownerEmail, record.datasetId);
+      return {
+        key,
+        name: profileDisplayLabel(sharedSyncState, record),
+        meta: settingsProfileMeta(sharedSyncState, record),
+        badge: settingsProfileBadge(sharedSyncState, record),
+        photoUrl: record.avatarWebp ? avatarDataUrl(record.avatarWebp) : undefined,
+        active: key === sharedSyncState.activeProfileKey,
+      };
+    });
+  }, [sharedSyncState]);
+
+  const handleSwitchProfile = useCallback(
+    async (key: string): Promise<boolean> => {
+      if (!sharedSyncState || profileSwitchingKey) return false;
+      setProfileSwitchingKey(key);
+      setProfileSwitchNotice(null);
+      try {
+        const { options, periodRecords: records, session: currentSession } =
+          latestSyncInputsRef.current;
+        const local = buildSharedSyncPayload(
+          options,
+          records,
+          currentSession,
+          findProfile(sharedSyncState, sharedSyncState.activeProfileKey),
+        );
+        const result = await switchManagedProfile(sharedSyncConfig, key, local);
+        const applied = sharedPayloadToSyncPayload(
+          result.payload,
+          currentSession.androidPreferences,
+        );
+        await applySyncedPayload(applied);
+        setSharedSyncState(result.state);
+        markSyncComplete(applied);
+        return true;
+      } catch (error) {
+        setProfileSwitchNotice(
+          error instanceof Error ? error.message : String(error),
+        );
+        return false;
+      } finally {
+        setProfileSwitchingKey(null);
+      }
+    },
+    [
+      applySyncedPayload,
+      markSyncComplete,
+      profileSwitchingKey,
+      sharedSyncConfig,
+      sharedSyncState,
+    ],
+  );
+
+  const handleCreateLocalProfile = useCallback(
+    async (displayName: string): Promise<boolean> => {
+      if (!sharedSyncState || profileSwitchingKey) return false;
+      setProfileSwitchingKey("__create__");
+      setProfileSwitchNotice(null);
+      try {
+        const { options, periodRecords: records, session: currentSession } =
+          latestSyncInputsRef.current;
+        const local = buildSharedSyncPayload(
+          options,
+          records,
+          currentSession,
+          findProfile(sharedSyncState, sharedSyncState.activeProfileKey),
+        );
+        const result = await createLocalProfile(sharedSyncConfig, displayName, local);
+        const applied = sharedPayloadToSyncPayload(
+          result.payload,
+          currentSession.androidPreferences,
+        );
+        await applySyncedPayload(applied);
+        setSharedSyncState(result.state);
+        markSyncComplete(applied);
+        return true;
+      } catch (error) {
+        setProfileSwitchNotice(
+          error instanceof Error ? error.message : String(error),
+        );
+        return false;
+      } finally {
+        setProfileSwitchingKey(null);
+      }
+    },
+    [
+      applySyncedPayload,
+      markSyncComplete,
+      profileSwitchingKey,
+      sharedSyncConfig,
+      sharedSyncState,
+    ],
+  );
 
   const runAutoSync = useCallback(
     async (reason: AutoSyncReason) => {
@@ -1740,10 +1859,23 @@ export default function App() {
           <h1>EasyBC</h1>
           <p>Private planning, on this device</p>
         </div>
-        <div className="privacy-chip">
-          <ShieldCheck size={16} aria-hidden />
-          Local-first
-        </div>
+        {switcherProfiles.length > 0 ? (
+          <ProfileChipSwitcher
+            profiles={switcherProfiles}
+            switchingKey={profileSwitchingKey}
+            notice={profileSwitchNotice}
+            onSwitch={handleSwitchProfile}
+            onManageProfiles={() => {
+              selectTab("settings");
+              setSettingsView("profiles");
+            }}
+          />
+        ) : (
+          <div className="privacy-chip">
+            <ShieldCheck size={16} aria-hidden />
+            Local-first
+          </div>
+        )}
       </header>
 
       <UpdateBanner />
@@ -2058,7 +2190,7 @@ export default function App() {
                     photoUrl={active.avatarWebp ? avatarDataUrl(active.avatarWebp) : undefined}
                     badge={settingsProfileBadge(sharedSyncState, active)}
                     actionLabel="Switch"
-                    onAction={() => setSettingsView("sharing")}
+                    onAction={() => setSettingsView("profiles")}
                   />
                 );
               })()}
@@ -2107,6 +2239,19 @@ export default function App() {
                 })()}
                 onClick={() => setSettingsView("sharing")}
               />
+              {sharedSyncState && sharedSyncState.profiles.length > 0 && (
+                <>
+                  <EbGroupLabel>Profiles</EbGroupLabel>
+                  <EbNavRow
+                    icon={<Users />}
+                    title="Manage profiles"
+                    value={`${sharedSyncState.profiles.length} profile${
+                      sharedSyncState.profiles.length === 1 ? "" : "s"
+                    } on this device`}
+                    onClick={() => setSettingsView("profiles")}
+                  />
+                </>
+              )}
               <EbGroupLabel>About</EbGroupLabel>
               <EbNavRow
                 icon={<Info />}
@@ -2571,6 +2716,94 @@ export default function App() {
                 onSharedSyncStateChange={setSharedSyncState}
                 onSyncComplete={markSyncComplete}
               />
+            </section>
+          )}
+
+          {tab === "settings" && settingsView === "profiles" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("hub")}
+              >
+                ← Settings
+              </button>
+              <div className="screen-heading">
+                <p className="eyebrow">Profiles</p>
+                <h2>Manage profiles</h2>
+                <p>
+                  Every profile keeps its own settings, data, storage, and
+                  sharing. Switching publishes your current profile first.
+                </p>
+              </div>
+              {switcherProfiles.map((profile) => (
+                <EbPersonCard
+                  key={profile.key}
+                  name={profile.name}
+                  colorKey={profile.key}
+                  photoUrl={profile.photoUrl}
+                >
+                  <div className="participant-summary">
+                    <span className="field-hint">
+                      {profileSwitchingKey === profile.key
+                        ? "Switching…"
+                        : profile.meta}
+                    </span>
+                    {profile.active ? (
+                      <span className="profile-active-badge">Active</span>
+                    ) : (
+                      <div className="participant-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={profileSwitchingKey !== null}
+                          onClick={() => void handleSwitchProfile(profile.key)}
+                        >
+                          Switch to this profile
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </EbPersonCard>
+              ))}
+              {profileSwitchNotice && (
+                <p className="sync-notice sync-notice-error" role="alert">
+                  {profileSwitchNotice}
+                </p>
+              )}
+              <div className="profile-switcher-add">
+                <input
+                  type="text"
+                  value={newProfileName}
+                  onChange={(event) => setNewProfileName(event.target.value)}
+                  placeholder="New profile name"
+                  disabled={profileSwitchingKey !== null}
+                  aria-label="New profile name"
+                />
+                <EbButton
+                  variant="primary"
+                  disabled={profileSwitchingKey !== null || !newProfileName.trim()}
+                  onClick={() => {
+                    const name = newProfileName.trim();
+                    if (!name) return;
+                    void handleCreateLocalProfile(name).then((created) => {
+                      if (created) setNewProfileName("");
+                    });
+                  }}
+                >
+                  ＋ New profile
+                </EbButton>
+              </div>
+              <p className="field-hint">
+                New profiles start local to this device — choose Private cloud
+                or Shared later in Storage &amp; sharing.
+              </p>
+              <EbButton variant="outline" onClick={() => setSettingsView("sharing")}>
+                Join a shared profile
+              </EbButton>
+              <EbButton variant="outline" onClick={() => setSettingsView("sharing")}>
+                Storage &amp; sharing for this profile
+              </EbButton>
             </section>
           )}
 
