@@ -59,6 +59,8 @@ fun AppNavigation(
     /** True when a sharing join/response link should open Encrypted Sync settings. */
     pendingSettingsDeepLink: Boolean = false,
     onSettingsDeepLinkConsumed: () -> Unit = {},
+    /** Pull-to-refresh resync; null hides the gesture (e.g. previews). */
+    onManualSync: (suspend () -> com.easybc.planner.sync.CloudAutoSyncSession.ManualSyncOutcome)? = null,
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -147,7 +149,10 @@ fun AppNavigation(
                 modifier = Modifier.weight(1f),
             ) {
             composable(Screen.Calendar.route) {
-                CalendarScreen(onOpenReconcile = { navController.navigate("reconcile") })
+                CalendarScreen(
+                    onOpenReconcile = { navController.navigate("reconcile") },
+                    onManualSync = onManualSync,
+                )
             }
             composable(Screen.Planner.route) { PlannerScreen() }
             composable(Screen.History.route) { HistoryScreen() }

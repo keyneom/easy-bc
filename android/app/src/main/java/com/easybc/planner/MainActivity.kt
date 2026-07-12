@@ -88,6 +88,7 @@ class MainActivity : ComponentActivity() {
                         onReconcileDeepLinkConsumed = { pendingReconcile = false },
                         pendingSettingsDeepLink = pendingSettings,
                         onSettingsDeepLinkConsumed = { pendingSettings = false },
+                        onManualSync = { cloudAutoSyncSession.manualSync() },
                     )
                 }
             }

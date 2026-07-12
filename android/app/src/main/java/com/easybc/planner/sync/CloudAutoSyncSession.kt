@@ -88,6 +88,20 @@ class CloudAutoSyncSession(
         hiddenAt = System.currentTimeMillis()
     }
 
+    enum class ManualSyncOutcome { SYNCED, LOCAL_ONLY }
+
+    /**
+     * Pull-to-refresh: force a full sync regardless of whether local data
+     * changed, so the user gets a positive "I'm looking at the latest data"
+     * signal. Reuses the session's auth resolution and single-flight mutex;
+     * errors propagate to the caller for display.
+     */
+    suspend fun manualSync(): ManualSyncOutcome {
+        if (!isEnabled()) return ManualSyncOutcome.LOCAL_ONLY
+        syncIfChanged(force = true)
+        return ManualSyncOutcome.SYNCED
+    }
+
     private suspend fun isEnabled(): Boolean =
         activeSharedSyncEnabled() || store.fileId() != null
 

@@ -25,6 +25,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,6 +49,10 @@ import java.util.Locale
 @Composable
 fun CalendarScreen(
     onOpenReconcile: () -> Unit = {},
+    /** Pull-to-refresh resync; null hides the gesture (e.g. previews). */
+    onManualSync: (
+        suspend () -> com.easybc.planner.sync.CloudAutoSyncSession.ManualSyncOutcome
+    )? = null,
     vm: CalendarViewModel = viewModel(),
 ) {
     val currentMonth by vm.currentMonth.collectAsState()
@@ -67,7 +73,17 @@ fun CalendarScreen(
         vm.resetToCurrentMonth()
     }
 
+    // Pull-to-refresh: parity with the web app's explicit sync affordance —
+    // a positive "I'm looking at the latest data" signal even though change
+    // detection also runs in the background.
+    val refreshScope = androidx.compose.runtime.rememberCoroutineScope()
+    var refreshing by androidx.compose.runtime.remember {
+        androidx.compose.runtime.mutableStateOf(false)
+    }
+    val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 // Month/year header with navigation
@@ -242,7 +258,31 @@ fun CalendarScreen(
             }
         },
     ) { padding ->
-        Column(modifier = Modifier.padding(padding)) {
+        androidx.compose.material3.pulltorefresh.PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = onRefresh@{
+                if (onManualSync == null || refreshing) return@onRefresh
+                refreshScope.launch {
+                    refreshing = true
+                    try {
+                        when (onManualSync()) {
+                            com.easybc.planner.sync.CloudAutoSyncSession.ManualSyncOutcome.SYNCED ->
+                                snackbarHostState.showSnackbar("Synced just now")
+                            com.easybc.planner.sync.CloudAutoSyncSession.ManualSyncOutcome.LOCAL_ONLY ->
+                                snackbarHostState.showSnackbar(
+                                    "This profile is local to this device — nothing to fetch",
+                                )
+                        }
+                    } catch (error: Exception) {
+                        snackbarHostState.showSnackbar(error.message ?: "Sync failed")
+                    } finally {
+                        refreshing = false
+                    }
+                }
+            },
+            modifier = Modifier.padding(padding),
+        ) {
+        Column {
             // Horizontal swipe to advance the calendar: left swipe = next
             // month/week, right swipe = previous. Only fires after a real
             // horizontal drag, so cell taps still pass through.
@@ -346,6 +386,7 @@ fun CalendarScreen(
                     )
                 },
             )
+        }
         }
     }
 }
