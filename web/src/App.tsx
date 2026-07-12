@@ -101,9 +101,11 @@ import {
   ensureProfileState,
   listPendingKeyResponses,
   loadSharedSyncState,
+  renameManagedProfile,
   sharedSyncConfigFromEnv,
   switchManagedProfile,
   syncActiveDataset,
+  updateManagedProfileAvatar,
 } from "./sync/sharedSync";
 import { profileKey } from "./sync/sharedFolderName";
 import {
@@ -111,7 +113,7 @@ import {
   type SwitcherProfileRow,
 } from "./components/ProfileChipSwitcher";
 import { updateProfileByKey } from "./sync/sharedRegistry";
-import { avatarDataUrl } from "./ui/avatarEncode";
+import { avatarDataUrl, encodeAvatarFromFile } from "./ui/avatarEncode";
 import { bindEasyBcSharingPoll } from "./sync/sharedSyncLifecycle";
 import {
   plannerConfiguredFromPayload,
@@ -124,11 +126,13 @@ import {
   type InFlightDay,
 } from "./tracker/realizedRisk";
 import {
+  EbAvatar,
   EbButton,
   EbGroupLabel,
   EbNavRow,
   EbPersonCard,
   EbProfileHeaderCard,
+  EbStepDots,
   EbThemeModeToggle,
   type EbProfileBadge,
 } from "./ui/Kit";
@@ -568,6 +572,7 @@ type SettingsView =
   | "risk"
   | "sharing"
   | "profiles"
+  | "setup"
   | "about";
 
 function optionLabel<T extends string>(options: ChoiceOption<T>[], value: T): string {
@@ -1075,6 +1080,52 @@ export default function App() {
   const [profileSwitchingKey, setProfileSwitchingKey] = useState<string | null>(null);
   const [profileSwitchNotice, setProfileSwitchNotice] = useState<string | null>(null);
   const [newProfileName, setNewProfileName] = useState("");
+  // Onboarding wizard (docs/settings-profiles-redesign.md §7): 5 skippable
+  // steps over the same live option setters the full sub-screens use.
+  const [setupStep, setSetupStep] = useState(0);
+  const [setupName, setSetupName] = useState("");
+  const setupAvatarInputRef = useRef<HTMLInputElement>(null);
+  // runPlan is defined further down (it needs the plan inputs); the wizard
+  // only calls it from event handlers, so a ref bridges the ordering.
+  const runPlanRef = useRef<(() => void) | null>(null);
+
+  const finishSetup = useCallback(
+    (destination: SettingsView = "hub") => {
+      runPlanRef.current?.();
+      setSetupStep(0);
+      setSettingsView(destination);
+    },
+    [],
+  );
+
+  const applySetupName = useCallback(async () => {
+    const name = setupName.trim();
+    if (!name || !sharedSyncState) return;
+    const active = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
+    if (!active || profileDisplayLabel(sharedSyncState, active) === name) return;
+    try {
+      setSharedSyncState(await renameManagedProfile(sharedSyncState.activeProfileKey, name));
+    } catch {
+      // Naming is cosmetic; never block setup on it.
+    }
+  }, [setupName, sharedSyncState]);
+
+  const applySetupAvatar = useCallback(
+    async (file: File | undefined) => {
+      if (!file || !sharedSyncState) return;
+      try {
+        const avatarWebp = await encodeAvatarFromFile(file);
+        setSharedSyncState(
+          await updateManagedProfileAvatar(sharedSyncState.activeProfileKey, avatarWebp),
+        );
+      } catch {
+        // Photos are optional; initials remain.
+      } finally {
+        if (setupAvatarInputRef.current) setupAvatarInputRef.current.value = "";
+      }
+    },
+    [sharedSyncState],
+  );
   const switcherProfiles = useMemo<SwitcherProfileRow[]>(() => {
     if (!sharedSyncState) return [];
     return sharedSyncState.profiles.map((record) => {
@@ -1505,6 +1556,7 @@ export default function App() {
     session.dayLogs,
     session.calendarDayLogs,
   ]);
+  runPlanRef.current = runPlan;
 
   const riskInputFingerprint = useMemo(
     () => JSON.stringify({
@@ -2179,6 +2231,17 @@ export default function App() {
                   {" "}All calculations run on this device.
                 </p>
               </div>
+              {!session.plannerConfigured && (
+                <EbButton
+                  variant="primary"
+                  onClick={() => {
+                    setSetupStep(0);
+                    setSettingsView("setup");
+                  }}
+                >
+                  Start setup — five quick steps, all skippable
+                </EbButton>
+              )}
               {sharedSyncState && (() => {
                 const active = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
                 if (!active) return null;
@@ -2807,6 +2870,211 @@ export default function App() {
             </section>
           )}
 
+          {tab === "settings" && settingsView === "setup" && (
+            <section className="settings-screen">
+              <div className="screen-heading">
+                <p className="eyebrow">Set up</p>
+                <h2>
+                  {
+                    [
+                      "Who is this profile for?",
+                      "Cycle basics",
+                      "Protection",
+                      "Risk & comfort",
+                      "Where should it live?",
+                    ][setupStep]
+                  }
+                </h2>
+              </div>
+              <EbStepDots count={5} active={setupStep} />
+              {setupStep === 0 && (
+                <fieldset className="settings-form settings-form-android">
+                  <p className="field-hint">
+                    Setting this up for your daughter? Use her name and age — every
+                    profile keeps its own settings, data, and sharing.
+                  </p>
+                  {sharedSyncState && (
+                    <div className="appearance-row">
+                      {(() => {
+                        const active = findProfile(
+                          sharedSyncState,
+                          sharedSyncState.activeProfileKey,
+                        );
+                        return (
+                          <EbAvatar
+                            name={
+                              setupName.trim() ||
+                              (active
+                                ? profileDisplayLabel(sharedSyncState, active)
+                                : "Me")
+                            }
+                            colorKey={sharedSyncState.activeProfileKey}
+                            photoUrl={
+                              active?.avatarWebp
+                                ? avatarDataUrl(active.avatarWebp)
+                                : undefined
+                            }
+                            size="lg"
+                          />
+                        );
+                      })()}
+                      <input
+                        ref={setupAvatarInputRef}
+                        type="file"
+                        accept="image/*"
+                        style={{ display: "none" }}
+                        onChange={(e) => void applySetupAvatar(e.target.files?.[0])}
+                      />
+                      <EbButton
+                        variant="outline"
+                        onClick={() => setupAvatarInputRef.current?.click()}
+                      >
+                        Add photo
+                      </EbButton>
+                    </div>
+                  )}
+                  <label>
+                    Name
+                    <input
+                      type="text"
+                      placeholder="Emma"
+                      value={setupName}
+                      onChange={(e) => setSetupName(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Age
+                    <input
+                      type="number"
+                      min={15}
+                      max={55}
+                      value={opts.ageYears}
+                      onChange={(e) =>
+                        setOpts((o) => ({ ...o, ageYears: Number(e.target.value) }))
+                      }
+                    />
+                  </label>
+                </fieldset>
+              )}
+              {setupStep === 1 && (
+                <fieldset className="settings-form settings-form-android">
+                  <label>
+                    Typical cycle length (days)
+                    <input
+                      type="number"
+                      min={20}
+                      max={45}
+                      value={opts.cycleLengthDays}
+                      onChange={(e) =>
+                        setOpts((o) => ({ ...o, cycleLengthDays: Number(e.target.value) }))
+                      }
+                    />
+                  </label>
+                  <p className="field-hint">
+                    A rough guess is fine — the plan recalibrates as you log periods.
+                  </p>
+                </fieldset>
+              )}
+              {setupStep === 2 && (
+                <fieldset className="settings-form settings-form-android">
+                  <ChoiceChipGroup
+                    label="Persistent / background method"
+                    description="An always-on method that reduces baseline risk for all days."
+                    value={opts.persistentMethod}
+                    options={PERSISTENT_METHOD_OPTIONS}
+                    onChange={(persistentMethod) =>
+                      setOpts((o) => ({ ...o, persistentMethod }))
+                    }
+                  />
+                  <ChoiceChipGroup
+                    label="Protected-day method"
+                    description="Used on days marked C. Controls what protected means in the plan."
+                    value={opts.protectedDayMethod}
+                    options={PROTECTED_METHOD_OPTIONS}
+                    onChange={(protectedDayMethod) =>
+                      setOpts((o) => ({ ...o, protectedDayMethod }))
+                    }
+                  />
+                </fieldset>
+              )}
+              {setupStep === 3 && (
+                <fieldset className="settings-form settings-form-android">
+                  <label>
+                    Planning horizon (years)
+                    <input
+                      type="number"
+                      min={1}
+                      max={15}
+                      value={opts.horizonYears}
+                      onChange={(e) =>
+                        setOpts((o) => ({ ...o, horizonYears: Number(e.target.value) }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    Cumulative risk target
+                    <input
+                      type="number"
+                      step={0.005}
+                      min={0}
+                      max={0.5}
+                      value={opts.targetCumulativeFailure}
+                      onChange={(e) =>
+                        setOpts((o) => ({
+                          ...o,
+                          targetCumulativeFailure: Number(e.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <p className="field-hint">
+                    If 100 couples followed this plan for {opts.horizonYears}{" "}
+                    {opts.horizonYears === 1 ? "year" : "years"}, about{" "}
+                    {Math.round(opts.targetCumulativeFailure * 100)} would expect a
+                    pregnancy. You can tune everything else later in Risk &amp; comfort.
+                  </p>
+                </fieldset>
+              )}
+              {setupStep === 4 && (
+                <fieldset className="settings-form settings-form-android">
+                  <p className="field-hint">
+                    Your data stays on this device unless you choose otherwise. You can
+                    turn on private encrypted cloud sync — or share selected sections
+                    with someone — any time in Storage &amp; sharing. A failed cloud
+                    setup always leaves the profile safely local, never lost.
+                  </p>
+                </fieldset>
+              )}
+              {setupStep < 4 ? (
+                <EbButton
+                  variant="primary"
+                  onClick={() => {
+                    if (setupStep === 0) void applySetupName();
+                    setSetupStep(setupStep + 1);
+                  }}
+                >
+                  Continue
+                </EbButton>
+              ) : (
+                <>
+                  <EbButton variant="primary" onClick={() => finishSetup("hub")}>
+                    Finish — keep it on this device
+                  </EbButton>
+                  <EbButton variant="outline" onClick={() => finishSetup("sharing")}>
+                    Finish &amp; open Storage &amp; sharing
+                  </EbButton>
+                </>
+              )}
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => finishSetup("hub")}
+              >
+                Use defaults &amp; skip setup
+              </button>
+            </section>
+          )}
+
           {tab === "settings" && settingsView === "about" && (
             <section className="settings-screen">
               <button
@@ -2816,6 +3084,15 @@ export default function App() {
               >
                 ← Settings
               </button>
+              <EbNavRow
+                icon={<Settings />}
+                title="Re-run setup walkthrough"
+                value="Five quick steps — name, cycle, protection, risk, storage"
+                onClick={() => {
+                  setSetupStep(0);
+                  setSettingsView("setup");
+                }}
+              />
               <section className="settings-platform-card">
                 <h3>About EasyBC</h3>
                 <p className="hint">

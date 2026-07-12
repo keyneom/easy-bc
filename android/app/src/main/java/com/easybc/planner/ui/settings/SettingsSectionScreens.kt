@@ -364,7 +364,7 @@ fun BackupScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
 /* ---------- About ---------- */
 
 @Composable
-fun AboutScreen(onBack: () -> Unit) {
+fun AboutScreen(onBack: () -> Unit, onOpenSetup: () -> Unit = {}) {
     SettingsSubScreen("About EasyBC", onBack) {
         Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(8.dp))
@@ -377,5 +377,241 @@ fun AboutScreen(onBack: () -> Unit) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(onClick = onOpenSetup, modifier = Modifier.fillMaxWidth()) {
+            Text("Re-run setup walkthrough")
+        }
+    }
+}
+
+/* ---------- Onboarding wizard (docs/settings-profiles-redesign.md §7) ---------- */
+
+/**
+ * Five short steps, all skippable (mockup phone 3): who + avatar, cycle
+ * basics, protection, risk comfort, and where the data lives. Every step
+ * writes through the same draft the full sub-screens edit; finishing (or
+ * skipping) saves the draft, which marks onboarding complete. A profile is
+ * always safely local until the user chooses otherwise in Storage & sharing.
+ */
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
+@Composable
+fun OnboardingWizardScreen(
+    onDone: () -> Unit,
+    /** Step 5's "set up cloud or sharing" door. */
+    onOpenStorage: () -> Unit,
+    vm: SettingsViewModel = viewModel(),
+) {
+    val draft by vm.draft.collectAsState()
+    val sharedState by vm.sharedSyncState.collectAsState()
+    var step by remember { mutableStateOf(0) }
+    var name by remember { mutableStateOf("") }
+    val avatarLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> uri?.let(vm::updateActiveProfileAvatar) }
+
+    fun applyName() {
+        val trimmed = name.trim()
+        val state = sharedState ?: return
+        if (trimmed.isEmpty()) return
+        vm.renameProfile(state.activeProfileKey, trimmed)
+    }
+
+    fun finish(openStorage: Boolean) {
+        vm.save()
+        if (openStorage) onOpenStorage() else onDone()
+    }
+
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("Set up") }) },
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            com.easybc.planner.ui.kit.EbStepDots(
+                count = 5,
+                active = step,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                listOf(
+                    "Who is this profile for?",
+                    "Cycle basics",
+                    "Protection",
+                    "Risk & comfort",
+                    "Where should it live?",
+                )[step],
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            when (step) {
+                0 -> {
+                    Text(
+                        "Setting this up for your daughter? Use her name and age — every " +
+                            "profile keeps its own settings, data, and sharing.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    val state = sharedState
+                    val active = state?.let { findActive ->
+                        findActive.profiles.firstOrNull {
+                            com.easybc.planner.sync.shared.profileKey(it.ownerEmail, it.datasetId) ==
+                                findActive.activeProfileKey
+                        }
+                    }
+                    Row(
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        com.easybc.planner.ui.kit.EbAvatar(
+                            name = name.trim().ifEmpty {
+                                active?.let { profile ->
+                                    com.easybc.planner.sync.shared.profileDisplayLabel(state!!, profile)
+                                } ?: "Me"
+                            },
+                            colorKey = state?.activeProfileKey ?: "me",
+                            size = 52.dp,
+                            photoBase64 = active?.avatarWebp,
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                avatarLauncher.launch(
+                                    androidx.activity.result.PickVisualMediaRequest(
+                                        androidx.activity.result.contract
+                                            .ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            },
+                        ) { Text("Add photo") }
+                    }
+                    androidx.compose.material3.OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Name") },
+                        placeholder = { Text("Emma") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                    )
+                    IntField("Age", draft.ageYears, 15..55) { v ->
+                        vm.updateDraft { d -> d.copy(ageYears = v) }
+                    }
+                }
+                1 -> {
+                    IntField("Typical cycle length (days)", draft.cycleLengthDays, 21..45) { v ->
+                        vm.updateDraft { d -> d.copy(cycleLengthDays = v) }
+                    }
+                    Text(
+                        "A rough guess is fine — the plan recalibrates as you log periods.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                2 -> {
+                    Text("Persistent / background method", style = MaterialTheme.typography.labelLarge)
+                    val currentPersistent = try {
+                        PersistentMethod.entries.first {
+                            it.name.equals(draft.persistentMethod, ignoreCase = true)
+                        }
+                    } catch (_: Exception) {
+                        PersistentMethod.None
+                    }
+                    androidx.compose.foundation.layout.FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        PersistentMethod.entries.forEach { method ->
+                            FilterChip(
+                                selected = currentPersistent == method,
+                                onClick = {
+                                    vm.updateDraft { d ->
+                                        d.copy(persistentMethod = method.name.lowercase())
+                                    }
+                                },
+                                label = { Text(method.label, style = MaterialTheme.typography.labelSmall) },
+                            )
+                        }
+                    }
+                    Text("Protected-day method", style = MaterialTheme.typography.labelLarge)
+                    val currentProtected = try {
+                        ProtectedDayMethod.entries.first {
+                            it.name.equals(draft.protectedDayMethod, ignoreCase = true)
+                        }
+                    } catch (_: Exception) {
+                        ProtectedDayMethod.ExternalCondom
+                    }
+                    androidx.compose.foundation.layout.FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        ProtectedDayMethod.entries.forEach { method ->
+                            FilterChip(
+                                selected = currentProtected == method,
+                                onClick = {
+                                    vm.updateDraft { d ->
+                                        d.copy(protectedDayMethod = method.name.lowercase())
+                                    }
+                                },
+                                label = { Text(method.label, style = MaterialTheme.typography.labelSmall) },
+                            )
+                        }
+                    }
+                }
+                3 -> {
+                    SliderField(
+                        label = "Cumulative failure target",
+                        value = draft.targetCumulativeFailure,
+                        range = 0.005f..0.5f,
+                        format = { "%.1f%%".format(it * 100) },
+                        onValueChange = { v ->
+                            vm.updateDraft { d -> d.copy(targetCumulativeFailure = v.toDouble()) }
+                        },
+                    )
+                    Text(
+                        "If 100 couples followed this plan for ${draft.horizonYears} years, about " +
+                            "${"%.0f".format(draft.targetCumulativeFailure * 100)} would expect a " +
+                            "pregnancy. Everything else can be tuned later in Risk & comfort.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                else -> {
+                    Text(
+                        "Your data stays on this phone unless you choose otherwise. You can " +
+                            "turn on private encrypted cloud sync — or share selected sections " +
+                            "with someone — any time in Storage & sharing. A failed cloud setup " +
+                            "always leaves the profile safely local, never lost.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            if (step < 4) {
+                androidx.compose.material3.Button(
+                    onClick = {
+                        if (step == 0) applyName()
+                        step += 1
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Continue") }
+            } else {
+                androidx.compose.material3.Button(
+                    onClick = { finish(openStorage = false) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Finish — keep it on this phone") }
+                OutlinedButton(
+                    onClick = { finish(openStorage = true) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Finish & open Storage & sharing") }
+            }
+            androidx.compose.material3.TextButton(
+                onClick = { finish(openStorage = false) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Use defaults & skip setup") }
+        }
     }
 }

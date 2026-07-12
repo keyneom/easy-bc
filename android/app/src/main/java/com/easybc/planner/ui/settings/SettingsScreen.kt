@@ -165,7 +165,9 @@ fun SettingsScreen(
                             style = MaterialTheme.typography.bodyMedium,
                         )
                         Spacer(Modifier.height(10.dp))
-                        Button(onClick = { onOpen("settings/basics") }) { Text("Set up your plan") }
+                        Button(onClick = { onOpen("onboarding") }) {
+                            Text("Start setup — five quick steps")
+                        }
                     }
                 }
                 Spacer(Modifier.height(10.dp))

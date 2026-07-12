@@ -172,6 +172,15 @@ fun AppNavigation(
             composable("settings/storage") {
                 StorageSharingScreen(onBack = { navController.popBackStack() })
             }
+            composable("onboarding") {
+                com.easybc.planner.ui.settings.OnboardingWizardScreen(
+                    onDone = { navController.popBackStack() },
+                    onOpenStorage = {
+                        navController.popBackStack()
+                        navController.navigate("settings/storage") { launchSingleTop = true }
+                    },
+                )
+            }
             composable("settings/profiles") {
                 com.easybc.planner.ui.settings.ManageProfilesScreen(
                     onBack = { navController.popBackStack() },
@@ -190,7 +199,12 @@ fun AppNavigation(
                 BackupScreen(onBack = { navController.popBackStack() })
             }
             composable("settings/about") {
-                AboutScreen(onBack = { navController.popBackStack() })
+                AboutScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenSetup = {
+                        navController.navigate("onboarding") { launchSingleTop = true }
+                    },
+                )
             }
             // "reconcile" isn't a bottom-nav destination — it's a full-screen
             // child pushed from the Calendar screen's chip.
