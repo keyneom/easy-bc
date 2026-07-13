@@ -111,6 +111,7 @@ import {
   switchManagedProfile,
   syncActiveDataset,
   updateManagedProfileAvatar,
+  disposeRuntime,
 } from "./sync/sharedSync";
 import { profileKey } from "./sync/sharedFolderName";
 import {
@@ -130,6 +131,13 @@ import {
   type EcEffectFn,
   type InFlightDay,
 } from "./tracker/realizedRisk";
+import {
+  chooseWebStorageMode,
+  eraseEasyBcBrowserData,
+  noteSensitiveWebSession,
+  webStorageMode,
+  type WebStorageMode,
+} from "./privacy/webPrivacy";
 import {
   EbAvatar,
   EbButton,
@@ -887,6 +895,11 @@ export default function App() {
   const [calendarDensity, setCalendarDensity] = useState<CalendarDensity>("comfortable");
   const [planRegenerationPending, setPlanRegenerationPending] = useState(false);
   const [sharedSyncState, setSharedSyncState] = useState<SharedSyncState | null>(null);
+  const [privacyPromptOpen, setPrivacyPromptOpen] = useState(false);
+  const [storageMode, setStorageMode] = useState<WebStorageMode | null>(() =>
+    typeof window === "undefined" ? null : webStorageMode(),
+  );
+  const [privacyEraseBusy, setPrivacyEraseBusy] = useState(false);
   const [autoSyncNotice, setAutoSyncNotice] = useState<{
     kind: "info" | "success" | "error";
     message: string;
@@ -898,6 +911,32 @@ export default function App() {
     const profile = findProfile(sharedSyncState, sharedSyncState.activeProfileKey);
     return profile ? profile.needsInitialLoad === true || !canPublishRole(profile.role) : false;
   }, [sharedSyncState]);
+
+  useEffect(() => {
+    if (!sharedSyncState?.profiles.some(isEncryptedProfile)) return;
+    noteSensitiveWebSession();
+    const mode = webStorageMode();
+    setStorageMode(mode);
+    if (!mode) setPrivacyPromptOpen(true);
+  }, [sharedSyncState]);
+
+  const selectStorageMode = (mode: WebStorageMode) => {
+    chooseWebStorageMode(mode);
+    setStorageMode(mode);
+    setPrivacyPromptOpen(false);
+  };
+
+  const endPrivateBrowserSession = async () => {
+    setPrivacyEraseBusy(true);
+    disposeRuntime();
+    try {
+      await eraseEasyBcBrowserData({ preserveMode: true });
+      window.location.replace(`${window.location.origin}${window.location.pathname}`);
+    } catch (error) {
+      setPrivacyEraseBusy(false);
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
+  };
   // Split shared profiles: which dataset parts this device was NOT granted,
   // and which granted parts are read-only. Drives the partial-access banner
   // and the day-panel editing gates.
@@ -2316,6 +2355,37 @@ export default function App() {
                   />
                 </>
               )}
+              <EbGroupLabel>Privacy on this browser</EbGroupLabel>
+              <div className="card privacy-session-card">
+                <div>
+                  <strong>
+                    {storageMode === "trusted" ? "Trusted browser" : "Temporary session"}
+                  </strong>
+                  <p className="hint compact">
+                    Synced Drive data is decrypted for use here. Anyone who can open this browser
+                    profile may be able to see data retained on it.
+                  </p>
+                </div>
+                <div className="row">
+                  {storageMode === "trusted" ? (
+                    <button type="button" className="ghost" onClick={() => selectStorageMode("temporary")}>
+                      Use temporary sessions
+                    </button>
+                  ) : (
+                    <button type="button" className="ghost" onClick={() => selectStorageMode("trusted")}>
+                      Trust this browser
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="ghost danger"
+                    disabled={privacyEraseBusy}
+                    onClick={() => void endPrivateBrowserSession()}
+                  >
+                    {privacyEraseBusy ? "Erasing…" : "End session & erase this browser"}
+                  </button>
+                </div>
+              </div>
               <EbGroupLabel>About</EbGroupLabel>
               <EbNavRow
                 icon={<Info />}
@@ -3482,6 +3552,40 @@ export default function App() {
         </>
       )}
       </main>
+      {privacyPromptOpen && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="privacy-session-title"
+        >
+          <div className="modal privacy-session-modal">
+            <ShieldCheck aria-hidden />
+            <h2 id="privacy-session-title">Keep decrypted data on this browser?</h2>
+            <p>
+              EasyBC encrypts data in Google Drive, but data you open is stored locally so the app
+              can work. Anyone with access to this browser profile could see that retained data.
+            </p>
+            <div className="privacy-choice-grid">
+              <button type="button" onClick={() => selectStorageMode("temporary")}>
+                Temporary session
+                <span>
+                  Erase EasyBC data, cached Google access, and local identity material when this
+                  session ends. Local-only profiles will also be erased.
+                </span>
+              </button>
+              <button type="button" className="ghost" onClick={() => selectStorageMode("trusted")}>
+                Trust this browser
+                <span>Keep profiles available here for future visits.</span>
+              </button>
+            </div>
+            <p className="hint compact">
+              Browser close cleanup is best effort; EasyBC always completes any unfinished
+              temporary cleanup before reading data on the next launch.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

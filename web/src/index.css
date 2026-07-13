@@ -2130,6 +2130,34 @@ section:not(.tracker-shell):not(.settings-screen) > h2 {
   flex: 1;
 }
 
+.privacy-session-card {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.privacy-session-modal > svg {
+  color: var(--primary);
+}
+
+.privacy-choice-grid {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.privacy-choice-grid button {
+  display: grid;
+  gap: 0.35rem;
+  justify-items: start;
+  text-align: left;
+}
+
+.privacy-choice-grid button span {
+  font-size: 0.85rem;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
 button.ghost {
   display: inline-flex;
   align-items: center;

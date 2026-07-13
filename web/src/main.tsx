@@ -9,6 +9,10 @@ import "./ui/kit.css";
 import { initThemeMode } from "./ui/theme";
 import { UiKitGallery } from "./ui/UiKitGallery";
 import { GrantAccessScreen } from "./ui/GrantAccessScreen";
+import {
+  installTemporarySessionExitCleanup,
+  prepareWebPrivacySession,
+} from "./privacy/webPrivacy";
 
 initThemeMode();
 
@@ -18,8 +22,14 @@ const showUiKit = search.has("uikit");
 // instead of the full app shell (see docs/join-flow.md).
 const showGrant = search.get("grant-files") === "1" || search.get("grant-folder") === "1";
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    {showUiKit ? <UiKitGallery /> : showGrant ? <GrantAccessScreen /> : <App />}
-  </StrictMode>
-);
+async function start() {
+  await prepareWebPrivacySession();
+  installTemporarySessionExitCleanup();
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      {showUiKit ? <UiKitGallery /> : showGrant ? <GrantAccessScreen /> : <App />}
+    </StrictMode>,
+  );
+}
+
+void start();
