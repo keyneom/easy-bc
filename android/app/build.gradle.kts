@@ -24,8 +24,8 @@ android {
         applicationId = "com.easybc.planner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 62
-        versionName = "0.1.61"
+        versionCode = 63
+        versionName = "0.1.62"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
