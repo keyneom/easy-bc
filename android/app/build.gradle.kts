@@ -1,6 +1,5 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
@@ -19,7 +18,7 @@ val releaseSigningEnabled = listOf(
 
 android {
     namespace = "com.easybc.planner"
-    compileSdk = 35
+    compileSdk = 37
     ndkVersion = "27.3.13750724"
     defaultConfig {
         applicationId = "com.easybc.planner"
@@ -54,9 +53,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
     }
     buildFeatures {
         buildConfig = true
