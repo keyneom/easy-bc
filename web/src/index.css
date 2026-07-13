@@ -1108,6 +1108,27 @@ h3 {
   margin: 0.75rem 0 0;
 }
 
+.developer-log-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.developer-log-panel pre {
+  max-height: 18rem;
+  margin: 0.75rem 0 0;
+  padding: 0.75rem;
+  overflow: auto;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .sync-card {
   margin-bottom: 1rem;
   padding: 1.1rem;

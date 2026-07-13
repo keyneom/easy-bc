@@ -72,6 +72,7 @@ import { DayDetailPanel, type MethodRiskRow } from "./components/DayDetailPanel"
 import { MonthCalendar, todayIsoLocal, type CalendarDensity } from "./components/MonthCalendar";
 import { SyncSettings } from "./components/SyncSettings";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { DeveloperLogPanel } from "./components/DeveloperLogPanel";
 import {
   AutoSyncTriggerState,
   type AutoSyncReason,
@@ -3115,6 +3116,7 @@ export default function App() {
                   </a>
                 </p>
               </section>
+              <DeveloperLogPanel />
             </section>
           )}
 

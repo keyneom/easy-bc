@@ -33,13 +33,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.easybc.planner.BuildConfig
 import com.easybc.planner.data.PersistentMethod
 import com.easybc.planner.data.ProtectedDayMethod
 import com.easybc.planner.data.WithdrawalMode
+import com.easybc.planner.diagnostics.DeveloperLog
 import com.easybc.planner.ui.kit.EbExpanderRow
 
 /*
@@ -365,6 +369,11 @@ fun BackupScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
 
 @Composable
 fun AboutScreen(onBack: () -> Unit, onOpenSetup: () -> Unit = {}) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val developerLog = remember { DeveloperLog(context.applicationContext) }
+    var logEntries by remember { mutableStateOf(developerLog.entries()) }
+    var diagnosticsExpanded by remember { mutableStateOf(false) }
     SettingsSubScreen("About EasyBC", onBack) {
         Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(8.dp))
@@ -380,6 +389,44 @@ fun AboutScreen(onBack: () -> Unit, onOpenSetup: () -> Unit = {}) {
         Spacer(Modifier.height(12.dp))
         OutlinedButton(onClick = onOpenSetup, modifier = Modifier.fillMaxWidth()) {
             Text("Re-run setup walkthrough")
+        }
+        Spacer(Modifier.height(12.dp))
+        EbExpanderRow(
+            label = "Developer diagnostics (${logEntries.size})",
+            expanded = diagnosticsExpanded,
+            onToggle = { diagnosticsExpanded = !diagnosticsExpanded },
+        ) {
+            Text(
+                "Redacted sync and migration decisions stored only on this device. " +
+                    "The log excludes access tokens, private keys, and decrypted profile data.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(
+                onClick = {
+                    clipboard.setText(AnnotatedString(developerLog.formatted(logEntries)))
+                    Toast.makeText(context, "Diagnostic log copied", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Copy diagnostic log")
+            }
+            OutlinedButton(
+                onClick = {
+                    developerLog.clear()
+                    logEntries = emptyList()
+                    Toast.makeText(context, "Diagnostic log cleared", Toast.LENGTH_SHORT).show()
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Clear diagnostic log")
+            }
+            Text(
+                developerLog.formatted(logEntries),
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
