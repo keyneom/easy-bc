@@ -2135,6 +2135,61 @@ section:not(.tracker-shell):not(.settings-screen) > h2 {
   gap: 0.9rem;
 }
 
+.profile-check-setting {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.7rem;
+  align-items: start;
+}
+
+.profile-check-setting > span {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.profile-check-setting small {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.privacy-session-warning {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 0.75rem auto;
+  padding: 0.8rem 1rem;
+  width: min(calc(100% - 2rem), 960px);
+  border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--error) 8%, var(--surface));
+}
+
+.privacy-session-warning > svg {
+  color: var(--error);
+}
+
+.privacy-session-warning div {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.privacy-session-warning span {
+  font-size: 0.84rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 680px) {
+  .privacy-session-warning {
+    grid-template-columns: auto 1fr;
+  }
+
+  .privacy-session-warning button {
+    grid-column: 1 / -1;
+  }
+}
+
 .privacy-session-modal > svg {
   color: var(--primary);
 }

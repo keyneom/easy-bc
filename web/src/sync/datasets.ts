@@ -153,6 +153,7 @@ export type DiscoveredProfileDatasetGroup = {
  */
 export function discoverProfileDatasetGroups(
   files: ReadonlyArray<{ datasetId: string; fileId: string }>,
+  options: { requirePlan?: boolean } = {},
 ): DiscoveredProfileDatasetGroup[] {
   const byBase = new Map<string, DiscoveredProfileDatasetGroup>();
   for (const file of files) {
@@ -179,7 +180,9 @@ export function discoverProfileDatasetGroups(
 
   const latestByRoot = new Map<string, DiscoveredProfileDatasetGroup>();
   for (const group of byBase.values()) {
-    if (!group.planFileId) continue;
+    const hasDataFile =
+      Boolean(group.planFileId) || Object.keys(group.companionFileIds).length > 0;
+    if (!hasDataFile || (options.requirePlan !== false && !group.planFileId)) continue;
     const root = splitBaseRoot(group.baseDatasetId);
     const current = latestByRoot.get(root);
     if (!current || splitGeneration(group.baseDatasetId) > splitGeneration(current.baseDatasetId)) {

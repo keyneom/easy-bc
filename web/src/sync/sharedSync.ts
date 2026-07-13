@@ -39,20 +39,25 @@ import {
   type SharingControlStateV1,
 } from "@keyneom/sync-kit/sharing/control";
 import { GoogleDriveSharedBackupTransport } from "@keyneom/sync-kit/stores/google-drive/sharing";
+import {
+  GoogleDriveFileStore,
+  listAccessibleSyncKitAppFolders,
+} from "@keyneom/sync-kit/stores/google-drive";
 import { idbDelete, idbGet, idbSet, KV_SHARING_SYNC_CHECKPOINT } from "../idbStore";
 import { appendDeveloperLog } from "../diagnostics/developerLog";
 import {
   createLegacyControlRepairCodec,
   repairLegacyControlSignature,
 } from "./controlSignatureRepair";
-import { pickSharedDatasetFiles } from "./sharedPicker";
+import { pickSharedAppFolder, pickSharedDatasetFiles } from "./sharedPicker";
 import { easyBcSharedCodec } from "./sharedCodec";
 import { createSharingIdentityProvider } from "./sharedIdentity";
 import { easyBcSyncFolderName, profileKey } from "./sharedFolderName";
 import {
-  findOwnedPrimaryProfile,
+  findOwnedStorageProfile,
   isOwnedProfile,
-  uniqueOwnedDatasetId,
+  newOwnedDatasetId,
+  profileDisplayLabel,
 } from "./profileLabels";
 import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
 import {
@@ -125,6 +130,13 @@ type Runtime = {
 };
 
 let runtime: Runtime | null = null;
+let profileDiscoverySession: {
+  clientId: string;
+  rpId: string;
+  accountEmail?: string;
+  providers: ReturnType<typeof createProviders>;
+  identityProvider: ReturnType<typeof createSharingIdentityProvider>;
+} | null = null;
 let cachedState: SharedSyncState | null = null;
 let operationQueue: Promise<unknown> = Promise.resolve();
 let activeOperationCount = 0;
@@ -429,6 +441,334 @@ async function recoverAdditionalOwnedProfiles(
   return state;
 }
 
+type DiscoveryFolder = {
+  appFolderId: string;
+  name: string;
+};
+
+type DiscoveredDatasetAccess = {
+  datasetId: string;
+  fileId: string;
+  ownerEmail: string;
+  participant: SharedBackupParticipantV1;
+  trustedOwnerKeyId: string;
+};
+
+export type ProfileDiscoveryResult = {
+  state: SharedSyncState;
+  discoveredProfileKeys: string[];
+  scannedFolderCount: number;
+  skippedFolderCount: number;
+};
+
+/**
+ * Rebuild the local profile registry from every EasyBC app folder and dataset
+ * file this OAuth client can currently access. A recipient profile is accepted
+ * only when the encrypted envelope contains this passkey identity and names a
+ * single owner key; Drive metadata supplies the owner's account email used for
+ * the stable cross-device profile key.
+ *
+ * `pickSharedFolder` is the explicit drive.file recovery path for a share that
+ * has never been opened by this Web OAuth client. Google requires the user to
+ * select both the folder and its dataset files; selecting a folder alone does
+ * not grant access to its children.
+ */
+export async function discoverAvailableProfiles(
+  config: SharedSyncConfig,
+  options: { pickSharedFolder?: boolean } = {},
+): Promise<ProfileDiscoveryResult> {
+  return serialized(async () => {
+    disposeRuntime();
+    const previous = await getCachedState();
+    if (!previous) throw new Error("No local profile registry is available.");
+
+    const bootstrapProfileId = "__easybc-profile-discovery__";
+    if (
+      profileDiscoverySession &&
+      (profileDiscoverySession.clientId !== config.clientId ||
+        profileDiscoverySession.rpId !== config.rpId)
+    ) {
+      profileDiscoverySession.identityProvider.clear();
+      profileDiscoverySession = null;
+    }
+    if (!profileDiscoverySession) {
+      const providers = createProviders(config, bootstrapProfileId);
+      profileDiscoverySession = {
+        clientId: config.clientId,
+        rpId: config.rpId,
+        providers,
+        identityProvider: createSharingIdentityProvider(config.rpId, () =>
+          providers.authorizationProvider.authorize(),
+        ),
+      };
+    }
+    const bootstrap = profileDiscoverySession.providers;
+    const authorization = await authorizeAndRemember(
+      bootstrap.authorizationProvider,
+      bootstrapProfileId,
+    );
+    const selfEmail = await fetchGoogleAccountEmail(authorization.accessToken);
+    if (
+      profileDiscoverySession.accountEmail &&
+      profileDiscoverySession.accountEmail.toLowerCase() !== selfEmail.toLowerCase()
+    ) {
+      profileDiscoverySession.identityProvider.clear();
+      profileDiscoverySession.identityProvider = createSharingIdentityProvider(config.rpId, () =>
+        bootstrap.authorizationProvider.authorize(),
+      );
+    }
+    profileDiscoverySession.accountEmail = selfEmail;
+    const identityProvider = profileDiscoverySession.identityProvider;
+    const identity = await identityProvider.getOrCreate();
+    const drive = new GoogleDriveFileStore();
+    const accessible = await listAccessibleSyncKitAppFolders({
+      appId: EASY_BC_APP_ID,
+      authorization,
+      drive,
+    });
+    const folders = new Map<string, DiscoveryFolder>(
+      accessible.map((folder) => [folder.appFolderId, folder]),
+    );
+
+    if (options.pickSharedFolder) {
+      const pickedFolder = await pickSharedAppFolder(authorization);
+      if (pickedFolder) {
+        // This is intentionally a separate Picker. A Drive folder selection
+        // never grants drive.file access to the files already inside it.
+        await pickSharedDatasetFiles(authorization);
+        folders.set(pickedFolder.folderId, {
+          appFolderId: pickedFolder.folderId,
+          name: pickedFolder.name?.trim() || "Shared EasyBC profile",
+        });
+      }
+    }
+
+    let state: SharedSyncState = { ...previous, ownerEmail: selfEmail };
+    cachedState = state;
+    await saveSharedSyncState(state);
+    const discoveredProfileKeys: string[] = [];
+    let skippedFolderCount = 0;
+
+    for (const folder of folders.values()) {
+      const transport = new GoogleDriveSharedBackupTransport({
+        appId: EASY_BC_APP_ID,
+        authorizationProvider: bootstrap.authorizationProvider,
+        folderName: folder.name,
+        selectedAppFolderId: folder.appFolderId,
+      });
+      let listed: Awaited<ReturnType<typeof transport.listDatasets>>;
+      try {
+        listed = await transport.listDatasets();
+      } catch (error) {
+        skippedFolderCount += 1;
+        await appendDeveloperLog("profile-discovery", "folder-list-skipped", {
+          appFolderId: folder.appFolderId,
+          error: error instanceof Error ? error.message : String(error),
+        }).catch(() => undefined);
+        continue;
+      }
+
+      const accessibleDatasets: DiscoveredDatasetAccess[] = [];
+      for (const listedDataset of listed) {
+        try {
+          const stored = await transport.readDataset(listedDataset.fileId);
+          const participants = sharedBackupParticipants(stored.envelope);
+          const participant = participants.find(
+            (entry) => entry.keyId === identity.publicKey.keyId,
+          );
+          const owners = participants.filter((entry) => entry.role === "owner");
+          if (!participant || owners.length !== 1) continue;
+          const metadata = await drive.get(listedDataset.fileId, authorization);
+          const ownerEmail = metadata.owners?.[0]?.emailAddress?.trim();
+          if (!ownerEmail) continue;
+          accessibleDatasets.push({
+            datasetId: stored.datasetId,
+            fileId: stored.fileId,
+            ownerEmail,
+            participant,
+            trustedOwnerKeyId: owners[0].keyId,
+          });
+        } catch (error) {
+          await appendDeveloperLog("profile-discovery", "dataset-skipped", {
+            appFolderId: folder.appFolderId,
+            datasetId: listedDataset.datasetId,
+            error: error instanceof Error ? error.message : String(error),
+          }).catch(() => undefined);
+        }
+      }
+
+      const groups = discoverProfileDatasetGroups(accessibleDatasets, {
+        requirePlan: false,
+      });
+      for (const group of groups) {
+        const groupDatasetIds = new Set<string>([
+          ...(group.planFileId ? [group.baseDatasetId] : []),
+          ...Object.keys(group.companionFileIds).map((part) =>
+            datasetIdForPart(group.baseDatasetId, part as DatasetPart),
+          ),
+          ...(group.controlDatasetId ? [group.controlDatasetId] : []),
+        ]);
+        const groupAccess = accessibleDatasets.filter((entry) =>
+          groupDatasetIds.has(entry.datasetId),
+        );
+        const dataAccess = groupAccess.filter(
+          (entry) => !entry.datasetId.endsWith(CONTROL_DATASET_SUFFIX),
+        );
+        const first = dataAccess[0];
+        if (!first) continue;
+        if (
+          groupAccess.some(
+            (entry) =>
+              entry.ownerEmail.toLowerCase() !== first.ownerEmail.toLowerCase() ||
+              entry.trustedOwnerKeyId !== first.trustedOwnerKeyId,
+          )
+        ) {
+          await appendDeveloperLog("profile-discovery", "profile-group-skipped", {
+            appFolderId: folder.appFolderId,
+            datasetId: group.baseDatasetId,
+            error: "Dataset files disagreed about the owner identity.",
+          }).catch(() => undefined);
+          continue;
+        }
+
+        const key = profileKey(first.ownerEmail, group.baseDatasetId);
+        const existing = findProfile(state, key);
+        if (existing && existing.trustedOwnerKeyId !== first.trustedOwnerKeyId) {
+          await appendDeveloperLog("profile-discovery", "profile-group-skipped", {
+            appFolderId: folder.appFolderId,
+            datasetId: group.baseDatasetId,
+            error: "The discovered owner key did not match the trusted profile owner.",
+          }).catch(() => undefined);
+          continue;
+        }
+
+        const observedGrants: DatasetGrants = {};
+        for (const access of dataAccess) {
+          const part = partForDatasetId(group.baseDatasetId, access.datasetId);
+          if (part) observedGrants[part] = access.participant.role;
+        }
+        const split = Object.keys(group.companionFileIds).length > 0;
+        const datasetGrants = split || existing?.datasetGrants
+          ? { ...(existing?.datasetGrants ?? {}), ...observedGrants }
+          : undefined;
+        const role = datasetGrants
+          ? highestGrantedRole(datasetGrants)
+          : first.participant.role;
+        const datasetRecords: NonNullable<ProfileRecord["datasetRecords"]> = {
+          ...(existing?.datasetRecords ?? {}),
+        };
+        for (const [part, fileId] of Object.entries(group.companionFileIds)) {
+          datasetRecords[datasetIdForPart(group.baseDatasetId, part as DatasetPart)] = {
+            ...(datasetRecords[datasetIdForPart(group.baseDatasetId, part as DatasetPart)] ?? {}),
+            fileId,
+          };
+        }
+        if (group.controlFileId) {
+          datasetRecords[group.controlDatasetId ?? controlDatasetIdFor(group.baseDatasetId)] = {
+            ...(datasetRecords[
+              group.controlDatasetId ?? controlDatasetIdFor(group.baseDatasetId)
+            ] ?? {}),
+            fileId: group.controlFileId,
+          };
+        }
+        const profile: ProfileRecord = {
+          ...existing,
+          datasetId: group.baseDatasetId,
+          ownerEmail: first.ownerEmail,
+          folderName: folder.name,
+          appFolderId: folder.appFolderId,
+          role,
+          trustedOwnerKeyId: first.trustedOwnerKeyId,
+          ...(group.planFileId ? { fileId: group.planFileId } : {}),
+          ...(group.controlFileId
+            ? {
+                controlDatasetId:
+                  group.controlDatasetId ?? controlDatasetIdFor(group.baseDatasetId),
+                controlEnrollment: "enrolled" as const,
+              }
+            : {}),
+          ...(datasetGrants ? { datasetGrants } : {}),
+          ...(Object.keys(datasetRecords).length > 0 ? { datasetRecords } : {}),
+          syncMode: "encrypted",
+          needsInitialLoad: existing?.needsInitialLoad ?? true,
+        };
+        const beforeProfile = existing;
+        state = upsertProfile(state, profile);
+        cachedState = state;
+        await saveSharedSyncState(state);
+        await sharedAuthCache.save({
+          profileId: key,
+          accessToken: authorization.accessToken,
+          expiresAt: authorization.expiresAt ?? Date.now() + 3_600_000,
+        });
+        rememberTokenExpiry(key, authorization.expiresAt);
+
+        const controller = buildController(
+          state,
+          profile,
+          config,
+          identityProvider,
+          bootstrap.authorizationProvider,
+          bootstrap.googleIdentity,
+        );
+        try {
+          for (const access of groupAccess) {
+            await controller.adoptDataset(access.datasetId, {
+              requireOwned: access.participant.role === "owner",
+            });
+          }
+          const loaded = await syncProfileDatasetGroup(
+            controller,
+            profile,
+            createEmptySharedSyncPayload(),
+            "load",
+          );
+          const refreshed = (await loadSharedSyncState()) ?? state;
+          const recovered = profileWithPayloadMeta(
+            {
+              ...(findProfile(refreshed, key) ?? profile),
+              ...(loaded.fileId ? { fileId: loaded.fileId } : {}),
+              lastRevisionId: loaded.revisionId,
+              lastSyncedAt: new Date().toISOString(),
+              needsInitialLoad: false,
+            },
+            loaded.payload,
+          );
+          state = upsertProfile(refreshed, recovered);
+          cachedState = state;
+          await saveSharedSyncState(state);
+          if (!beforeProfile) discoveredProfileKeys.push(key);
+        } catch (error) {
+          const refreshed = (await loadSharedSyncState()) ?? state;
+          state = beforeProfile
+            ? upsertProfile(refreshed, beforeProfile)
+            : {
+                ...refreshed,
+                profiles: refreshed.profiles.filter(
+                  (entry) => profileKey(entry.ownerEmail, entry.datasetId) !== key,
+                ),
+              };
+          cachedState = state;
+          await saveSharedSyncState(state);
+          await appendDeveloperLog("profile-discovery", "profile-load-skipped", {
+            appFolderId: folder.appFolderId,
+            datasetId: group.baseDatasetId,
+            error: error instanceof Error ? error.message : String(error),
+          }).catch(() => undefined);
+        }
+      }
+    }
+
+    disposeRuntime();
+    return {
+      state,
+      discoveredProfileKeys,
+      scannedFolderCount: folders.size,
+      skippedFolderCount,
+    };
+  });
+}
+
 function createProviders(config: SharedSyncConfig, profileId: string) {
   const inner = new GoogleWebAuthorizationProvider({
     clientId: config.clientId,
@@ -676,6 +1016,13 @@ async function ensureRuntime(
 export function disposeRuntime(): void {
   runtime?.identityProvider.clear();
   runtime = null;
+}
+
+/** Clears every in-memory decrypted sharing identity before browser-data erasure. */
+export function disposeSensitiveSyncSession(): void {
+  disposeRuntime();
+  profileDiscoverySession?.identityProvider.clear();
+  profileDiscoverySession = null;
 }
 
 /* ---------- Multi-file dataset groups (docs/sync-kit-multi-file-datasets.md) ---------- */
@@ -1000,29 +1347,29 @@ export async function setupSharedSync(
         googleIdentity,
       );
       const storage = await controller.ensureStorage();
-      // Adopt an existing primary dataset (interrupted setup, reinstall,
+      // Adopt an existing profile dataset (interrupted setup, reinstall,
       // reconnecting device) instead of failing with "already exists";
-      // create only when the folder has none. A fresh folder gets the
+      // legacy primary profiles sort first, followed by opaque-id profiles.
+      // Create only when the folder has none. A fresh folder gets the
       // multi-file dataset group so per-dataset sharing works from day one;
       // adopted datasets keep their legacy single-file layout.
       const listedDatasets = await controller.listDatasets();
-      const newestPrimaryGroup = discoverProfileDatasetGroups(listedDatasets).find(
-        (group) => splitBaseRoot(group.baseDatasetId) === PRIMARY_DATASET_ID,
-      );
+      const existingAnchorGroup = discoverProfileDatasetGroups(listedDatasets)[0];
       // A completed hard cutover may leave only primary.gN data files while
-      // retaining primary.control. Re-scope setup to that newest generation;
-      // otherwise a fresh device would create an unrelated new primary file.
+      // retaining primary.control; newer installations may have only opaque
+      // profile ids. Re-scope setup to the first existing group so a fresh
+      // device never creates an unrelated replacement profile.
       if (
         !listedDatasets.some((dataset) => dataset.datasetId === PRIMARY_DATASET_ID) &&
-        newestPrimaryGroup
+        existingAnchorGroup
       ) {
         connectedProfile = {
           ...connectedProfile,
-          datasetId: newestPrimaryGroup.baseDatasetId,
-          fileId: newestPrimaryGroup.planFileId,
+          datasetId: existingAnchorGroup.baseDatasetId,
+          fileId: existingAnchorGroup.planFileId,
           controlDatasetId:
-            newestPrimaryGroup.controlDatasetId ??
-            controlDatasetIdFor(newestPrimaryGroup.baseDatasetId),
+            existingAnchorGroup.controlDatasetId ??
+            controlDatasetIdFor(existingAnchorGroup.baseDatasetId),
         };
         provisional = {
           ...provisional,
@@ -1035,6 +1382,35 @@ export async function setupSharedSync(
           expiresAt: authorization.expiresAt ?? Date.now() + 3_600_000,
         });
         rememberTokenExpiry(provisional.activeProfileKey, authorization.expiresAt);
+        cachedState = provisional;
+        await saveSharedSyncState(provisional);
+        controller = buildController(
+          provisional,
+          connectedProfile,
+          config,
+          identityProvider,
+          authorizationProvider,
+          googleIdentity,
+        );
+      } else if (
+        !listedDatasets.some((dataset) => dataset.datasetId === PRIMARY_DATASET_ID)
+      ) {
+        // New profiles use opaque identities. `primary` remains readable as a
+        // legacy anchor, but a mutable/display label is never a storage key.
+        const newDatasetId = newOwnedDatasetId([
+          ...provisional.profiles.map((profile) => profile.datasetId),
+          ...listedDatasets.map((dataset) => dataset.datasetId),
+        ]);
+        connectedProfile = {
+          ...connectedProfile,
+          datasetId: newDatasetId,
+          controlDatasetId: controlDatasetIdFor(newDatasetId),
+        };
+        provisional = {
+          ...provisional,
+          activeProfileKey: profileKey(ownerEmail, connectedProfile.datasetId),
+          profiles: [...preservedLocalProfiles, connectedProfile],
+        };
         cachedState = provisional;
         await saveSharedSyncState(provisional);
         controller = buildController(
@@ -2156,6 +2532,7 @@ export async function createLocalProfile(
     if (!trimmed) throw new Error("Enter a profile name.");
     let state = await getCachedState();
     if (!state) throw new Error("No profile registry is available on this device.");
+    assertOwnedProfileLabelAvailable(state, trimmed);
     state = await preserveCurrentProfile(config, state, local);
     const created = newLocalProfile(trimmed);
     state = {
@@ -2186,15 +2563,38 @@ export async function renameManagedProfile(
     if (!state) throw new Error("No profile registry is available on this device.");
     const profile = findProfile(state, profileKeyValue);
     if (!profile) throw new Error("That profile is not available on this device.");
-    const next = upsertProfile(state, {
-      ...profile,
-      displayName: trimmed,
-      displayNameUpdatedAt: new Date().toISOString(),
-    });
+    const owned = isOwnedProfile(state, profile);
+    const locallyManaged = owned || isLocalProfile(profile);
+    if (locallyManaged) assertOwnedProfileLabelAvailable(state, trimmed, profileKeyValue);
+    const next = upsertProfile(
+      state,
+      isEncryptedProfile(profile) && !owned
+        ? { ...profile, localDisplayName: trimmed }
+        : {
+            ...profile,
+            displayName: trimmed,
+            displayNameUpdatedAt: new Date().toISOString(),
+          },
+    );
     cachedState = next;
     await saveSharedSyncState(next);
     return next;
   });
+}
+
+function assertOwnedProfileLabelAvailable(
+  state: SharedSyncState,
+  displayName: string,
+  excludingProfileKey?: string,
+): void {
+  const normalized = displayName.trim().toLocaleLowerCase();
+  const conflict = state.profiles.some((profile) => {
+    const key = profileKey(profile.ownerEmail, profile.datasetId);
+    return key !== excludingProfileKey &&
+      (isOwnedProfile(state, profile) || isLocalProfile(profile)) &&
+      profileDisplayLabel(state, profile).toLocaleLowerCase() === normalized;
+  });
+  if (conflict) throw new Error("Choose a unique name for each profile you own.");
 }
 
 export async function updateManagedProfileAvatar(
@@ -2684,11 +3084,12 @@ export async function createOwnedProfile(
     if (!trimmed) throw new Error("Enter a profile name.");
     const state = await getCachedState();
     if (!state) throw new Error("Encrypted sync is not set up on this device.");
-    const primary = findOwnedPrimaryProfile(state);
-    if (!primary?.appFolderId) {
+    const anchor = findOwnedStorageProfile(state);
+    if (!anchor?.appFolderId) {
       throw new Error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.");
     }
-    const datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles);
+    assertOwnedProfileLabelAvailable(state, trimmed);
+    const datasetId = newOwnedDatasetId(state.profiles.map((profile) => profile.datasetId));
     const emptyPayload = createEmptySharedSyncPayload();
     disposeRuntime();
     // The profile record must exist before the dataset group is created —
@@ -2698,12 +3099,12 @@ export async function createOwnedProfile(
     const newProfile: ProfileRecord = {
       datasetId,
       ownerEmail: state.ownerEmail,
-      folderName: primary.folderName,
+      folderName: anchor.folderName,
       displayName: trimmed,
       displayNameUpdatedAt: new Date().toISOString(),
       role: "owner",
-      trustedOwnerKeyId: primary.trustedOwnerKeyId,
-      appFolderId: primary.appFolderId,
+      trustedOwnerKeyId: anchor.trustedOwnerKeyId,
+      appFolderId: anchor.appFolderId,
       controlDatasetId: controlDatasetIdFor(datasetId),
       controlEnrollment: "pending",
       datasetGrants: OWNER_DATASET_GRANTS,
@@ -2769,25 +3170,26 @@ export async function connectActiveLocalProfile(
   if (!isLocalProfile(active)) {
     throw new Error("This profile already uses encrypted sync.");
   }
-  const primary = findOwnedPrimaryProfile(state);
-  if (!primary?.appFolderId) {
+  const anchor = findOwnedStorageProfile(state);
+  if (!anchor?.appFolderId) {
     return setupSharedSync(config, local);
   }
   return serialized(async () => {
     disposeRuntime();
     const displayName = active.displayName?.trim() || "Profile";
-    const datasetId = uniqueOwnedDatasetId(displayName, state.ownerEmail, state.profiles);
+    assertOwnedProfileLabelAvailable(state, displayName, state.activeProfileKey);
+    const datasetId = newOwnedDatasetId(state.profiles.map((profile) => profile.datasetId));
     const connectedKey = profileKey(state.ownerEmail, datasetId);
     const connected: ProfileRecord = {
       datasetId,
       ownerEmail: state.ownerEmail,
-      folderName: primary.folderName,
+      folderName: anchor.folderName,
       displayName,
       displayNameUpdatedAt:
         active.displayNameUpdatedAt ?? new Date().toISOString(),
       role: "owner",
-      trustedOwnerKeyId: primary.trustedOwnerKeyId,
-      appFolderId: primary.appFolderId,
+      trustedOwnerKeyId: anchor.trustedOwnerKeyId,
+      appFolderId: anchor.appFolderId,
       controlDatasetId: controlDatasetIdFor(datasetId),
       controlEnrollment: "pending",
       datasetGrants: OWNER_DATASET_GRANTS,

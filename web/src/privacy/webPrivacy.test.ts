@@ -2,8 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chooseWebStorageMode,
   eraseEasyBcBrowserData,
+  markProfileDiscoveryOnboarded,
   noteSensitiveWebSession,
+  profileChecksEnabled,
+  profileDiscoveryOnboarded,
   prepareWebPrivacySession,
+  setProfileChecksEnabled,
   webStorageMode,
 } from "./webPrivacy";
 
@@ -70,5 +74,17 @@ describe("web privacy session", () => {
     chooseWebStorageMode("trusted");
     await eraseEasyBcBrowserData();
     expect(webStorageMode()).toBeNull();
+  });
+
+  it("defaults profile checks on and remembers a local-only opt out", () => {
+    expect(profileChecksEnabled()).toBe(true);
+    setProfileChecksEnabled(false);
+    expect(profileChecksEnabled()).toBe(false);
+  });
+
+  it("remembers that the fresh-browser discovery choice was made", () => {
+    expect(profileDiscoveryOnboarded()).toBe(false);
+    markProfileDiscoveryOnboarded();
+    expect(profileDiscoveryOnboarded()).toBe(true);
   });
 });

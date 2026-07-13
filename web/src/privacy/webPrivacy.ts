@@ -3,12 +3,30 @@ export type WebStorageMode = "temporary" | "trusted";
 const MODE_KEY = "easy-bc-web-storage-mode";
 const DIRTY_KEY = "easy-bc-temporary-session-dirty";
 const ACTIVE_KEY = "easy-bc-temporary-session-active";
+const PROFILE_CHECKS_KEY = "easy-bc-profile-checks-enabled";
+const PROFILE_ONBOARDED_KEY = "easy-bc-profile-discovery-onboarded";
 const LEGACY_PERIOD_KEY = "easy-bc-period-starts";
 const DATABASE_NAMES = ["easy-bc", "easy-bc-sync-kit-auth", "easy-bc-sharing"];
 
 export function webStorageMode(): WebStorageMode | null {
   const value = localStorage.getItem(MODE_KEY);
   return value === "temporary" || value === "trusted" ? value : null;
+}
+
+export function profileChecksEnabled(): boolean {
+  return localStorage.getItem(PROFILE_CHECKS_KEY) !== "0";
+}
+
+export function setProfileChecksEnabled(enabled: boolean): void {
+  localStorage.setItem(PROFILE_CHECKS_KEY, enabled ? "1" : "0");
+}
+
+export function profileDiscoveryOnboarded(): boolean {
+  return localStorage.getItem(PROFILE_ONBOARDED_KEY) === "1";
+}
+
+export function markProfileDiscoveryOnboarded(): void {
+  localStorage.setItem(PROFILE_ONBOARDED_KEY, "1");
 }
 
 /** Mark that plaintext EasyBC data is available in this browser session. */
@@ -53,6 +71,8 @@ export async function eraseEasyBcBrowserData(options: { preserveMode?: boolean }
   await Promise.all((await easyBcDatabaseNames()).map(deleteDatabase));
   localStorage.removeItem(LEGACY_PERIOD_KEY);
   localStorage.removeItem(DIRTY_KEY);
+  localStorage.removeItem(PROFILE_CHECKS_KEY);
+  localStorage.removeItem(PROFILE_ONBOARDED_KEY);
   sessionStorage.removeItem(ACTIVE_KEY);
   if (options.preserveMode && mode) localStorage.setItem(MODE_KEY, mode);
   else localStorage.removeItem(MODE_KEY);

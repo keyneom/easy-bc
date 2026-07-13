@@ -47,9 +47,29 @@ class ProfileLabelsTest {
   }
 
   @Test
+  fun newOwnedDatasetId_isOpaque() {
+      assertEquals(
+          "p-12345678-1234-1234-1234-123456789abc",
+          newOwnedDatasetId(listOf("primary")) {
+              "12345678-1234-1234-1234-123456789abc"
+          },
+      )
+  }
+
+  @Test
   fun profileDisplayLabel_usesDisplayNameForOwnedProfiles() {
       assertEquals("My data", profileDisplayLabel(state, profiles[0]))
       assertEquals("Daughter", profileDisplayLabel(state, profiles[1]))
+  }
+
+  @Test
+  fun profileDisplayLabel_usesLocalOverrideAndDisambiguatesByOwner() {
+      val first = profiles[1].copy(ownerEmail = "first@example.com", localDisplayName = "Alex")
+      val second = profiles[1].copy(ownerEmail = "second@example.com", localDisplayName = "Alex")
+      val value = state.copy(profiles = listOf(first, second))
+      assertEquals("Alex", profileDisplayLabel(value, first))
+      assertEquals("Alex — first@example.com", disambiguatedProfileLabel(value, first))
+      assertEquals("Alex — second@example.com", disambiguatedProfileLabel(value, second))
   }
 
   @Test

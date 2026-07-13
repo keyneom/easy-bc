@@ -29,6 +29,8 @@ export type ProfileRecord = {
   folderName: string;
   /** User-facing label for owned profiles (e.g. "Daughter"). */
   displayName?: string;
+  /** This browser's private label override; never written into encrypted payloads. */
+  localDisplayName?: string;
   /** Timestamp for encrypted cross-device display-name merge. */
   displayNameUpdatedAt?: string;
   /**

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   profileDisplayLabel,
+  disambiguatedProfileLabel,
+  newOwnedDatasetId,
   slugifyDatasetId,
   uniqueOwnedDatasetId,
 } from "./profileLabels";
@@ -51,6 +53,14 @@ describe("uniqueOwnedDatasetId", () => {
   });
 });
 
+describe("newOwnedDatasetId", () => {
+  it("creates an opaque id independent of the display label", () => {
+    expect(
+      newOwnedDatasetId(["primary"], () => "12345678-1234-1234-1234-123456789abc"),
+    ).toBe("p-12345678-1234-1234-1234-123456789abc");
+  });
+});
+
 describe("profileDisplayLabel", () => {
   it("labels primary owned profile as My data", () => {
     expect(profileDisplayLabel(state([owned("primary")]), owned("primary"))).toBe("My data");
@@ -71,6 +81,27 @@ describe("profileDisplayLabel", () => {
       trustedOwnerKeyId: "key-2",
     };
     expect(profileDisplayLabel(state([shared]), shared)).toBe("EasyBC — other@example.com");
+  });
+
+  it("uses a device-local override without replacing the shared label", () => {
+    const shared: ProfileRecord = {
+      datasetId: "primary",
+      ownerEmail: "other@example.com",
+      folderName: "EasyBC — other@example.com",
+      displayName: "Household plan",
+      localDisplayName: "Alex",
+      role: "viewer",
+      trustedOwnerKeyId: "key-2",
+    };
+    expect(profileDisplayLabel(state([shared]), shared)).toBe("Alex");
+  });
+
+  it("adds owner email when visible labels conflict", () => {
+    const a = { ...owned("a", "Plan"), ownerEmail: "a@example.com" };
+    const b = { ...owned("b", "Plan"), ownerEmail: "b@example.com" };
+    const value = state([a, b]);
+    expect(disambiguatedProfileLabel(value, a)).toBe("Plan — a@example.com");
+    expect(disambiguatedProfileLabel(value, b)).toBe("Plan — b@example.com");
   });
 
   it("labels local-only profiles independently of cloud ownership", () => {

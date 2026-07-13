@@ -99,10 +99,14 @@ import {
   updateCalendarDayLog,
   type DatasetPart,
 } from "./sync/datasets";
-import { profileDisplayLabel } from "./sync/profileLabels";
+import {
+  disambiguatedProfileLabel,
+  profileDisplayLabel,
+} from "./sync/profileLabels";
 import { shouldOpenSyncSettings } from "./sync/sharedRoute";
 import {
   createLocalProfile,
+  discoverAvailableProfiles,
   ensureProfileState,
   listPendingKeyResponses,
   loadSharedSyncState,
@@ -111,7 +115,7 @@ import {
   switchManagedProfile,
   syncActiveDataset,
   updateManagedProfileAvatar,
-  disposeRuntime,
+  disposeSensitiveSyncSession,
 } from "./sync/sharedSync";
 import { profileKey } from "./sync/sharedFolderName";
 import {
@@ -134,7 +138,11 @@ import {
 import {
   chooseWebStorageMode,
   eraseEasyBcBrowserData,
+  markProfileDiscoveryOnboarded,
   noteSensitiveWebSession,
+  profileChecksEnabled as storedProfileChecksEnabled,
+  profileDiscoveryOnboarded,
+  setProfileChecksEnabled as storeProfileChecksEnabled,
   webStorageMode,
   type WebStorageMode,
 } from "./privacy/webPrivacy";
@@ -837,6 +845,34 @@ function optionsForWasm(
 
 type AppTab = "tracker" | "planner" | "history" | "settings";
 
+type EasyBcHistoryState = {
+  easyBc: true;
+  guard?: true;
+  tab: AppTab;
+  settingsView: SettingsView;
+};
+
+function easyBcHistoryState(value: unknown): EasyBcHistoryState | null {
+  if (!value || typeof value !== "object") return null;
+  const state = value as Partial<EasyBcHistoryState>;
+  const tabs: AppTab[] = ["tracker", "planner", "history", "settings"];
+  const settingsViews: SettingsView[] = [
+    "hub",
+    "basics",
+    "protection",
+    "risk",
+    "sharing",
+    "profiles",
+    "setup",
+    "about",
+  ];
+  return state.easyBc === true &&
+    tabs.includes(state.tab as AppTab) &&
+    settingsViews.includes(state.settingsView as SettingsView)
+    ? (state as EasyBcHistoryState)
+    : null;
+}
+
 function initialAppTab(): AppTab {
   if (typeof window === "undefined") return "tracker";
   return shouldOpenSyncSettings(window.location.search) ? "settings" : "tracker";
@@ -863,6 +899,51 @@ export default function App() {
       ? "sharing"
       : "hub",
   );
+  const historyReadyRef = useRef(false);
+
+  useEffect(() => {
+    const root: EasyBcHistoryState = {
+      easyBc: true,
+      guard: true,
+      tab,
+      settingsView,
+    };
+    window.history.replaceState(root, "", window.location.href);
+    window.history.pushState({ ...root, guard: undefined }, "", window.location.href);
+    historyReadyRef.current = true;
+
+    const onPopState = (event: PopStateEvent) => {
+      const state = easyBcHistoryState(event.state);
+      if (!state) return;
+      setTab(state.tab);
+      setSettingsView(state.settingsView);
+      if (state.guard) {
+        // Keep Back on the app's root screen instead of returning to whatever
+        // sensitive/unrelated page happened to precede EasyBC in this tab.
+        window.history.pushState(
+          { ...state, guard: undefined },
+          "",
+          window.location.href,
+        );
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+    // This seeds the initial screen exactly once; later state is handled by
+    // the effect below and by popstate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!historyReadyRef.current) return;
+    const current = easyBcHistoryState(window.history.state);
+    if (current?.tab === tab && current.settingsView === settingsView) return;
+    window.history.pushState(
+      { easyBc: true, tab, settingsView } satisfies EasyBcHistoryState,
+      "",
+      window.location.href,
+    );
+  }, [settingsView, tab]);
 
   // The calendar is where today gets logged: returning to the tab always
   // re-centers on the current month so the user never edits a stale month.
@@ -928,7 +1009,7 @@ export default function App() {
 
   const endPrivateBrowserSession = async () => {
     setPrivacyEraseBusy(true);
-    disposeRuntime();
+    disposeSensitiveSyncSession();
     try {
       await eraseEasyBcBrowserData({ preserveMode: true });
       window.location.replace(`${window.location.origin}${window.location.pathname}`);
@@ -1123,6 +1204,12 @@ export default function App() {
   // switching from any tab is safe; the sheet stays open until confirmed.
   const [profileSwitchingKey, setProfileSwitchingKey] = useState<string | null>(null);
   const [profileSwitchNotice, setProfileSwitchNotice] = useState<string | null>(null);
+  const [profileDiscoveryBusy, setProfileDiscoveryBusy] = useState(false);
+  const [profileDiscoveryPromptOpen, setProfileDiscoveryPromptOpen] = useState(false);
+  const [profileDiscoveryPromptDismissed, setProfileDiscoveryPromptDismissed] = useState(false);
+  const [profileChecksEnabled, setProfileChecksEnabled] = useState(storedProfileChecksEnabled);
+  const [profileOnboarded, setProfileOnboarded] = useState(profileDiscoveryOnboarded);
+  const startupProfileCheckStartedRef = useRef(false);
   const [newProfileName, setNewProfileName] = useState("");
   // Onboarding wizard (docs/settings-profiles-redesign.md §7): 5 skippable
   // steps over the same live option setters the full sub-screens use.
@@ -1176,7 +1263,7 @@ export default function App() {
       const key = profileKey(record.ownerEmail, record.datasetId);
       return {
         key,
-        name: profileDisplayLabel(sharedSyncState, record),
+        name: disambiguatedProfileLabel(sharedSyncState, record),
         meta: settingsProfileMeta(sharedSyncState, record),
         badge: settingsProfileBadge(sharedSyncState, record),
         photoUrl: record.avatarWebp ? avatarDataUrl(record.avatarWebp) : undefined,
@@ -1184,6 +1271,99 @@ export default function App() {
       };
     });
   }, [sharedSyncState]);
+
+  const runProfileDiscovery = useCallback(
+    async (pickSharedFolder: boolean): Promise<void> => {
+      if (profileDiscoveryBusy) return;
+      if (!sharedSyncConfig) {
+        setProfileSwitchNotice("Encrypted sync is not configured in this build.");
+        return;
+      }
+      setProfileDiscoveryBusy(true);
+      setProfileSwitchNotice(null);
+      try {
+        const result = await discoverAvailableProfiles(sharedSyncConfig, {
+          pickSharedFolder,
+        });
+        setSharedSyncState(result.state);
+        const hasEncryptedProfile = result.state.profiles.some(isEncryptedProfile);
+        setProfileDiscoveryPromptOpen(!hasEncryptedProfile);
+        setProfileDiscoveryPromptDismissed(hasEncryptedProfile);
+        if (result.discoveredProfileKeys.length > 0) {
+          const count = result.discoveredProfileKeys.length;
+          setProfileSwitchNotice(
+            `Found ${count} new profile${count === 1 ? "" : "s"}.`,
+          );
+          // Leave the recovered profile list visible behind the privacy
+          // decision so the user can switch into it immediately afterward.
+          setTab("settings");
+          setSettingsView("profiles");
+        } else if (!hasEncryptedProfile) {
+          setProfileSwitchNotice(
+            pickSharedFolder
+              ? "No valid EasyBC profile files were found in that folder. Select the shared " +
+                  "EasyBC folder, then select every *.sync-kit.json profile file inside it."
+              : "No profile files were available automatically. If a profile was shared with " +
+                  "you, choose “Find a profile shared with me” and select its folder and files.",
+          );
+        } else if (result.skippedFolderCount > 0) {
+          setProfileSwitchNotice(
+            "EasyBC checked Drive, but one or more profile folders could not be opened. " +
+              "Use “Find a profile shared with me” and select its folder and files.",
+          );
+        } else {
+          setProfileSwitchNotice("Profiles are up to date.");
+        }
+        if (hasEncryptedProfile) {
+          markProfileDiscoveryOnboarded();
+          setProfileOnboarded(true);
+        }
+      } catch (error) {
+        setProfileSwitchNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        setProfileDiscoveryBusy(false);
+      }
+    },
+    [profileDiscoveryBusy, sharedSyncConfig],
+  );
+
+  useEffect(() => {
+    if (
+      storageReady &&
+      sharedSyncConfig &&
+      sharedSyncState &&
+      !profileDiscoveryPromptDismissed &&
+      !profileOnboarded
+    ) {
+      setProfileDiscoveryPromptOpen(true);
+    }
+  }, [
+    profileDiscoveryPromptDismissed,
+    profileOnboarded,
+    sharedSyncConfig,
+    sharedSyncState,
+    storageReady,
+  ]);
+
+  useEffect(() => {
+    if (
+      !storageReady ||
+      !sharedSyncState ||
+      !sharedSyncConfig ||
+      !profileOnboarded ||
+      !profileChecksEnabled ||
+      startupProfileCheckStartedRef.current
+    ) return;
+    startupProfileCheckStartedRef.current = true;
+    void runProfileDiscovery(false);
+  }, [
+    profileChecksEnabled,
+    profileOnboarded,
+    runProfileDiscovery,
+    sharedSyncConfig,
+    sharedSyncState,
+    storageReady,
+  ]);
 
   const handleSwitchProfile = useCallback(
     async (key: string): Promise<boolean> => {
@@ -1357,6 +1537,8 @@ export default function App() {
       !wasmReady ||
       !sharedSyncState ||
       !activeEncryptedProfile ||
+      profileDiscoveryPromptOpen ||
+      profileDiscoveryBusy ||
       syncReadOnly
     ) return;
     if (autoSyncFingerprintRef.current === "") {
@@ -1370,6 +1552,8 @@ export default function App() {
   }, [
     activeEncryptedProfile,
     localSyncFingerprint,
+    profileDiscoveryBusy,
+    profileDiscoveryPromptOpen,
     runAutoSync,
     sharedSyncState,
     storageReady,
@@ -1959,7 +2143,12 @@ export default function App() {
           <ProfileChipSwitcher
             profiles={switcherProfiles}
             switchingKey={profileSwitchingKey}
+            discovering={profileDiscoveryBusy}
             notice={profileSwitchNotice}
+            onOpen={() =>
+              profileChecksEnabled ? runProfileDiscovery(false) : Promise.resolve()
+            }
+            onFindSharedProfiles={() => runProfileDiscovery(true)}
             onSwitch={handleSwitchProfile}
             onManageProfiles={() => {
               selectTab("settings");
@@ -1975,6 +2164,27 @@ export default function App() {
       </header>
 
       <UpdateBanner />
+
+      {storageMode === "temporary" && (
+        <div className="privacy-session-warning" role="status">
+          <AlertTriangle aria-hidden />
+          <div>
+            <strong>Temporary browser session</strong>
+            <span>
+              Decrypted EasyBC data remains available in this browser until you end and erase the
+              session. Do not leave this browser profile accessible.
+            </span>
+          </div>
+          <button
+            type="button"
+            className="ghost danger"
+            disabled={privacyEraseBusy}
+            onClick={() => void endPrivateBrowserSession()}
+          >
+            {privacyEraseBusy ? "Erasing…" : "End session & erase now"}
+          </button>
+        </div>
+      )}
 
       <nav className="app-tabs" role="tablist" aria-label="Main sections">
         <button
@@ -2287,7 +2497,7 @@ export default function App() {
                 if (!active) return null;
                 return (
                   <EbProfileHeaderCard
-                    name={profileDisplayLabel(sharedSyncState, active)}
+                    name={disambiguatedProfileLabel(sharedSyncState, active)}
                     meta={settingsProfileMeta(sharedSyncState, active)}
                     colorKey={sharedSyncState.activeProfileKey}
                     photoUrl={active.avatarWebp ? avatarDataUrl(active.avatarWebp) : undefined}
@@ -2385,6 +2595,42 @@ export default function App() {
                     {privacyEraseBusy ? "Erasing…" : "End session & erase this browser"}
                   </button>
                 </div>
+              </div>
+              <EbGroupLabel>Synced profile checks</EbGroupLabel>
+              <div className="card privacy-session-card">
+                <label className="profile-check-setting">
+                  <input
+                    type="checkbox"
+                    checked={profileChecksEnabled}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      storeProfileChecksEnabled(enabled);
+                      setProfileChecksEnabled(enabled);
+                      if (enabled) {
+                        startupProfileCheckStartedRef.current = false;
+                        void runProfileDiscovery(false);
+                      }
+                    }}
+                  />
+                  <span>
+                    <strong>Check for synced profiles</strong>
+                    <small>
+                      At startup and whenever the profile switcher opens, unlock the same identity
+                      and look for newly available owned or shared profiles. Local-only profiles
+                      remain local.
+                    </small>
+                  </span>
+                </label>
+                {!profileChecksEnabled && (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={profileDiscoveryBusy}
+                    onClick={() => void runProfileDiscovery(false)}
+                  >
+                    Check once now
+                  </button>
+                )}
               </div>
               <EbGroupLabel>About</EbGroupLabel>
               <EbNavRow
@@ -2905,6 +3151,16 @@ export default function App() {
                   {profileSwitchNotice}
                 </p>
               )}
+              <button
+                type="button"
+                className="ghost"
+                disabled={profileDiscoveryBusy || profileSwitchingKey !== null}
+                onClick={() => void runProfileDiscovery(true)}
+              >
+                {profileDiscoveryBusy
+                  ? "Checking Google Drive…"
+                  : "Find a profile shared with me"}
+              </button>
               <div className="profile-switcher-add">
                 <input
                   type="text"
@@ -2976,7 +3232,7 @@ export default function App() {
                             name={
                               setupName.trim() ||
                               (active
-                                ? profileDisplayLabel(sharedSyncState, active)
+                                ? disambiguatedProfileLabel(sharedSyncState, active)
                                 : "Me")
                             }
                             colorKey={sharedSyncState.activeProfileKey}
@@ -3552,7 +3808,73 @@ export default function App() {
         </>
       )}
       </main>
-      {privacyPromptOpen && (
+      {profileDiscoveryPromptOpen && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="profile-discovery-title"
+        >
+          <div className="modal privacy-session-modal profile-discovery-modal">
+            <Users aria-hidden />
+            <h2 id="profile-discovery-title">Find your existing EasyBC profiles?</h2>
+            <p>
+              Sign in with the same Google account you use on Android. EasyBC will ask for your
+              passkey, then check every EasyBC profile file this app can access. Profiles you own
+              and profiles shared with you are both restored.
+            </p>
+            <div className="privacy-choice-grid">
+              <button
+                type="button"
+                disabled={profileDiscoveryBusy}
+                onClick={() => void runProfileDiscovery(false)}
+              >
+                {profileDiscoveryBusy ? "Checking Google Drive…" : "Sign in & find profiles"}
+                <span>Automatically restore profile files already available to EasyBC Web.</span>
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={profileDiscoveryBusy}
+                onClick={() => void runProfileDiscovery(true)}
+              >
+                Find a profile shared with me
+                <span>
+                  Use Google Picker to select the shared EasyBC folder and all profile files in it.
+                  This is required when this browser has never opened that share.
+                </span>
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                disabled={profileDiscoveryBusy}
+                onClick={() => {
+                  setProfileDiscoveryPromptOpen(false);
+                  setProfileDiscoveryPromptDismissed(true);
+                  markProfileDiscoveryOnboarded();
+                  setProfileOnboarded(true);
+                  storeProfileChecksEnabled(false);
+                  setProfileChecksEnabled(false);
+                  setPrivacyPromptOpen(true);
+                }}
+              >
+                Continue with local data for now
+              </button>
+            </div>
+            {profileSwitchNotice && (
+              <p className="sync-notice sync-notice-error" role="alert">
+                {profileSwitchNotice}
+              </p>
+            )}
+            <p className="hint compact">
+              You can run this check again whenever you open the profile switcher. If Google has
+              not yet granted this Web app access to a shared file, choose “Find a profile shared
+              with me” there.
+            </p>
+          </div>
+        </div>
+      )}
+      {privacyPromptOpen && !profileDiscoveryPromptOpen && (
         <div
           className="modal-backdrop"
           role="dialog"
@@ -3563,25 +3885,39 @@ export default function App() {
             <ShieldCheck aria-hidden />
             <h2 id="privacy-session-title">Keep decrypted data on this browser?</h2>
             <p>
-              EasyBC encrypts data in Google Drive, but data you open is stored locally so the app
-              can work. Anyone with access to this browser profile could see that retained data.
+              EasyBC encrypts data in Google Drive, but this browser now contains locally stored
+              EasyBC data so the app can work. Anyone with access to this browser profile could see
+              it.
             </p>
             <div className="privacy-choice-grid">
               <button type="button" onClick={() => selectStorageMode("temporary")}>
-                Temporary session
+                Continue temporarily
                 <span>
-                  Erase EasyBC data, cached Google access, and local identity material when this
-                  session ends. Local-only profiles will also be erased.
+                  A persistent warning will remain until you explicitly end and erase the session.
+                  Close-time cleanup is only a backup.
                 </span>
               </button>
               <button type="button" className="ghost" onClick={() => selectStorageMode("trusted")}>
                 Trust this browser
                 <span>Keep profiles available here for future visits.</span>
               </button>
+              <button
+                type="button"
+                className="ghost danger"
+                disabled={privacyEraseBusy}
+                onClick={() => void endPrivateBrowserSession()}
+              >
+                {privacyEraseBusy ? "Erasing…" : "Cancel and erase local data now"}
+                <span>
+                  Remove EasyBC data, cached Google access, and local identity material. Local-only
+                  profiles on this browser will also be erased.
+                </span>
+              </button>
             </div>
             <p className="hint compact">
-              Browser close cleanup is best effort; EasyBC always completes any unfinished
-              temporary cleanup before reading data on the next launch.
+              Closing the browser is not the primary privacy control. Use the erase action before
+              leaving a shared or temporary device. EasyBC also retries unfinished cleanup before
+              reading data on the next launch.
             </p>
           </div>
         </div>

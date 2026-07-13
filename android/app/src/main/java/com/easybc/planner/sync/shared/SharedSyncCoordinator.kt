@@ -36,6 +36,9 @@ import com.keyneom.synckit.sharing.parseSharingJoinLinkV1
 import com.keyneom.synckit.sharing.parseSharingResponseLinkV1
 import com.keyneom.synckit.sharing.sharedBackupParticipants
 import com.keyneom.synckit.stores.GoogleDriveSharedBackupTransport
+import com.keyneom.synckit.stores.GoogleDriveFileStore
+import com.keyneom.synckit.stores.ListAccessibleSyncKitAppFoldersOptions
+import com.keyneom.synckit.stores.listAccessibleSyncKitAppFolders
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.jsonObject
@@ -74,6 +77,255 @@ class SharedSyncCoordinator(
         registry.save(state)
         registry.saveLocalPayload(key, store.localPayload())
         return state
+    }
+
+    /**
+     * Rebuilds this device's registry from every EasyBC Drive folder/file the
+     * Android OAuth client can already access. Both owned and shared-recipient
+     * profiles are accepted, but only when the current app-data passkey
+     * identity is an encrypted-envelope participant and the owner key is
+     * unambiguous. Shares that are not yet visible still use the existing
+     * Android file-selection join flow to grant drive.file access.
+     */
+    suspend fun discoverAvailableProfiles(accessToken: String): Int {
+        rememberAccess(accessToken)
+        val previous = ensureProfileState()
+        val selfEmail = fetchGoogleAccountEmail(accessToken)
+        val identity = identityStore.getOrCreate()
+        val authorization = driveAuth.provider().authorize()
+        val drive = GoogleDriveFileStore()
+        val folders = listAccessibleSyncKitAppFolders(
+            ListAccessibleSyncKitAppFoldersOptions(
+                appId = EASY_BC_APP_ID,
+                authorization = authorization,
+                drive = drive,
+            ),
+        )
+        var state = previous.copy(ownerEmail = selfEmail)
+        registry.save(state)
+        var discoveredCount = 0
+
+        data class DatasetAccess(
+            val datasetId: String,
+            val fileId: String,
+            val ownerEmail: String,
+            val participantRole: String,
+            val trustedOwnerKeyId: String,
+        )
+
+        for (folder in folders) {
+            val transport = GoogleDriveSharedBackupTransport(
+                appId = EASY_BC_APP_ID,
+                authorizationProvider = driveAuth.provider(),
+                folderName = folder.name,
+                selectedAppFolderId = folder.appFolderId,
+            )
+            val listed = try {
+                transport.listDatasets()
+            } catch (error: Exception) {
+                developerLog.append(
+                    "profile-discovery",
+                    "folder-list-skipped",
+                    mapOf(
+                        "appFolderId" to folder.appFolderId,
+                        "error" to (error.message ?: error.javaClass.simpleName),
+                    ),
+                )
+                continue
+            }
+            val accessible = mutableListOf<DatasetAccess>()
+            for (listedDataset in listed) {
+                try {
+                    val stored = transport.readDataset(listedDataset.fileId)
+                    val participants = sharedBackupParticipants(stored.envelope)
+                    val participant = participants.firstOrNull {
+                        it.keyId == identity.publicKey.keyId
+                    }
+                    val owners = participants.filter { it.role == SharingRole.OWNER }
+                    if (participant == null || owners.size != 1) continue
+                    val metadata = drive.get(listedDataset.fileId, authorization)
+                    val ownerEmail = metadata.owners
+                        ?.firstOrNull()
+                        ?.emailAddress
+                        ?.trim()
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: continue
+                    accessible += DatasetAccess(
+                        datasetId = stored.datasetId,
+                        fileId = stored.fileId,
+                        ownerEmail = ownerEmail,
+                        participantRole = participant.role.name.lowercase(),
+                        trustedOwnerKeyId = owners.single().keyId,
+                    )
+                } catch (error: Exception) {
+                    developerLog.append(
+                        "profile-discovery",
+                        "dataset-skipped",
+                        mapOf(
+                            "appFolderId" to folder.appFolderId,
+                            "datasetId" to listedDataset.datasetId,
+                            "error" to (error.message ?: error.javaClass.simpleName),
+                        ),
+                    )
+                }
+            }
+
+            val groups = discoverProfileDatasetGroups(
+                accessible.map { it.datasetId to it.fileId },
+                requirePlan = false,
+            )
+            for (group in groups) {
+                val groupDatasetIds = buildSet {
+                    if (group.planFileId.isNotBlank()) add(group.baseDatasetId)
+                    group.companionFileIds.keys.forEach { part ->
+                        add(datasetIdForPart(group.baseDatasetId, part))
+                    }
+                    group.controlDatasetId?.let { add(it) }
+                }
+                val groupAccess = accessible.filter { it.datasetId in groupDatasetIds }
+                val dataAccess = groupAccess.filterNot {
+                    it.datasetId.endsWith(CONTROL_DATASET_SUFFIX)
+                }
+                val first = dataAccess.firstOrNull() ?: continue
+                if (groupAccess.any {
+                        !it.ownerEmail.equals(first.ownerEmail, ignoreCase = true) ||
+                            it.trustedOwnerKeyId != first.trustedOwnerKeyId
+                    }
+                ) {
+                    developerLog.append(
+                        "profile-discovery",
+                        "profile-group-skipped",
+                        mapOf(
+                            "appFolderId" to folder.appFolderId,
+                            "datasetId" to group.baseDatasetId,
+                            "error" to "Dataset files disagreed about the owner identity.",
+                        ),
+                    )
+                    continue
+                }
+
+                val key = profileKey(first.ownerEmail, group.baseDatasetId)
+                val existing = findProfile(state, key)
+                if (
+                    existing != null &&
+                    existing.trustedOwnerKeyId != first.trustedOwnerKeyId
+                ) {
+                    developerLog.append(
+                        "profile-discovery",
+                        "profile-group-skipped",
+                        mapOf(
+                            "appFolderId" to folder.appFolderId,
+                            "datasetId" to group.baseDatasetId,
+                            "error" to "The owner key did not match this device's trusted owner.",
+                        ),
+                    )
+                    continue
+                }
+
+                val observedGrants = linkedMapOf<String, String>()
+                dataAccess.forEach { access ->
+                    partForDatasetId(group.baseDatasetId, access.datasetId)?.let { part ->
+                        observedGrants[part] = access.participantRole
+                    }
+                }
+                val split = group.companionFileIds.isNotEmpty()
+                val grants = if (split || existing?.datasetGrants != null) {
+                    existing?.datasetGrants.orEmpty() + observedGrants
+                } else {
+                    null
+                }
+                val records = existing?.datasetRecords.orEmpty().toMutableMap()
+                group.companionFileIds.forEach { (part, fileId) ->
+                    val datasetId = datasetIdForPart(group.baseDatasetId, part)
+                    records[datasetId] = (records[datasetId] ?: CompanionDatasetRecord())
+                        .copy(fileId = fileId)
+                }
+                group.controlFileId?.let { fileId ->
+                    val datasetId = group.controlDatasetId
+                        ?: controlDatasetIdFor(group.baseDatasetId)
+                    records[datasetId] = (records[datasetId] ?: CompanionDatasetRecord())
+                        .copy(fileId = fileId)
+                }
+                val profile = (existing ?: ProfileRecord(
+                    datasetId = group.baseDatasetId,
+                    ownerEmail = first.ownerEmail,
+                    folderName = folder.name,
+                    role = first.participantRole,
+                    trustedOwnerKeyId = first.trustedOwnerKeyId,
+                )).copy(
+                    datasetId = group.baseDatasetId,
+                    ownerEmail = first.ownerEmail,
+                    folderName = folder.name,
+                    role = grants?.let(::highestGrantedRole) ?: first.participantRole,
+                    trustedOwnerKeyId = first.trustedOwnerKeyId,
+                    appFolderId = folder.appFolderId,
+                    fileId = group.planFileId.takeIf { it.isNotBlank() }
+                        ?: existing?.fileId,
+                    controlDatasetId = if (group.controlFileId != null) {
+                        group.controlDatasetId ?: controlDatasetIdFor(group.baseDatasetId)
+                    } else {
+                        existing?.controlDatasetId
+                    },
+                    controlEnrollment = if (group.controlFileId != null) {
+                        "enrolled"
+                    } else {
+                        existing?.controlEnrollment ?: "none"
+                    },
+                    datasetGrants = grants,
+                    datasetRecords = records.takeIf { it.isNotEmpty() },
+                    syncMode = "encrypted",
+                    needsInitialLoad = existing?.needsInitialLoad ?: true,
+                )
+                state = registry.upsertProfile(profile)
+                val controller = controllerFor(state, profile)
+                try {
+                    groupAccess.forEach { access ->
+                        controller.adoptDataset(
+                            access.datasetId,
+                            requireOwned = access.participantRole == "owner",
+                        )
+                    }
+                    val loaded = syncProfileDatasetGroup(
+                        controller,
+                        profile,
+                        emptySharedPayload(),
+                        loadOnly = true,
+                    )
+                    val refreshed = registry.load() ?: state
+                    val recovered = (findProfile(refreshed, key) ?: profile)
+                        .withMetadataFrom(loaded.payload)
+                        .copy(
+                            fileId = loaded.fileId,
+                            lastRevisionId = loaded.revisionId,
+                            lastSyncedAt = java.time.Instant.now().toString(),
+                            needsInitialLoad = false,
+                        )
+                    state = registry.upsertProfile(recovered)
+                    if (existing == null) discoveredCount += 1
+                } catch (error: Exception) {
+                    val refreshed = registry.load() ?: state
+                    state = if (existing != null) {
+                        registry.upsertProfile(existing)
+                    } else {
+                        refreshed.copy(
+                            profiles = refreshed.profiles.filter {
+                                profileKey(it.ownerEmail, it.datasetId) != key
+                            },
+                        ).also { registry.save(it) }
+                    }
+                    developerLog.append(
+                        "profile-discovery",
+                        "profile-load-skipped",
+                        mapOf(
+                            "appFolderId" to folder.appFolderId,
+                            "datasetId" to group.baseDatasetId,
+                            "error" to (error.message ?: error.javaClass.simpleName),
+                        ),
+                    )
+                }
+            }
+        }
+        return discoveredCount
     }
 
     suspend fun isConfigured(): Boolean {
@@ -134,29 +386,45 @@ class SharedSyncCoordinator(
             var controller = controllerFor(provisional, connectedProfile)
             val storage = controller.ensureStorage()
             val local = sharedPayload(store.localPayload()).withProfileMetadata(connectedProfile)
-            // Adopt an existing primary dataset (interrupted setup, reinstall,
+            // Adopt an existing profile dataset (interrupted setup, reinstall,
             // reconnecting device) instead of failing with "already exists";
-            // create only when the folder has none. A fresh folder gets the
+            // legacy primary profiles sort first, followed by opaque-id profiles.
+            // Create only when the folder has none. A fresh folder gets the
             // multi-file dataset group; a folder that already contains
             // companion datasets (created on web) is adopted as a split
             // profile — every companion is adopted so this device never
             // publishes a full payload into one file.
             val datasets = controller.listDatasets()
-            val newestPrimaryGroup = discoverProfileDatasetGroups(
+            val existingAnchorGroup = discoverProfileDatasetGroups(
                 datasets.map { it.datasetId to it.fileId },
-            ).firstOrNull { splitBaseRoot(it.baseDatasetId) == PRIMARY_DATASET_ID }
+            ).firstOrNull()
             // A completed hard cutover can leave primary.gN plus the stable
-            // primary.control file. Re-scope before adopting so a fresh
-            // device never creates an unrelated replacement primary.
-            if (datasets.none { it.datasetId == PRIMARY_DATASET_ID } && newestPrimaryGroup != null) {
+            // primary.control file; newer installations may have only opaque
+            // profile ids. Re-scope before adopting so a fresh device never
+            // creates an unrelated replacement profile.
+            if (datasets.none { it.datasetId == PRIMARY_DATASET_ID } && existingAnchorGroup != null) {
                 connectedProfile = connectedProfile.copy(
-                    datasetId = newestPrimaryGroup.baseDatasetId,
-                    fileId = newestPrimaryGroup.planFileId,
-                    controlDatasetId = newestPrimaryGroup.controlDatasetId
-                        ?: controlDatasetIdFor(newestPrimaryGroup.baseDatasetId),
+                    datasetId = existingAnchorGroup.baseDatasetId,
+                    fileId = existingAnchorGroup.planFileId,
+                    controlDatasetId = existingAnchorGroup.controlDatasetId
+                        ?: controlDatasetIdFor(existingAnchorGroup.baseDatasetId),
                 )
                 provisional = provisional.copy(
                     activeProfileKey = profileKey(ownerEmail, connectedProfile.datasetId),
+                    profiles = preservedLocalProfiles + connectedProfile,
+                )
+                registry.save(provisional)
+                controller = controllerFor(provisional, connectedProfile)
+            } else if (datasets.none { it.datasetId == PRIMARY_DATASET_ID }) {
+                val newDatasetId = newOwnedDatasetId(
+                    provisional.profiles.map { it.datasetId } + datasets.map { it.datasetId },
+                )
+                connectedProfile = connectedProfile.copy(
+                    datasetId = newDatasetId,
+                    controlDatasetId = controlDatasetIdFor(newDatasetId),
+                )
+                provisional = provisional.copy(
+                    activeProfileKey = profileKey(ownerEmail, newDatasetId),
                     profiles = preservedLocalProfiles + connectedProfile,
                 )
                 registry.save(provisional)
@@ -1762,11 +2030,12 @@ class SharedSyncCoordinator(
         val trimmed = displayName.trim()
         require(trimmed.isNotEmpty()) { "Enter a profile name." }
         val state = registry.load() ?: error("Shared sync is not configured on this device.")
-        val primary = findOwnedPrimaryProfile(state)
+        val primary = findOwnedStorageProfile(state)
             ?: error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.")
         val appFolderId = primary.appFolderId
             ?: error("Your encrypted sync folder is not ready yet. Merge changes once, then try again.")
-        val datasetId = uniqueOwnedDatasetId(trimmed, state.ownerEmail, state.profiles)
+        requireOwnedProfileLabelAvailable(state, trimmed)
+        val datasetId = newOwnedDatasetId(state.profiles.map { it.datasetId })
         val profileKeyValue = profileKey(state.ownerEmail, datasetId)
         // Profile record first — companion registry records land on it — and
         // the controller scoped to the NEW profile's key.
@@ -1823,11 +2092,12 @@ class SharedSyncCoordinator(
         val state = registry.load() ?: error("No profile registry is available on this device.")
         val active = registry.activeProfile(state)
         require(isLocalProfile(active)) { "This profile already uses encrypted sync." }
-        val primary = findOwnedPrimaryProfile(state) ?: return setup(accessToken)
+        val primary = findOwnedStorageProfile(state) ?: return setup(accessToken)
         val appFolderId = primary.appFolderId
             ?: error("Your encrypted sync folder is not ready yet. Sync once, then try again.")
         val displayName = active.displayName?.trim().orEmpty().ifEmpty { "Profile" }
-        val datasetId = uniqueOwnedDatasetId(displayName, state.ownerEmail, state.profiles)
+        requireOwnedProfileLabelAvailable(state, displayName, state.activeProfileKey)
+        val datasetId = newOwnedDatasetId(state.profiles.map { it.datasetId })
         val local = sharedPayload(store.localPayload()).withProfileMetadata(active)
         // Profile record first (companion registry records land on it),
         // scoped controller second, dataset group last.
@@ -1892,6 +2162,7 @@ class SharedSyncCoordinator(
         val trimmed = displayName.trim()
         require(trimmed.isNotEmpty()) { "Enter a profile name." }
         var state = ensureProfileState()
+        requireOwnedProfileLabelAvailable(state, trimmed)
         val current = registry.activeProfile(state)
         if (isLocalProfile(current)) {
             registry.saveLocalPayload(state.activeProfileKey, store.localPayload())
@@ -1926,12 +2197,33 @@ class SharedSyncCoordinator(
         val state = registry.load() ?: error("No profile registry is available on this device.")
         val profile = findProfile(state, profileKeyValue)
             ?: error("That profile is not available on this device.")
+        val owned = isOwnedProfile(state, profile)
+        val locallyManaged = owned || isLocalProfile(profile)
+        if (locallyManaged) requireOwnedProfileLabelAvailable(state, trimmed, profileKeyValue)
         return registry.upsertProfile(
-            profile.copy(
-                displayName = trimmed,
-                displayNameUpdatedAt = java.time.Instant.now().toString(),
-            ),
+            if (!isLocalProfile(profile) && !owned) {
+                profile.copy(localDisplayName = trimmed)
+            } else {
+                profile.copy(
+                    displayName = trimmed,
+                    displayNameUpdatedAt = java.time.Instant.now().toString(),
+                )
+            },
         )
+    }
+
+    private fun requireOwnedProfileLabelAvailable(
+        state: SharedSyncState,
+        displayName: String,
+        excludingProfileKey: String? = null,
+    ) {
+        val conflict = state.profiles.any { profile ->
+            val key = profileKey(profile.ownerEmail, profile.datasetId)
+            key != excludingProfileKey &&
+                (isOwnedProfile(state, profile) || isLocalProfile(profile)) &&
+                profileDisplayLabel(state, profile).equals(displayName.trim(), ignoreCase = true)
+        }
+        require(!conflict) { "Choose a unique name for each profile you own." }
     }
 
     suspend fun updateProfileAvatar(

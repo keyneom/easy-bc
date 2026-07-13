@@ -28,22 +28,31 @@ export type SwitcherProfileRow = {
 export function ProfileChipSwitcher({
   profiles,
   switchingKey,
+  discovering,
   notice,
+  onOpen,
+  onFindSharedProfiles,
   onSwitch,
   onManageProfiles,
 }: {
   profiles: SwitcherProfileRow[];
   /** Key of the profile a switch is in flight for, or null when idle. */
   switchingKey: string | null;
+  /** True while Drive is being checked for profiles not yet in this browser. */
+  discovering: boolean;
   /** Error from the last switch attempt; shown inside the open sheet. */
   notice: string | null;
+  /** Refreshes profiles already visible to the Web OAuth client. */
+  onOpen: () => Promise<void>;
+  /** Opens Google Picker for a share this Web OAuth client has not seen. */
+  onFindSharedProfiles: () => Promise<void>;
   /** Resolves true when the switch confirmed (closes the sheet). */
   onSwitch: (key: string) => Promise<boolean>;
   onManageProfiles: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const active = profiles.find((profile) => profile.active);
-  const busy = switchingKey !== null;
+  const busy = switchingKey !== null || discovering;
 
   useEffect(() => {
     if (!open) return;
@@ -63,7 +72,10 @@ export function ProfileChipSwitcher({
         colorKey={active.key}
         photoUrl={active.photoUrl}
         badge={active.badge}
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          setOpen(true);
+          void onOpen();
+        }}
       />
       {/* Portal: the sticky topbar's backdrop-filter would otherwise become
           the containing block for position:fixed and trap the sheet. */}
@@ -83,6 +95,11 @@ export function ProfileChipSwitcher({
           >
             <div className="eb-switcher-grab" aria-hidden />
             <p className="eb-group-label">Profiles</p>
+            {discovering && (
+              <p className="eb-switcher-notice" role="status">
+                Checking Google Drive for newly available profiles…
+              </p>
+            )}
             {profiles.map((profile) => (
               <button
                 key={profile.key}
@@ -130,6 +147,14 @@ export function ProfileChipSwitcher({
               </p>
             )}
             <hr className="eb-switcher-divider" />
+            <button
+              type="button"
+              className="eb-switcher-action"
+              disabled={busy}
+              onClick={() => void onFindSharedProfiles()}
+            >
+              Find a profile shared with me
+            </button>
             <button
               type="button"
               className="eb-switcher-action"

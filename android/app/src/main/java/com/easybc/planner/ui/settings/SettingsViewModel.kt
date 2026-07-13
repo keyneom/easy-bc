@@ -469,6 +469,29 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    fun discoverAvailableProfiles(accessToken: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                val count = sharedSync.discoverAvailableProfiles(accessToken)
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    if (count == 0) {
+                        "Profiles are up to date."
+                    } else {
+                        "Found $count new profile${if (count == 1) "" else "s"}."
+                    },
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure(
+                    "Profile discovery",
+                    error,
+                    "Profile discovery failed",
+                )
+            }
+        }
+    }
+
     fun createLocalProfile(accessToken: String?, displayName: String) {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {

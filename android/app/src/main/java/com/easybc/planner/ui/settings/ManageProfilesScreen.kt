@@ -44,7 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.easybc.planner.sync.AuthorizationStep
 import com.easybc.planner.sync.shared.isLocalProfile
-import com.easybc.planner.sync.shared.profileDisplayLabel
+import com.easybc.planner.sync.shared.disambiguatedProfileLabel
 import com.easybc.planner.sync.shared.profileKey
 import com.easybc.planner.ui.kit.EbAvatar
 import kotlinx.coroutines.launch
@@ -185,7 +185,7 @@ fun ManageProfilesScreen(
             state?.profiles?.forEach { profile ->
                 val key = profileKey(profile.ownerEmail, profile.datasetId)
                 val isActive = key == state.activeProfileKey
-                val label = profileDisplayLabel(state, profile)
+                val label = disambiguatedProfileLabel(state, profile)
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.surface,

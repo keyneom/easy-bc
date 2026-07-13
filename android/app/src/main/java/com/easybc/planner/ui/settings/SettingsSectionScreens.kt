@@ -519,7 +519,7 @@ fun OnboardingWizardScreen(
                         com.easybc.planner.ui.kit.EbAvatar(
                             name = name.trim().ifEmpty {
                                 active?.let { profile ->
-                                    com.easybc.planner.sync.shared.profileDisplayLabel(state!!, profile)
+                                    com.easybc.planner.sync.shared.disambiguatedProfileLabel(state!!, profile)
                                 } ?: "Me"
                             },
                             colorKey = state?.activeProfileKey ?: "me",

@@ -66,6 +66,7 @@ data class DiscoveredProfileDatasetGroup(
 /** Rebuild owned profile groups from the managed files visible to drive.file. */
 fun discoverProfileDatasetGroups(
     files: List<Pair<String, String>>,
+    requirePlan: Boolean = true,
 ): List<DiscoveredProfileDatasetGroup> {
     data class MutableGroup(
         val baseDatasetId: String,
@@ -93,7 +94,10 @@ fun discoverProfileDatasetGroups(
         }
     }
     val latestByRoot = linkedMapOf<String, MutableGroup>()
-    byBase.values.filter { it.planFileId.isNotBlank() }.forEach { group ->
+    byBase.values.filter { group ->
+        val hasDataFile = group.planFileId.isNotBlank() || group.companionFileIds.isNotEmpty()
+        hasDataFile && (!requirePlan || group.planFileId.isNotBlank())
+    }.forEach { group ->
         val root = splitBaseRoot(group.baseDatasetId)
         val current = latestByRoot[root]
         if (current == null || splitGeneration(group.baseDatasetId) > splitGeneration(current.baseDatasetId)) {

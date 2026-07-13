@@ -109,6 +109,26 @@ describe("dataset ids", () => {
       },
     ]);
   });
+
+  it("can reconstruct a companion-only profile grant for recipient discovery", () => {
+    expect(
+      discoverProfileDatasetGroups(
+        [
+          { datasetId: "primary.cycle", fileId: "primary-cycle" },
+          { datasetId: "primary.control", fileId: "primary-control" },
+        ],
+        { requirePlan: false },
+      ),
+    ).toEqual([
+      {
+        baseDatasetId: "primary",
+        planFileId: "",
+        companionFileIds: { cycle: "primary-cycle" },
+        controlDatasetId: "primary.control",
+        controlFileId: "primary-control",
+      },
+    ]);
+  });
 });
 
 describe("grants mapping", () => {

@@ -175,7 +175,7 @@ fun SettingsScreen(
 
             // ── Active profile header ──
             if (state != null && activeProfile != null) {
-                val label = com.easybc.planner.sync.shared.profileDisplayLabel(state, activeProfile)
+                val label = com.easybc.planner.sync.shared.disambiguatedProfileLabel(state, activeProfile)
                 EbProfileHeaderCard(
                     name = label,
                     meta = buildString {
@@ -346,7 +346,7 @@ fun SettingsScreen(
                 state.profiles.forEach { profile ->
                     val key = com.easybc.planner.sync.shared.profileKey(profile.ownerEmail, profile.datasetId)
                     val isActive = key == state.activeProfileKey
-                    val label = com.easybc.planner.sync.shared.profileDisplayLabel(state, profile)
+                    val label = com.easybc.planner.sync.shared.disambiguatedProfileLabel(state, profile)
                     Surface(
                         onClick = { switchTo(key) },
                         enabled = !busy,
@@ -620,6 +620,32 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
                 }
             }
             .onFailure { vm.cloudError(it.message ?: "Google authorization failed.") }
+    }
+
+    // Keep People with access populated without requiring a separate button.
+    // The refresh action below remains available as an explicit retry.
+    LaunchedEffect(sharedState?.activeProfileKey, sharedConfigured) {
+        val state = sharedState ?: return@LaunchedEffect
+        if (!sharedConfigured) return@LaunchedEffect
+        val active = state.profiles.firstOrNull {
+            com.easybc.planner.sync.shared.profileKey(it.ownerEmail, it.datasetId) ==
+                state.activeProfileKey
+        } ?: return@LaunchedEffect
+        if (com.easybc.planner.sync.shared.isLocalProfile(active)) return@LaunchedEffect
+        try {
+            when (val step = vm.beginCloudAuthorization(activity)) {
+                is AuthorizationStep.Authorized ->
+                    vm.refreshProfileParticipants(step.accessToken)
+                is AuthorizationStep.NeedsResolution -> {
+                    pendingProfileParticipantsRefresh = true
+                    resolutionLauncher.launch(
+                        IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                    )
+                }
+            }
+        } catch (error: Exception) {
+            vm.cloudError(error.message ?: "Google authorization failed.")
+        }
     }
 
     fun authorizeAndRun(operation: CloudSyncOperation) {
@@ -1274,7 +1300,7 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
         state.profiles.forEach { profile ->
             val key = com.easybc.planner.sync.shared.profileKey(profile.ownerEmail, profile.datasetId)
             val active = key == state.activeProfileKey
-            val label = com.easybc.planner.sync.shared.profileDisplayLabel(state, profile)
+            val label = com.easybc.planner.sync.shared.disambiguatedProfileLabel(state, profile)
             OutlinedButton(
                 onClick = {
                     if (active || busy) return@OutlinedButton
@@ -1478,8 +1504,15 @@ internal fun EncryptedSyncSection(vm: SettingsViewModel) {
             enabled = !busy,
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Refresh people with access") }
-        if (profileParticipants.isNotEmpty()) {
-            Text("People with access", style = MaterialTheme.typography.labelLarge)
+        Text("People with access", style = MaterialTheme.typography.labelLarge)
+        if (profileParticipants.isEmpty()) {
+            Text(
+                "No participant details are available yet. EasyBC checks automatically; " +
+                    "use Refresh if Google authorization was cancelled.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
             profileParticipants.forEach { participant ->
                 Column(modifier = Modifier.padding(vertical = 4.dp)) {
                     val participantEmail = participant.emailAddress

@@ -97,6 +97,28 @@ class EasyBcDatasetsTest {
     }
 
     @Test
+    fun `profile discovery accepts a companion-only recipient grant`() {
+        assertEquals(
+            listOf(
+                DiscoveredProfileDatasetGroup(
+                    baseDatasetId = "primary",
+                    planFileId = "",
+                    companionFileIds = mapOf(PART_CYCLE to "cycle-file"),
+                    controlDatasetId = "primary.control",
+                    controlFileId = "control-file",
+                ),
+            ),
+            discoverProfileDatasetGroups(
+                listOf(
+                    "primary.cycle" to "cycle-file",
+                    "primary.control" to "control-file",
+                ),
+                requirePlan = false,
+            ),
+        )
+    }
+
+    @Test
     fun `grants round-trip through requestedGrants`() {
         val grants = mapOf(PART_CYCLE to "writer", PART_PLAN to "viewer")
         val requested = requestedGrantsFromDatasetGrants("primary", grants)

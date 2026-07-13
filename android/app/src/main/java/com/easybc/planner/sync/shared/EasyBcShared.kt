@@ -56,6 +56,8 @@ data class ProfileRecord(
     val ownerEmail: String,
     val folderName: String,
     val displayName: String? = null,
+    /** Device-private label override; never included in encrypted profile metadata. */
+    val localDisplayName: String? = null,
     /** Timestamp for encrypted cross-device display-name merge. */
     val displayNameUpdatedAt: String? = null,
     /**

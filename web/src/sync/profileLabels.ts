@@ -45,6 +45,21 @@ export function uniqueOwnedDatasetId(
   return candidate;
 }
 
+/** New profile identity is opaque; labels are mutable metadata, not storage keys. */
+export function newOwnedDatasetId(
+  existingDatasetIds: Iterable<string>,
+  randomUUID: () => string = () => crypto.randomUUID(),
+): string {
+  const existing = new Set(existingDatasetIds);
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const candidate = `p-${randomUUID().toLowerCase()}`;
+    if (candidate.length <= MAX_DATASET_ID_LENGTH && !existing.has(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error("Could not create a unique profile identifier. Try again.");
+}
+
 export function isOwnedProfile(state: SharedSyncState, profile: ProfileRecord): boolean {
   return (
     profile.ownerEmail.toLowerCase() === state.ownerEmail.toLowerCase() &&
@@ -56,12 +71,25 @@ export function profileDisplayLabel(state: SharedSyncState, profile: ProfileReco
   if (isLocalProfile(profile)) {
     return profile.displayName?.trim() || "Local profile";
   }
+  if (profile.localDisplayName?.trim()) return profile.localDisplayName.trim();
   if (profile.displayName?.trim()) return profile.displayName.trim();
   if (isOwnedProfile(state, profile)) {
     if (profile.datasetId === PRIMARY_DATASET_ID) return "My data";
     return profile.datasetId;
   }
   return profile.folderName;
+}
+
+export function disambiguatedProfileLabel(
+  state: SharedSyncState,
+  profile: ProfileRecord,
+): string {
+  const label = profileDisplayLabel(state, profile);
+  const duplicates = state.profiles.filter(
+    (candidate) =>
+      profileDisplayLabel(state, candidate).toLocaleLowerCase() === label.toLocaleLowerCase(),
+  );
+  return duplicates.length > 1 ? `${label} — ${profile.ownerEmail}` : label;
 }
 
 export function findOwnedPrimaryProfile(
@@ -71,4 +99,11 @@ export function findOwnedPrimaryProfile(
     (profile) =>
       isOwnedProfile(state, profile) && profile.datasetId === PRIMARY_DATASET_ID,
   );
+}
+
+export function findOwnedStorageProfile(
+  state: SharedSyncState,
+): ProfileRecord | undefined {
+  return findOwnedPrimaryProfile(state) ??
+    state.profiles.find((profile) => isOwnedProfile(state, profile) && profile.appFolderId);
 }

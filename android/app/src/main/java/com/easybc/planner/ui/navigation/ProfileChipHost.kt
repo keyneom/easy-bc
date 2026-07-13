@@ -20,6 +20,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -36,7 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.easybc.planner.sync.AuthorizationStep
 import com.easybc.planner.sync.shared.isLocalProfile
-import com.easybc.planner.sync.shared.profileDisplayLabel
+import com.easybc.planner.sync.shared.disambiguatedProfileLabel
 import com.easybc.planner.sync.shared.profileKey
 import com.easybc.planner.ui.kit.EbAvatar
 import com.easybc.planner.ui.kit.EbProfileChip
@@ -44,6 +45,9 @@ import com.easybc.planner.ui.settings.SettingsViewModel
 import com.easybc.planner.ui.settings.hubProfileBadge
 import com.easybc.planner.ui.settings.hubProfileMeta
 import kotlinx.coroutines.launch
+
+private const val PROFILE_DISCOVERY_PREFERENCES = "easybc_profile_discovery"
+private const val PROFILE_DISCOVERY_ENABLED = "enabled"
 
 /**
  * Global profile chip + switcher sheet (docs/settings-profiles-redesign.md §1).
@@ -68,8 +72,16 @@ fun ProfileChipHost(
     val status by vm.cloudStatus.collectAsState()
     var showSheet by remember { mutableStateOf(false) }
     var pendingSwitchKey by remember { mutableStateOf<String?>(null) }
+    var pendingDiscovery by remember { mutableStateOf(false) }
+    var discoveryRunning by remember { mutableStateOf(false) }
     var switchTarget by remember { mutableStateOf<String?>(null) }
     var switchError by remember { mutableStateOf<String?>(null) }
+    var profileChecksEnabled by remember {
+        mutableStateOf(
+            activity.getSharedPreferences(PROFILE_DISCOVERY_PREFERENCES, 0)
+                .getBoolean(PROFILE_DISCOVERY_ENABLED, true),
+        )
+    }
 
     val state = sharedState ?: return
     if (state.profiles.isEmpty()) return
@@ -93,20 +105,45 @@ fun ProfileChipHost(
             else -> {}
         }
     }
+    if (discoveryRunning && !busy) {
+        when (status) {
+            is SettingsViewModel.SyncStatus.Success -> {
+                discoveryRunning = false
+                switchError = null
+            }
+            is SettingsViewModel.SyncStatus.Error -> {
+                discoveryRunning = false
+                switchError = (status as SettingsViewModel.SyncStatus.Error).message
+            }
+            else -> {}
+        }
+    }
 
     val switchLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
         val key = pendingSwitchKey
         pendingSwitchKey = null
+        val discover = pendingDiscovery
+        pendingDiscovery = false
         if (result.resultCode != Activity.RESULT_OK) {
+            if (discover) discoveryRunning = false
             switchError = "Google authorization was cancelled."
             switchTarget = null
             return@rememberLauncherForActivityResult
         }
         runCatching { vm.finishCloudAuthorization(activity, result.data) }
-            .onSuccess { token -> key?.let { vm.switchProfile(token, it) } }
+            .onSuccess { token ->
+                when {
+                    key != null -> vm.switchProfile(token, key)
+                    discover -> {
+                        discoveryRunning = true
+                        vm.discoverAvailableProfiles(token)
+                    }
+                }
+            }
             .onFailure {
+                if (discover) discoveryRunning = false
                 switchError = it.message ?: "Google authorization failed."
                 switchTarget = null
             }
@@ -144,6 +181,31 @@ fun ProfileChipHost(
         }
     }
 
+    fun openSwitcherAndDiscover(force: Boolean = false) {
+        showSheet = true
+        if (busy || (!force && !profileChecksEnabled)) return
+        switchError = null
+        discoveryRunning = true
+        scope.launch {
+            try {
+                when (val step = vm.beginCloudAuthorization(activity)) {
+                    is AuthorizationStep.Authorized -> {
+                        vm.discoverAvailableProfiles(step.accessToken)
+                    }
+                    is AuthorizationStep.NeedsResolution -> {
+                        pendingDiscovery = true
+                        switchLauncher.launch(
+                            IntentSenderRequest.Builder(step.pendingIntent.intentSender).build(),
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                discoveryRunning = false
+                switchError = error.message ?: "Google authorization failed."
+            }
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -152,8 +214,8 @@ fun ProfileChipHost(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         EbProfileChip(
-            name = profileDisplayLabel(state, activeProfile),
-            onClick = { showSheet = true },
+            name = disambiguatedProfileLabel(state, activeProfile),
+            onClick = { openSwitcherAndDiscover() },
             colorKey = state.activeProfileKey,
             badge = hubProfileBadge(state, activeProfile),
             photoBase64 = activeProfile.avatarWebp,
@@ -178,7 +240,7 @@ fun ProfileChipHost(
                 state.profiles.forEach { profile ->
                     val key = profileKey(profile.ownerEmail, profile.datasetId)
                     val isActive = key == state.activeProfileKey
-                    val label = profileDisplayLabel(state, profile)
+                    val label = disambiguatedProfileLabel(state, profile)
                     Surface(
                         onClick = { switchTo(key) },
                         enabled = !busy,
@@ -233,6 +295,39 @@ fun ProfileChipHost(
                         modifier = Modifier.padding(top = 8.dp),
                     )
                 }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Check for synced profiles", style = MaterialTheme.typography.titleSmall)
+                        Text(
+                            "Look for newly accessible owned or shared profiles when this switcher opens.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = profileChecksEnabled,
+                        onCheckedChange = { enabled ->
+                            profileChecksEnabled = enabled
+                            activity.getSharedPreferences(PROFILE_DISCOVERY_PREFERENCES, 0)
+                                .edit()
+                                .putBoolean(PROFILE_DISCOVERY_ENABLED, enabled)
+                                .apply()
+                        },
+                        enabled = !busy,
+                    )
+                }
+                TextButton(
+                    onClick = { openSwitcherAndDiscover(force = true) },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Check for synced profiles now") }
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 TextButton(
                     onClick = {

@@ -40,6 +40,19 @@ fun uniqueOwnedDatasetId(
     return candidate
 }
 
+/** Opaque storage identity for new profiles; the mutable label is metadata. */
+fun newOwnedDatasetId(
+    existingDatasetIds: Iterable<String>,
+    randomUuid: () -> String = { java.util.UUID.randomUUID().toString() },
+): String {
+    val existing = existingDatasetIds.toSet()
+    repeat(10) {
+        val candidate = "p-${randomUuid().lowercase()}"
+        if (candidate.length <= MAX_DATASET_ID_LENGTH && candidate !in existing) return candidate
+    }
+    error("Could not create a unique profile identifier. Try again.")
+}
+
 fun isOwnedProfile(state: SharedSyncState, profile: ProfileRecord): Boolean =
     profile.ownerEmail.equals(state.ownerEmail, ignoreCase = true) &&
         profile.role.equals(SharingRole.OWNER.name, ignoreCase = true)
@@ -48,13 +61,27 @@ fun profileDisplayLabel(state: SharedSyncState, profile: ProfileRecord): String 
     if (isLocalProfile(profile)) {
         return profile.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Local profile"
     }
+    profile.localDisplayName?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
     profile.displayName?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
     if (!isOwnedProfile(state, profile)) return profile.folderName
     if (profile.datasetId == PRIMARY_DATASET_ID) return "My data"
     return profile.datasetId
 }
 
+fun disambiguatedProfileLabel(state: SharedSyncState, profile: ProfileRecord): String {
+    val label = profileDisplayLabel(state, profile)
+    val duplicates = state.profiles.count {
+        profileDisplayLabel(state, it).equals(label, ignoreCase = true)
+    }
+    return if (duplicates > 1) "$label — ${profile.ownerEmail}" else label
+}
+
 fun findOwnedPrimaryProfile(state: SharedSyncState): ProfileRecord? =
     state.profiles.firstOrNull {
         isOwnedProfile(state, it) && it.datasetId == PRIMARY_DATASET_ID
+    }
+
+fun findOwnedStorageProfile(state: SharedSyncState): ProfileRecord? =
+    findOwnedPrimaryProfile(state) ?: state.profiles.firstOrNull {
+        isOwnedProfile(state, it) && !it.appFolderId.isNullOrBlank()
     }
