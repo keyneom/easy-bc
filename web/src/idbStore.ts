@@ -7,6 +7,7 @@ export const KV_OPTIONS = "plannerOptions";
 export const KV_SYNC_STATE = "encryptedSyncState";
 export const KV_SHARED_SYNC_STATE = "sharedEncryptedSyncState";
 export const KV_SHARING_SYNC_CHECKPOINT = "sharingSyncCheckpoint";
+export const KV_DEVELOPER_LOG = "developerDiagnosticLog";
 
 const DB_NAME = "easy-bc";
 const DB_VERSION = 1;

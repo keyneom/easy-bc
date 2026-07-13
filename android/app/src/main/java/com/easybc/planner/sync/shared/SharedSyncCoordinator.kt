@@ -2,6 +2,7 @@ package com.easybc.planner.sync.shared
 
 import android.content.Context
 import com.easybc.planner.data.db.AppDatabase
+import com.easybc.planner.diagnostics.DeveloperLog
 import com.easybc.planner.sync.SYNC_RP_ID
 import com.easybc.planner.sync.ProfileMetaV1
 import com.easybc.planner.sync.SyncPayloadGateway
@@ -52,6 +53,7 @@ class SharedSyncCoordinator(
         driveAuth.provider().authorize()
     }
     private val pendingInvites = PendingInviteStore(context.applicationContext)
+    private val developerLog = DeveloperLog(context.applicationContext)
 
     suspend fun loadState(): SharedSyncState? = registry.load()
 
@@ -1135,20 +1137,104 @@ class SharedSyncCoordinator(
         val none = MigrationReconcileOutcome(profile, freeze = false, rebased = false)
         val controlFileKnown = profile.controlDatasetId != null &&
             profile.datasetRecords?.get(profile.controlDatasetId)?.fileId != null
-        if (isSplitProfile(profile) || isLocalProfile(profile) || !controlFileKnown) return none
-        if (profile.pendingMigration != null) return none.copy(freeze = true)
+        val split = isSplitProfile(profile)
+        val local = isLocalProfile(profile)
+        developerLog.append(
+            "migration",
+            "reconcile-start",
+            mapOf(
+                "datasetId" to profile.datasetId,
+                "role" to profile.role,
+                "split" to split,
+                "local" to local,
+                "controlDatasetId" to (profile.controlDatasetId ?: "missing"),
+                "controlFileKnown" to controlFileKnown,
+                "pendingMigration" to (profile.pendingMigration != null),
+            ),
+        )
+        if (split || local || !controlFileKnown) {
+            developerLog.append(
+                "migration",
+                "reconcile-skipped",
+                mapOf(
+                    "reason" to when {
+                        split -> "profile-already-split"
+                        local -> "profile-local"
+                        profile.controlDatasetId == null -> "control-dataset-id-missing"
+                        else -> "control-file-record-missing"
+                    },
+                ),
+            )
+            return none
+        }
+        if (profile.pendingMigration != null) {
+            developerLog.append(
+                "migration",
+                "pending-already-surfaced",
+                mapOf("migrationId" to profile.pendingMigration.migrationId),
+            )
+            return none.copy(freeze = true)
+        }
         val memoKey = profileKey(profile.ownerEmail, profile.datasetId)
-        if (!migrationReconcileChecked.add(memoKey)) return none
-        val verified = runCatching { controlDatasetFor(state, profile).read() }.getOrNull()
-            ?: return none
+        if (!migrationReconcileChecked.add(memoKey)) {
+            developerLog.append(
+                "migration",
+                "reconcile-skipped",
+                mapOf("reason" to "already-checked-this-session"),
+            )
+            return none
+        }
+        val verified = try {
+            controlDatasetFor(state, profile).read().also { control ->
+                developerLog.append(
+                    "migration",
+                    "control-read-succeeded",
+                    mapOf(
+                        "migrations" to control.migrations.size,
+                        "closedMigrations" to control.closedMigrations.size,
+                        "members" to control.members.size,
+                    ),
+                )
+            }
+        } catch (error: Exception) {
+            developerLog.append(
+                "migration",
+                "control-read-failed",
+                mapOf("error" to error),
+            )
+            return none
+        }
         val open = verified.migrations.values.firstOrNull {
             !verified.closedMigrations.contains(it.migrationId) &&
                 it.sourceDatasetIds.contains(profile.datasetId)
-        } ?: return none
+        }
+        if (open == null) {
+            developerLog.append(
+                "migration",
+                "no-open-migration",
+                mapOf(
+                    "sourceDatasetId" to profile.datasetId,
+                    "knownMigrationIds" to verified.migrations.keys.joinToString(",").ifBlank { "none" },
+                ),
+            )
+            return none
+        }
         val myKeyId = identityStore.getOrCreate().publicKey.keyId
         val targetBase = baseDatasetIdOf(open.targets.first().datasetId)
         val myAck = verified.acknowledgements[open.migrationId]?.containsKey(myKeyId) == true
         val myRequirement = open.requiredAcks.firstOrNull { it.keyId == myKeyId }
+        developerLog.append(
+            "migration",
+            "open-migration-found",
+            mapOf(
+                "migrationId" to open.migrationId,
+                "identityKeyPrefix" to myKeyId.take(10),
+                "acknowledged" to myAck,
+                "requirementFound" to (myRequirement != null),
+                "requiredFiles" to (myRequirement?.targetFileIds?.size ?: 0),
+                "targets" to open.targets.size,
+            ),
+        )
 
         if (profile.role == "owner" || myAck) {
             // Stale device of the owner (or of a participant who already
@@ -1179,6 +1265,15 @@ class SharedSyncCoordinator(
                 needsInitialLoad = profile.role != "owner",
             )
             rebaseProfileRecord(memoKey, rebasedProfile)
+            developerLog.append(
+                "migration",
+                "profile-rebased",
+                mapOf(
+                    "migrationId" to open.migrationId,
+                    "targetDatasetId" to targetBase,
+                    "role" to profile.role,
+                ),
+            )
             return MigrationReconcileOutcome(rebasedProfile, freeze = false, rebased = true)
         }
 
@@ -1192,8 +1287,26 @@ class SharedSyncCoordinator(
                 ),
             )
             registry.upsertProfile(marked)
+            developerLog.append(
+                "migration",
+                "pending-migration-persisted",
+                mapOf(
+                    "migrationId" to open.migrationId,
+                    "targetDatasetId" to targetBase,
+                    "requiredFiles" to myRequirement.targetFileIds.size,
+                ),
+            )
             return MigrationReconcileOutcome(marked, freeze = true, rebased = false)
         }
+        developerLog.append(
+            "migration",
+            "identity-not-required",
+            mapOf(
+                "migrationId" to open.migrationId,
+                "identityKeyPrefix" to myKeyId.take(10),
+                "requiredKeyPrefixes" to open.requiredAcks.joinToString(",") { it.keyId.take(10) },
+            ),
+        )
         return none
     }
 

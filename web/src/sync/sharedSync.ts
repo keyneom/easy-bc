@@ -39,6 +39,7 @@ import {
 } from "@keyneom/sync-kit/sharing/control";
 import { GoogleDriveSharedBackupTransport } from "@keyneom/sync-kit/stores/google-drive/sharing";
 import { idbDelete, idbGet, idbSet, KV_SHARING_SYNC_CHECKPOINT } from "../idbStore";
+import { appendDeveloperLog } from "../diagnostics/developerLog";
 import { pickSharedDatasetFiles } from "./sharedPicker";
 import { easyBcSharedCodec } from "./sharedCodec";
 import { createSharingIdentityProvider } from "./sharedIdentity";
@@ -1691,20 +1692,47 @@ async function reconcileOpenMigration(
   runtime: Runtime,
   profile: ProfileRecord,
 ): Promise<{ profile: ProfileRecord; freeze: boolean }> {
-  if (
-    isSplitProfile(profile) ||
-    !isEncryptedProfile(profile) ||
-    !profile.controlDatasetId ||
-    !profile.datasetRecords?.[profile.controlDatasetId]?.fileId
-  ) {
+  const split = isSplitProfile(profile);
+  const encrypted = isEncryptedProfile(profile);
+  const controlFileKnown = Boolean(
+    profile.controlDatasetId &&
+      profile.datasetRecords?.[profile.controlDatasetId]?.fileId,
+  );
+  void appendDeveloperLog("migration", "reconcile-start", {
+    datasetId: profile.datasetId,
+    role: profile.role,
+    split,
+    encrypted,
+    controlDatasetId: profile.controlDatasetId ?? "missing",
+    controlFileKnown,
+    pendingMigration: Boolean(profile.pendingMigration),
+  });
+  if (split || !encrypted || !profile.controlDatasetId || !controlFileKnown) {
+    void appendDeveloperLog("migration", "reconcile-skipped", {
+      reason: split
+        ? "profile-already-split"
+        : !encrypted
+          ? "profile-local"
+          : !profile.controlDatasetId
+            ? "control-dataset-id-missing"
+            : "control-file-record-missing",
+    });
     return { profile, freeze: false };
   }
   const memoKey = profileKey(profile.ownerEmail, profile.datasetId);
   if (profile.pendingMigration) {
     // Already surfaced; stay frozen until acknowledged.
+    void appendDeveloperLog("migration", "pending-already-surfaced", {
+      migrationId: profile.pendingMigration.migrationId,
+    });
     return { profile, freeze: true };
   }
-  if (migrationReconcileChecked.has(memoKey)) return { profile, freeze: false };
+  if (migrationReconcileChecked.has(memoKey)) {
+    void appendDeveloperLog("migration", "reconcile-skipped", {
+      reason: "already-checked-this-session",
+    });
+    return { profile, freeze: false };
+  }
   migrationReconcileChecked.add(memoKey);
   const control = buildControlDataset(
     runtime.state,
@@ -1712,9 +1740,26 @@ async function reconcileOpenMigration(
     runtime.identityProvider,
     runtime.authorizationProvider,
   );
-  const verified = await control.read().catch(() => null);
+  let verified: Awaited<ReturnType<SharingControlDataset["read"]>>;
+  try {
+    verified = await control.read();
+    void appendDeveloperLog("migration", "control-read-succeeded", {
+      migrations: verified.migrations.size,
+      closedMigrations: verified.closedMigrations.size,
+      members: verified.members.size,
+    });
+  } catch (error) {
+    void appendDeveloperLog("migration", "control-read-failed", { error });
+    return { profile, freeze: false };
+  }
   const open = findOpenMigration(verified, profile.datasetId);
-  if (!open) return { profile, freeze: false };
+  if (!open) {
+    void appendDeveloperLog("migration", "no-open-migration", {
+      sourceDatasetId: profile.datasetId,
+      knownMigrationIds: [...verified.migrations.keys()].join(",") || "none",
+    });
+    return { profile, freeze: false };
+  }
   const identity = await runtime.identityProvider.getOrCreate();
   const myKeyId = identity.publicKey.keyId;
   const targetBase = baseDatasetIdOf(open.targets[0]!.datasetId);
@@ -1722,6 +1767,14 @@ async function reconcileOpenMigration(
     .get(open.migrationId)
     ?.has(myKeyId) ?? false;
   const myRequirement = open.requiredAcks.find((ack) => ack.keyId === myKeyId);
+  void appendDeveloperLog("migration", "open-migration-found", {
+    migrationId: open.migrationId,
+    identityKeyPrefix: myKeyId.slice(0, 10),
+    acknowledged: myAck,
+    requirementFound: Boolean(myRequirement),
+    requiredFiles: myRequirement?.targetFileIds.length ?? 0,
+    targets: open.targets.length,
+  });
 
   if (profile.role === "owner" || myAck) {
     // Stale device of the owner (or of a participant who already
@@ -1764,6 +1817,11 @@ async function reconcileOpenMigration(
         : { needsInitialLoad: true }),
     };
     await rebaseProfileRecord(refreshed, memoKey, rebased);
+    void appendDeveloperLog("migration", "profile-rebased", {
+      migrationId: open.migrationId,
+      targetDatasetId: targetBase,
+      role: profile.role,
+    });
     return { profile: rebased, freeze: false };
   }
 
@@ -1780,8 +1838,20 @@ async function reconcileOpenMigration(
     const nextState = upsertProfile(refreshed, marked);
     cachedState = nextState;
     await saveSharedSyncState(nextState);
+    void appendDeveloperLog("migration", "pending-migration-persisted", {
+      migrationId: open.migrationId,
+      targetDatasetId: targetBase,
+      requiredFiles: myRequirement.targetFileIds.length,
+    });
     return { profile: marked, freeze: true };
   }
+  void appendDeveloperLog("migration", "identity-not-required", {
+    migrationId: open.migrationId,
+    identityKeyPrefix: myKeyId.slice(0, 10),
+    requiredKeyPrefixes: open.requiredAcks
+      .map((requirement) => requirement.keyId.slice(0, 10))
+      .join(","),
+  });
   return { profile, freeze: false };
 }
 
