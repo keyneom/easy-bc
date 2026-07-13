@@ -48,8 +48,8 @@ fun profileDisplayLabel(state: SharedSyncState, profile: ProfileRecord): String 
     if (isLocalProfile(profile)) {
         return profile.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: "Local profile"
     }
-    if (!isOwnedProfile(state, profile)) return profile.folderName
     profile.displayName?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    if (!isOwnedProfile(state, profile)) return profile.folderName
     if (profile.datasetId == PRIMARY_DATASET_ID) return "My data"
     return profile.datasetId
 }

@@ -144,6 +144,30 @@ describe("mergeSyncPayloads", () => {
 
     expect(merged.calendarDayLogs["2026-01-12"]).toEqual(android.calendarDayLogs["2026-01-12"]);
   });
+
+  it("merges profile name and avatar on independent timestamps", () => {
+    const avatar = payload(30, "2026-01-01T00:00:00.000Z");
+    avatar.profileMeta = {
+      avatarWebp: "new-photo",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+      displayName: "Old name",
+      displayNameUpdatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const renamed = payload(30, "2026-01-01T00:00:00.000Z");
+    renamed.profileMeta = {
+      avatarWebp: "old-photo",
+      updatedAt: "2026-02-01T00:00:00.000Z",
+      displayName: "Current name",
+      displayNameUpdatedAt: "2026-05-01T00:00:00.000Z",
+    };
+
+    expect(mergeSyncPayloads(avatar, renamed).profileMeta).toEqual({
+      avatarWebp: "new-photo",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+      displayName: "Current name",
+      displayNameUpdatedAt: "2026-05-01T00:00:00.000Z",
+    });
+  });
 });
 
 describe("parseSyncPayload", () => {
@@ -153,6 +177,6 @@ describe("parseSyncPayload", () => {
       avatarWebp: "a".repeat(16_385),
       updatedAt: "2026-01-01T00:00:00.000Z",
     };
-    expect(() => parseSyncPayload(invalid)).toThrow("invalid profile photo metadata");
+    expect(() => parseSyncPayload(invalid)).toThrow("invalid profile display metadata");
   });
 });

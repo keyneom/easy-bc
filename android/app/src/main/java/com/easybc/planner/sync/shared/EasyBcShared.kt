@@ -56,6 +56,8 @@ data class ProfileRecord(
     val ownerEmail: String,
     val folderName: String,
     val displayName: String? = null,
+    /** Timestamp for encrypted cross-device display-name merge. */
+    val displayNameUpdatedAt: String? = null,
     /**
      * Local cache of the plan-dataset avatar (base64 WebP, no data-URL prefix).
      * Lets chips/headers render without decrypting the plan file.
@@ -76,7 +78,7 @@ data class ProfileRecord(
     val lastSyncedAt: String? = null,
     /** Profiles exist independently of encrypted sync. Older records are encrypted. */
     val syncMode: String? = null,
-    /** App-owned labels for participant keys; envelopes intentionally omit email. */
+    /** Legacy/local fallback; verified control members are authoritative for participant email. */
     val participantEmails: Map<String, String>? = null,
     /**
      * A joined writer must load the remote dataset before publishing so the

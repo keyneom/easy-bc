@@ -10,7 +10,12 @@ export type PortablePlannerOptions = Omit<WasmOptions, "calendarCycles">;
 export type ProfileMetaV1 = {
   /** Base64 WebP bytes, no data-URL prefix. */
   avatarWebp?: string;
+  /** Avatar update/removal timestamp retained for v1 compatibility. */
   updatedAt: string;
+  /** User-facing profile label; encrypted with the plan dataset payload. */
+  displayName?: string;
+  /** Independent timestamp so renames never overwrite concurrent avatar changes. */
+  displayNameUpdatedAt?: string;
 };
 
 export type SyncPayloadV1 = {
@@ -33,7 +38,7 @@ export type SyncPayloadV1 = {
     updatedAt: string;
   };
   /**
-   * Profile display metadata (avatar). Lives in the plan dataset part only.
+   * Profile display metadata (name and avatar). Lives in the plan dataset part only.
    * Absent on snapshots written before avatar support.
    */
   profileMeta?: ProfileMetaV1;
@@ -171,9 +176,7 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
   const androidPreferences = a.androidPreferences && b.androidPreferences
     ? newer(a.androidPreferences, a.androidPreferences.updatedAt, b.androidPreferences, b.androidPreferences.updatedAt)
     : (a.androidPreferences ?? b.androidPreferences);
-  const profileMeta = a.profileMeta && b.profileMeta
-    ? newer(a.profileMeta, a.profileMeta.updatedAt, b.profileMeta, b.profileMeta.updatedAt)
-    : (a.profileMeta ?? b.profileMeta);
+  const profileMeta = mergeProfileMeta(a.profileMeta, b.profileMeta);
   const merged: SyncPayloadV1 = {
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
@@ -211,9 +214,16 @@ export function parseSyncPayload(value: unknown): SyncPayloadV1 {
     (typeof parsed.profileMeta.updatedAt !== "string" ||
       (parsed.profileMeta.avatarWebp !== undefined &&
         (typeof parsed.profileMeta.avatarWebp !== "string" ||
-          parsed.profileMeta.avatarWebp.length > 16_384)))
+          parsed.profileMeta.avatarWebp.length > 16_384)) ||
+      (parsed.profileMeta.displayName !== undefined &&
+        (typeof parsed.profileMeta.displayName !== "string" ||
+          !parsed.profileMeta.displayName.trim() ||
+          parsed.profileMeta.displayName.length > 120 ||
+          typeof parsed.profileMeta.displayNameUpdatedAt !== "string")) ||
+      (parsed.profileMeta.displayNameUpdatedAt !== undefined &&
+        typeof parsed.profileMeta.displayNameUpdatedAt !== "string"))
   ) {
-    throw new Error("The Drive snapshot contains invalid profile photo metadata.");
+    throw new Error("The Drive snapshot contains invalid profile display metadata.");
   }
   return {
     ...parsed,
@@ -221,4 +231,29 @@ export function parseSyncPayload(value: unknown): SyncPayloadV1 {
     voluntaryAbstinenceUpdatedAt: parsed.voluntaryAbstinenceUpdatedAt ?? {},
     deletedVoluntaryAbstinenceDates: parsed.deletedVoluntaryAbstinenceDates ?? {},
   } as SyncPayloadV1;
+}
+
+function mergeProfileMeta(
+  a: ProfileMetaV1 | undefined,
+  b: ProfileMetaV1 | undefined,
+): ProfileMetaV1 | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const avatar = newer(a, a.updatedAt, b, b.updatedAt);
+  const aNameAt = a.displayNameUpdatedAt;
+  const bNameAt = b.displayNameUpdatedAt;
+  const name = newer(
+    { displayName: a.displayName, displayNameUpdatedAt: aNameAt },
+    aNameAt,
+    { displayName: b.displayName, displayNameUpdatedAt: bNameAt },
+    bNameAt,
+  );
+  return {
+    avatarWebp: avatar.avatarWebp,
+    updatedAt: avatar.updatedAt,
+    ...(name.displayName === undefined ? {} : { displayName: name.displayName }),
+    ...(name.displayNameUpdatedAt === undefined
+      ? {}
+      : { displayNameUpdatedAt: name.displayNameUpdatedAt }),
+  };
 }

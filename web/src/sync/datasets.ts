@@ -25,6 +25,7 @@ import type { SharedSyncPayloadV1 } from "./sharedTypes";
 
 export const DATASET_PARTS = ["plan", "cycle", "intimacy", "sensitive"] as const;
 export type DatasetPart = (typeof DATASET_PARTS)[number];
+export const CONTROL_DATASET_SUFFIX = ".control";
 
 export const DATASET_PART_LABELS: Record<DatasetPart, string> = {
   plan: "Plan & settings",
@@ -134,6 +135,79 @@ export function baseDatasetIdOf(datasetId: string): string {
     if (datasetId.endsWith(suffix)) return datasetId.slice(0, -suffix.length);
   }
   return datasetId;
+}
+
+export type DiscoveredProfileDatasetGroup = {
+  baseDatasetId: string;
+  planFileId: string;
+  companionFileIds: Partial<Record<Exclude<DatasetPart, "plan">, string>>;
+  controlDatasetId?: string;
+  controlFileId?: string;
+};
+
+/**
+ * Reconstruct owned profile groups from the managed dataset files visible to a
+ * drive.file token. Hard-cutover generations share one root; only the newest
+ * visible generation is returned so an older retained source never reappears
+ * as a second profile on a fresh device.
+ */
+export function discoverProfileDatasetGroups(
+  files: ReadonlyArray<{ datasetId: string; fileId: string }>,
+): DiscoveredProfileDatasetGroup[] {
+  const byBase = new Map<string, DiscoveredProfileDatasetGroup>();
+  for (const file of files) {
+    const isControl = file.datasetId.endsWith(CONTROL_DATASET_SUFFIX);
+    const dataId = isControl
+      ? file.datasetId.slice(0, -CONTROL_DATASET_SUFFIX.length)
+      : file.datasetId;
+    const baseDatasetId = baseDatasetIdOf(dataId);
+    const existing = byBase.get(baseDatasetId) ?? {
+      baseDatasetId,
+      planFileId: "",
+      companionFileIds: {},
+    };
+    if (isControl) {
+      existing.controlDatasetId = file.datasetId;
+      existing.controlFileId = file.fileId;
+    } else {
+      const part = partForDatasetId(baseDatasetId, file.datasetId);
+      if (part === "plan") existing.planFileId = file.fileId;
+      else if (part) existing.companionFileIds[part] = file.fileId;
+    }
+    byBase.set(baseDatasetId, existing);
+  }
+
+  const latestByRoot = new Map<string, DiscoveredProfileDatasetGroup>();
+  for (const group of byBase.values()) {
+    if (!group.planFileId) continue;
+    const root = splitBaseRoot(group.baseDatasetId);
+    const current = latestByRoot.get(root);
+    if (!current || splitGeneration(group.baseDatasetId) > splitGeneration(current.baseDatasetId)) {
+      latestByRoot.set(root, group);
+    }
+  }
+  // Hard cutovers retain the original control dataset id while the data files
+  // move to a generated base (for example primary -> primary.g2). Attach that
+  // stable control file to the newest visible data generation.
+  for (const [root, latest] of latestByRoot) {
+    const control = [...byBase.values()].find(
+      (group) => splitBaseRoot(group.baseDatasetId) === root && group.controlFileId,
+    );
+    if (control?.controlFileId) {
+      latest.controlDatasetId = control.controlDatasetId;
+      latest.controlFileId = control.controlFileId;
+    }
+  }
+  return [...latestByRoot.values()].sort((left, right) => {
+    if (splitBaseRoot(left.baseDatasetId) === "primary") return -1;
+    if (splitBaseRoot(right.baseDatasetId) === "primary") return 1;
+    return left.baseDatasetId < right.baseDatasetId ? -1 : left.baseDatasetId > right.baseDatasetId ? 1 : 0;
+  });
+}
+
+function splitGeneration(baseDatasetId: string): number {
+  const match = baseDatasetId.match(/\.g(\d+)$/);
+  return match ? Number(match[1]) : 1;
 }
 
 export function grantsFromRequestedGrants(

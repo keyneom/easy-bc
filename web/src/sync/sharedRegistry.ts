@@ -6,7 +6,6 @@ import { idbDelete, idbGet, idbSet, KV_SHARED_SYNC_STATE } from "../idbStore";
 import { partForDatasetId, sameSplitFamily } from "./datasets";
 import { parseProfileKey, profileKey } from "./sharedFolderName";
 import {
-  defaultOwnedProfileKey,
   PRIMARY_DATASET_ID,
   SHARED_SYNC_STATE_VERSION,
   findProfile,
@@ -185,13 +184,15 @@ export function createInitialSharedSyncState(input: {
   ownerEmail: string;
   folderName: string;
   trustedOwnerKeyId: string;
+  datasetId?: string;
   appFolderId?: string;
   fileId?: string;
   lastRevisionId?: string;
 }): SharedSyncState {
-  const key = defaultOwnedProfileKey(input.ownerEmail);
+  const datasetId = input.datasetId ?? PRIMARY_DATASET_ID;
+  const key = profileKey(input.ownerEmail, datasetId);
   const profile: ProfileRecord = {
-    datasetId: PRIMARY_DATASET_ID,
+    datasetId,
     ownerEmail: input.ownerEmail,
     folderName: input.folderName,
     role: "owner",

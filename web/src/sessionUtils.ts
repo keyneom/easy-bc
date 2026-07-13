@@ -103,12 +103,14 @@ export type PersistedSession = {
   plannerOptionsUpdatedAt: string;
   ecJournalUpdatedAt: string;
   /**
-   * Profile display metadata (avatar) from the plan dataset. Mirrored onto
-   * ProfileRecord.avatarWebp for chips/headers after apply.
+   * Profile display metadata from the encrypted plan dataset. Mirrored onto
+   * ProfileRecord for chips/headers after apply.
    */
   profileMeta?: {
     avatarWebp?: string;
     updatedAt: string;
+    displayName?: string;
+    displayNameUpdatedAt?: string;
   };
   /** Android-only sync preferences; web preserves these without applying them. */
   androidPreferences?: PreservedAndroidPreferences;

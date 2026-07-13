@@ -21,6 +21,14 @@ object EasyBcSharedCodec : SharedBackupControllerCodec<SyncPayloadV1> {
             require((payload.profileMeta?.avatarWebp?.length ?: 0) <= 16_384) {
                 "The Drive snapshot contains an oversized profile photo."
             }
+            payload.profileMeta?.displayName?.let { displayName ->
+                require(displayName.isNotBlank() && displayName.length <= 120) {
+                    "The Drive snapshot contains an invalid profile name."
+                }
+                require(!payload.profileMeta.displayNameUpdatedAt.isNullOrBlank()) {
+                    "The Drive snapshot contains profile name metadata without a timestamp."
+                }
+            }
         }
 
     override fun merge(local: SyncPayloadV1, remote: SyncPayloadV1): SyncPayloadV1 =

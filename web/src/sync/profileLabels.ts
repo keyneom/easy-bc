@@ -56,8 +56,8 @@ export function profileDisplayLabel(state: SharedSyncState, profile: ProfileReco
   if (isLocalProfile(profile)) {
     return profile.displayName?.trim() || "Local profile";
   }
+  if (profile.displayName?.trim()) return profile.displayName.trim();
   if (isOwnedProfile(state, profile)) {
-    if (profile.displayName?.trim()) return profile.displayName.trim();
     if (profile.datasetId === PRIMARY_DATASET_ID) return "My data";
     return profile.datasetId;
   }

@@ -7,7 +7,12 @@ import kotlinx.serialization.Serializable
 data class ProfileMetaV1(
     /** Base64 WebP bytes, no data-URL prefix. */
     val avatarWebp: String? = null,
+    /** Avatar update/removal timestamp retained for v1 compatibility. */
     val updatedAt: String = SYNC_EPOCH,
+    /** User-facing profile label; encrypted with the plan dataset payload. */
+    val displayName: String? = null,
+    /** Independent timestamp so renames never overwrite concurrent avatar changes. */
+    val displayNameUpdatedAt: String? = null,
 )
 
 @Serializable
@@ -23,7 +28,7 @@ data class SyncPayloadV1(
     val deletedVoluntaryAbstinenceDates: Map<String, String> = emptyMap(),
     val ecJournal: TimestampedBoolean = TimestampedBoolean(),
     /**
-     * Profile display metadata (avatar). Lives in the plan dataset part only.
+     * Profile display metadata (name and avatar). Lives in the plan dataset part only.
      * Absent on snapshots written before avatar support.
      */
     val profileMeta: ProfileMetaV1? = null,

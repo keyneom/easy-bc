@@ -67,6 +67,36 @@ class EasyBcDatasetsTest {
     }
 
     @Test
+    fun `profile discovery keeps newest cutover generation and groups companions`() {
+        assertEquals(
+            listOf(
+                DiscoveredProfileDatasetGroup(
+                    baseDatasetId = "primary.g2",
+                    planFileId = "primary-new",
+                    companionFileIds = mapOf(PART_CYCLE to "primary-cycle"),
+                    controlDatasetId = "primary.control",
+                    controlFileId = "primary-control",
+                ),
+                DiscoveredProfileDatasetGroup(
+                    baseDatasetId = "daughter",
+                    planFileId = "daughter-plan",
+                    companionFileIds = mapOf(PART_SENSITIVE to "daughter-sensitive"),
+                ),
+            ),
+            discoverProfileDatasetGroups(
+                listOf(
+                    "primary" to "primary-old",
+                    "primary.g2" to "primary-new",
+                    "primary.g2.cycle" to "primary-cycle",
+                    "primary.control" to "primary-control",
+                    "daughter" to "daughter-plan",
+                    "daughter.sensitive" to "daughter-sensitive",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `grants round-trip through requestedGrants`() {
         val grants = mapOf(PART_CYCLE to "writer", PART_PLAN to "viewer")
         val requested = requestedGrantsFromDatasetGrants("primary", grants)

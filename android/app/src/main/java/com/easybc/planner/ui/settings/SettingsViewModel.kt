@@ -127,6 +127,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
         if (active == null || com.easybc.planner.sync.shared.isLocalProfile(active)) {
             _profileParticipants.value = emptyList()
+        } else {
+            // Keep the access list live whenever registry/profile state is
+            // refreshed. Failure is intentionally quiet here; the explicit
+            // retry action can renew Google authorization and report errors.
+            runCatching {
+                sharedSync.listActiveParticipantsFromRememberedAuthorization()
+            }.onSuccess { _profileParticipants.value = it }
         }
     }
 

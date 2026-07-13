@@ -5,6 +5,7 @@ import {
   baseDatasetIdOf,
   combineDatasetParts,
   datasetIdForPart,
+  discoverProfileDatasetGroups,
   grantsFromRequestedGrants,
   highestGrantedRole,
   newerSplitBaseId,
@@ -81,6 +82,32 @@ describe("dataset ids", () => {
     expect(partForDatasetId("primary", "other.cycle")).toBeNull();
     expect(baseDatasetIdOf("daughter.intimacy")).toBe("daughter");
     expect(baseDatasetIdOf("daughter")).toBe("daughter");
+  });
+
+  it("reconstructs profile groups and keeps only the newest cutover generation", () => {
+    expect(
+      discoverProfileDatasetGroups([
+        { datasetId: "primary", fileId: "primary-old" },
+        { datasetId: "primary.g2", fileId: "primary-new" },
+        { datasetId: "primary.g2.cycle", fileId: "primary-cycle" },
+        { datasetId: "primary.control", fileId: "primary-control" },
+        { datasetId: "daughter", fileId: "daughter-plan" },
+        { datasetId: "daughter.sensitive", fileId: "daughter-sensitive" },
+      ]),
+    ).toEqual([
+      {
+        baseDatasetId: "primary.g2",
+        planFileId: "primary-new",
+        companionFileIds: { cycle: "primary-cycle" },
+        controlDatasetId: "primary.control",
+        controlFileId: "primary-control",
+      },
+      {
+        baseDatasetId: "daughter",
+        planFileId: "daughter-plan",
+        companionFileIds: { sensitive: "daughter-sensitive" },
+      },
+    ]);
   });
 });
 

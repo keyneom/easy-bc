@@ -100,6 +100,36 @@ class SyncMergeTest {
         assertEquals(removed.profileMeta, SyncMerge.merge(photo, removed).profileMeta)
     }
 
+    @Test
+    fun profileNameAndAvatarMergeOnIndependentTimestamps() {
+        val avatar = payload(35, "2026-02-01T00:00:00Z").copy(
+            profileMeta = ProfileMetaV1(
+                avatarWebp = "new-photo",
+                updatedAt = "2026-04-01T00:00:00Z",
+                displayName = "Old name",
+                displayNameUpdatedAt = "2026-01-01T00:00:00Z",
+            ),
+        )
+        val renamed = payload(35, "2026-02-01T00:00:00Z").copy(
+            profileMeta = ProfileMetaV1(
+                avatarWebp = "old-photo",
+                updatedAt = "2026-02-01T00:00:00Z",
+                displayName = "Current name",
+                displayNameUpdatedAt = "2026-05-01T00:00:00Z",
+            ),
+        )
+
+        assertEquals(
+            ProfileMetaV1(
+                avatarWebp = "new-photo",
+                updatedAt = "2026-04-01T00:00:00Z",
+                displayName = "Current name",
+                displayNameUpdatedAt = "2026-05-01T00:00:00Z",
+            ),
+            SyncMerge.merge(avatar, renamed).profileMeta,
+        )
+    }
+
     private fun payload(age: Int, updatedAt: String) = SyncPayloadV1(
         exportedAt = updatedAt,
         planner = TimestampedPlanner(SyncPlannerOptions(ageYears = age), updatedAt),

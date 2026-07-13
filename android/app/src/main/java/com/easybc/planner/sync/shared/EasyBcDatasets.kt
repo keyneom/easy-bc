@@ -55,6 +55,77 @@ fun datasetIdForPart(baseDatasetId: String, part: String): String =
 
 fun controlDatasetIdFor(baseDatasetId: String): String = "$baseDatasetId$CONTROL_DATASET_SUFFIX"
 
+data class DiscoveredProfileDatasetGroup(
+    val baseDatasetId: String,
+    val planFileId: String,
+    val companionFileIds: Map<String, String>,
+    val controlDatasetId: String? = null,
+    val controlFileId: String? = null,
+)
+
+/** Rebuild owned profile groups from the managed files visible to drive.file. */
+fun discoverProfileDatasetGroups(
+    files: List<Pair<String, String>>,
+): List<DiscoveredProfileDatasetGroup> {
+    data class MutableGroup(
+        val baseDatasetId: String,
+        var planFileId: String = "",
+        val companionFileIds: MutableMap<String, String> = linkedMapOf(),
+        var controlDatasetId: String? = null,
+        var controlFileId: String? = null,
+    )
+
+    val byBase = linkedMapOf<String, MutableGroup>()
+    files.forEach { (datasetId, fileId) ->
+        val isControl = datasetId.endsWith(CONTROL_DATASET_SUFFIX)
+        val dataId = if (isControl) datasetId.removeSuffix(CONTROL_DATASET_SUFFIX) else datasetId
+        val base = baseDatasetIdOf(dataId)
+        val group = byBase.getOrPut(base) { MutableGroup(base) }
+        if (isControl) {
+            group.controlDatasetId = datasetId
+            group.controlFileId = fileId
+        } else {
+            when (val part = partForDatasetId(base, datasetId)) {
+                PART_PLAN -> group.planFileId = fileId
+                null -> Unit
+                else -> group.companionFileIds[part] = fileId
+            }
+        }
+    }
+    val latestByRoot = linkedMapOf<String, MutableGroup>()
+    byBase.values.filter { it.planFileId.isNotBlank() }.forEach { group ->
+        val root = splitBaseRoot(group.baseDatasetId)
+        val current = latestByRoot[root]
+        if (current == null || splitGeneration(group.baseDatasetId) > splitGeneration(current.baseDatasetId)) {
+            latestByRoot[root] = group
+        }
+    }
+    // The control id stays stable across a hard cutover even though the data
+    // files move to a generated base such as primary.g2.
+    latestByRoot.forEach { (root, latest) ->
+        byBase.values.firstOrNull {
+            splitBaseRoot(it.baseDatasetId) == root && it.controlFileId != null
+        }?.let { control ->
+            latest.controlDatasetId = control.controlDatasetId
+            latest.controlFileId = control.controlFileId
+        }
+    }
+    return latestByRoot.values.map { group ->
+        DiscoveredProfileDatasetGroup(
+            baseDatasetId = group.baseDatasetId,
+            planFileId = group.planFileId,
+            companionFileIds = group.companionFileIds,
+            controlDatasetId = group.controlDatasetId,
+            controlFileId = group.controlFileId,
+        )
+    }.sortedWith(compareBy<DiscoveredProfileDatasetGroup> {
+        if (splitBaseRoot(it.baseDatasetId) == PRIMARY_DATASET_ID) 0 else 1
+    }.thenBy { it.baseDatasetId })
+}
+
+private fun splitGeneration(baseDatasetId: String): Int =
+    Regex("\\.g(\\d+)$").find(baseDatasetId)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+
 fun partForDatasetId(baseDatasetId: String, datasetId: String): String? {
     if (datasetId == baseDatasetId) return PART_PLAN
     return DATASET_PARTS.firstOrNull { part ->

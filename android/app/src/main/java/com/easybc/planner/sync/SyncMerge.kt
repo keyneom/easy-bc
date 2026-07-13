@@ -66,16 +66,7 @@ object SyncMerge {
                 b.androidPreferences.updatedAt,
             )
         }
-        val profileMeta = when {
-            a.profileMeta == null -> b.profileMeta
-            b.profileMeta == null -> a.profileMeta
-            else -> newer(
-                a.profileMeta,
-                a.profileMeta.updatedAt,
-                b.profileMeta,
-                b.profileMeta.updatedAt,
-            )
-        }
+        val profileMeta = mergeProfileMeta(a.profileMeta, b.profileMeta)
         val selectedPlanner = newer(a.planner, a.planner.updatedAt, b.planner, b.planner.updatedAt)
         val otherPlanner = if (selectedPlanner === a.planner) b.planner else a.planner
         val planner = when {
@@ -106,5 +97,23 @@ object SyncMerge {
             if (timestamp(value) > timestamp(merged[key])) merged[key] = value
         }
         return merged
+    }
+
+    private fun mergeProfileMeta(a: ProfileMetaV1?, b: ProfileMetaV1?): ProfileMetaV1? {
+        if (a == null) return b
+        if (b == null) return a
+        val avatar = newer(a, a.updatedAt, b, b.updatedAt)
+        val name = newer(
+            a.displayName to a.displayNameUpdatedAt,
+            a.displayNameUpdatedAt,
+            b.displayName to b.displayNameUpdatedAt,
+            b.displayNameUpdatedAt,
+        )
+        return ProfileMetaV1(
+            avatarWebp = avatar.avatarWebp,
+            updatedAt = avatar.updatedAt,
+            displayName = name.first,
+            displayNameUpdatedAt = name.second,
+        )
     }
 }

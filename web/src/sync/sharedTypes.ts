@@ -6,7 +6,7 @@ import {
 } from "./datasets";
 import { parseProfileKey, profileKey as buildProfileKey } from "./sharedFolderName";
 import type { WasmOptions } from "../App";
-import type { PersistedSession } from "../sessionUtils";
+import { SYNC_EPOCH, type PersistedSession } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
 import {
   mergeSyncPayloads,
@@ -29,6 +29,8 @@ export type ProfileRecord = {
   folderName: string;
   /** User-facing label for owned profiles (e.g. "Daughter"). */
   displayName?: string;
+  /** Timestamp for encrypted cross-device display-name merge. */
+  displayNameUpdatedAt?: string;
   /**
    * Local cache of the plan-dataset avatar (base64 WebP, no data-URL prefix).
    * Lets chips/headers render without decrypting the plan file.
@@ -49,7 +51,7 @@ export type ProfileRecord = {
   lastSyncedAt?: string;
   /** Profiles exist independently of sync. Older records without this field are encrypted. */
   syncMode?: "local" | "encrypted";
-  /** App-owned labels for sharing keys; encrypted envelopes intentionally contain no email. */
+  /** Legacy/local fallback; verified control members are authoritative for participant email. */
   participantEmails?: Record<string, string>;
   /**
    * A newly joined writable profile must load its remote dataset before it may
@@ -199,15 +201,39 @@ export function buildSharedSyncPayload(
   options: WasmOptions,
   periodRecords: PeriodRecord[],
   session: PersistedSession,
-  profile?: Pick<ProfileRecord, "avatarWebp" | "avatarUpdatedAt"> | null,
+  profile?: Pick<
+    ProfileRecord,
+    "avatarWebp" | "avatarUpdatedAt" | "displayName" | "displayNameUpdatedAt"
+  > | null,
 ): SharedSyncPayloadV1 {
-  const cachedMeta = profile?.avatarUpdatedAt
+  const sessionMeta = session.profileMeta;
+  const cachedAvatar = profile?.avatarUpdatedAt
     ? { avatarWebp: profile.avatarWebp, updatedAt: profile.avatarUpdatedAt }
     : undefined;
-  const profileMeta = cachedMeta &&
-      (!session.profileMeta || cachedMeta.updatedAt > session.profileMeta.updatedAt)
-    ? cachedMeta
-    : session.profileMeta;
+  const avatar = cachedAvatar &&
+      (!sessionMeta || cachedAvatar.updatedAt > sessionMeta.updatedAt)
+    ? cachedAvatar
+    : sessionMeta;
+  const cachedName = profile?.displayNameUpdatedAt
+    ? {
+        displayName: profile.displayName,
+        displayNameUpdatedAt: profile.displayNameUpdatedAt,
+      }
+    : undefined;
+  const remoteNameAt = sessionMeta?.displayNameUpdatedAt;
+  const name = cachedName && (!remoteNameAt || cachedName.displayNameUpdatedAt > remoteNameAt)
+    ? cachedName
+    : sessionMeta;
+  const profileMeta = avatar || name
+    ? {
+        avatarWebp: avatar?.avatarWebp,
+        updatedAt: avatar?.updatedAt ?? SYNC_EPOCH,
+        ...(name?.displayName === undefined ? {} : { displayName: name.displayName }),
+        ...(name?.displayNameUpdatedAt === undefined
+          ? {}
+          : { displayNameUpdatedAt: name.displayNameUpdatedAt }),
+      }
+    : undefined;
   return extractSharedPayload({
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),

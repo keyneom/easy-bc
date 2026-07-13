@@ -1584,7 +1584,7 @@ export function SyncSettings({
           <div className="participant-list">
             <div className="participant-list-heading">
               <strong>People with access</strong>
-              <span>{participants.length} encryption {participants.length === 1 ? "key" : "keys"}</span>
+              <span>{participants.length} {participants.length === 1 ? "person" : "people"}</span>
             </div>
             {participants.map((participant) => {
               const split = activeProfile ? isSplitProfile(activeProfile) : false;

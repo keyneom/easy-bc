@@ -110,6 +110,27 @@ describe("shared sync payload", () => {
     });
   });
 
+  it("publishes an encrypted display name without disturbing newer avatar metadata", () => {
+    const updated = buildSharedSyncPayload(options(32) as WasmOptions, [], {
+      ...session(),
+      profileMeta: {
+        avatarWebp: "new-photo",
+        updatedAt: "2026-04-01T00:00:00.000Z",
+        displayName: "Old name",
+        displayNameUpdatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    }, {
+      displayName: "Current name",
+      displayNameUpdatedAt: "2026-05-01T00:00:00.000Z",
+    });
+    expect(updated.profileMeta).toEqual({
+      avatarWebp: "new-photo",
+      updatedAt: "2026-04-01T00:00:00.000Z",
+      displayName: "Current name",
+      displayNameUpdatedAt: "2026-05-01T00:00:00.000Z",
+    });
+  });
+
   it("merges the same way as full sync payloads", () => {
     const wasmOld = options(30) as WasmOptions;
     const wasmNew = options(35) as WasmOptions;
