@@ -1,6 +1,7 @@
 package com.easybc.planner.sync.shared
 
 import android.content.Context
+import android.util.Log
 import com.easybc.planner.data.db.AppDatabase
 import com.easybc.planner.diagnostics.DeveloperLog
 import com.easybc.planner.sync.SYNC_RP_ID
@@ -1202,6 +1203,15 @@ class SharedSyncCoordinator(
                 "control-read-failed",
                 mapOf("error" to error),
             )
+            runCatching { logControlSignatureOrderProbe(state, profile) }
+                .onFailure { probeError ->
+                    developerLog.append(
+                        "migration",
+                        "signature-order-probe-failed",
+                        mapOf("error" to probeError),
+                    )
+                    Log.w("EasyBCMigration", "Control signature order probe failed", probeError)
+                }
             return none
         }
         val open = verified.migrations.values.firstOrNull {
@@ -2127,7 +2137,6 @@ class SharedSyncCoordinator(
     ): SharingControlDataset {
         val controlDatasetId = profile.controlDatasetId
             ?: error("This profile has no sharing control dataset.")
-        val scopeKey = profileKey(profile.ownerEmail, profile.datasetId)
         // The control profileId must survive hard-cutover rebases (the
         // profile's base dataset id changes generation, the control dataset
         // never does), so it derives from the control id's base — identical
@@ -2140,7 +2149,20 @@ class SharedSyncCoordinator(
                 profile.datasetId
             },
         )
-        val controller = SharedBackupController<SharingControlStateV1>(
+        return SharingControlDataset(
+            controller = controlControllerFor(state, profile),
+            datasetId = controlDatasetId,
+            profileId = controlProfileId,
+            identity = { identityStore.getOrCreate() },
+        )
+    }
+
+    private fun controlControllerFor(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ): SharedBackupController<SharingControlStateV1> {
+        val scopeKey = profileKey(profile.ownerEmail, profile.datasetId)
+        return SharedBackupController(
             appId = EASY_BC_APP_ID,
             codec = createSharingControlCodec(),
             identity = { identityStore.getOrCreate() },
@@ -2149,12 +2171,29 @@ class SharedSyncCoordinator(
             cryptoOptions = SharingCryptoOptions(),
             resolveFork = { _ -> "merge" },
         )
-        return SharingControlDataset(
-            controller = controller,
-            datasetId = controlDatasetId,
-            profileId = controlProfileId,
-            identity = { identityStore.getOrCreate() },
-        )
+    }
+
+    private suspend fun logControlSignatureOrderProbe(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ) {
+        val controlDatasetId = requireNotNull(profile.controlDatasetId)
+        val loaded = controlControllerFor(state, profile).loadDataset(controlDatasetId)
+        val raw = createSharingControlCodec().serialize(loaded.value).jsonObject
+        probeControlSignatureOrdering(raw).forEach { result ->
+            val details = mapOf(
+                "eventId" to result.eventId,
+                "type" to result.type,
+                "sequence" to result.sequence,
+                "match" to (result.match ?: "none"),
+                "attempts" to result.attempts,
+            )
+            developerLog.append("migration", "signature-order-probe", details)
+            Log.i(
+                "EasyBCMigration",
+                "signature-order-probe " + details.entries.joinToString(" ") { (key, value) -> "$key=$value" },
+            )
+        }
     }
 
     // Must stay off the main thread: callers run in viewModelScope and raw
