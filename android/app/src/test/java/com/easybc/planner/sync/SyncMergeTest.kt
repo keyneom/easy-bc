@@ -42,6 +42,30 @@ class SyncMergeTest {
     }
 
     @Test
+    fun timestampOnlyDayTombstoneWinsOverOlderData() {
+        val active = payload(30, "2026-01-01T00:00:00Z").copy(
+            calendarDayLogs = mapOf(
+                "2026-08-12" to SyncDayLog(
+                    actualAction = "C",
+                    updatedAt = "2026-07-12T00:00:00Z",
+                ),
+            ),
+        )
+        val deleted = payload(30, "2026-01-01T00:00:00Z").copy(
+            calendarDayLogs = mapOf(
+                "2026-08-12" to SyncDayLog(updatedAt = "2026-07-13T00:00:00Z"),
+            ),
+        )
+
+        val merged = SyncMerge.merge(active, deleted)
+
+        assertEquals(
+            SyncDayLog(updatedAt = "2026-07-13T00:00:00Z"),
+            merged.calendarDayLogs["2026-08-12"],
+        )
+    }
+
+    @Test
     fun explicitConfiguredMarkerUpgradesEqualTimeLegacyPlanner() {
         val legacy = payload(35, "2026-02-01T00:00:00Z")
         val current = payload(35, "2026-02-01T00:00:00Z").copy(

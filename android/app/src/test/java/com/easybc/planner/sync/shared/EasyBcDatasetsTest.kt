@@ -162,6 +162,52 @@ class EasyBcDatasetsTest {
     }
 
     @Test
+    fun `whole-day deletion tombstone is preserved in every data part`() {
+        val payload = emptySharedPayload().copy(
+            calendarDayLogs = mapOf(
+                "2026-08-12" to SyncDayLog(updatedAt = "2026-07-13T01:00:00.000Z"),
+            ),
+        )
+        assertTrue(projectDatasetPart(payload, PART_PLAN).calendarDayLogs.isEmpty())
+        listOf(PART_CYCLE, PART_INTIMACY, PART_SENSITIVE).forEach { part ->
+            assertEquals(
+                SyncDayLog(updatedAt = "2026-07-13T01:00:00.000Z"),
+                projectDatasetPart(payload, part).calendarDayLogs["2026-08-12"],
+            )
+        }
+    }
+
+    @Test
+    fun `targeted part tombstone does not erase another part`() {
+        val payload = emptySharedPayload().copy(
+            calendarDayLogs = mapOf(
+                "2026-08-12" to SyncDayLog(
+                    mucus = "egg-white",
+                    deletedDatasetParts = mapOf(
+                        PART_INTIMACY to "2026-07-13T01:00:00.000Z",
+                    ),
+                    updatedAt = "2026-07-13T01:00:00.000Z",
+                ),
+            ),
+        )
+        val cycle = projectDatasetPart(payload, PART_CYCLE)
+        val intimacy = projectDatasetPart(payload, PART_INTIMACY)
+        assertEquals("egg-white", cycle.calendarDayLogs.getValue("2026-08-12").mucus)
+        assertEquals(
+            SyncDayLog(updatedAt = "2026-07-13T01:00:00.000Z"),
+            intimacy.calendarDayLogs["2026-08-12"],
+        )
+        assertNull(projectDatasetPart(payload, PART_SENSITIVE).calendarDayLogs["2026-08-12"])
+
+        val combined = combineDatasetParts(mapOf(PART_CYCLE to cycle, PART_INTIMACY to intimacy))
+        assertEquals("egg-white", combined.calendarDayLogs.getValue("2026-08-12").mucus)
+        assertEquals(
+            mapOf(PART_INTIMACY to "2026-07-13T01:00:00.000Z"),
+            combined.calendarDayLogs.getValue("2026-08-12").deletedDatasetParts,
+        )
+    }
+
+    @Test
     fun `split profile helpers respect grants`() {
         val split = ProfileRecord(
             datasetId = "primary",

@@ -16,6 +16,7 @@ import {
   sameSplitFamily,
   SHARING_PRESETS,
   splitBaseRoot,
+  updateCalendarDayLog,
 } from "./datasets";
 import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
 import { sharedPayloadFingerprint, type SharedSyncPayloadV1 } from "./sharedTypes";
@@ -202,6 +203,71 @@ describe("projection & combination", () => {
     expect(plan.planner.configured).toBe(true);
     expect(plan.periodRecords).toHaveLength(0);
     expect(Object.keys(plan.calendarDayLogs)).toHaveLength(0);
+  });
+
+  it("preserves a whole-day deletion tombstone in every data part", () => {
+    const payload = createEmptySharedSyncPayload();
+    payload.calendarDayLogs["2026-08-12"] = {
+      updatedAt: "2026-07-13T01:00:00.000Z",
+    };
+
+    expect(projectDatasetPart(payload, "plan").calendarDayLogs).toEqual({});
+    for (const part of ["cycle", "intimacy", "sensitive"] as const) {
+      expect(projectDatasetPart(payload, part).calendarDayLogs["2026-08-12"]).toEqual({
+        updatedAt: "2026-07-13T01:00:00.000Z",
+      });
+    }
+  });
+
+  it("targets a part deletion without erasing another part", () => {
+    const payload = createEmptySharedSyncPayload();
+    payload.calendarDayLogs["2026-08-12"] = {
+      mucus: "egg-white",
+      deletedDatasetParts: { intimacy: "2026-07-13T01:00:00.000Z" },
+      updatedAt: "2026-07-13T01:00:00.000Z",
+    };
+
+    const cycle = projectDatasetPart(payload, "cycle");
+    const intimacy = projectDatasetPart(payload, "intimacy");
+    expect(cycle.calendarDayLogs["2026-08-12"].mucus).toBe("egg-white");
+    expect(intimacy.calendarDayLogs["2026-08-12"]).toEqual({
+      updatedAt: "2026-07-13T01:00:00.000Z",
+    });
+    expect(projectDatasetPart(payload, "sensitive").calendarDayLogs["2026-08-12"])
+      .toBeUndefined();
+
+    const combined = combineDatasetParts({ cycle, intimacy });
+    expect(combined.calendarDayLogs["2026-08-12"].mucus).toBe("egg-white");
+    expect(combined.calendarDayLogs["2026-08-12"].deletedDatasetParts).toEqual({
+      intimacy: "2026-07-13T01:00:00.000Z",
+    });
+  });
+
+  it("records tombstones when UI edits clear the last value in a part", () => {
+    const clearedAction = updateCalendarDayLog(
+      { actualAction: "C", updatedAt: "2026-07-12T00:00:00.000Z" },
+      { actualAction: undefined, reconciled: undefined },
+      "2026-07-13T01:00:00.000Z",
+    );
+    expect(clearedAction.deletedDatasetParts).toEqual({
+      intimacy: "2026-07-13T01:00:00.000Z",
+    });
+
+    const clearedSensitiveEvent = updateCalendarDayLog(
+      {
+        events: [{
+          id: "ec",
+          kind: "plan_b_taken",
+          ecType: "levonorgestrel",
+          occurredAt: "2026-08-12T12:00:00.000Z",
+        }],
+      },
+      { events: [] },
+      "2026-07-13T01:05:00.000Z",
+    );
+    expect(clearedSensitiveEvent.deletedDatasetParts).toEqual({
+      sensitive: "2026-07-13T01:05:00.000Z",
+    });
   });
 });
 

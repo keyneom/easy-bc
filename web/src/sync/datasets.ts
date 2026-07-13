@@ -245,6 +245,60 @@ const CYCLE_LOG_FIELDS = [
 ] as const;
 const INTIMACY_LOG_FIELDS = ["actualAction", "notes", "reconciled"] as const;
 
+export function hasDayLogDataForPart(log: CalendarDayLog, part: DatasetPart): boolean {
+  if (part === "cycle") {
+    return CYCLE_LOG_FIELDS.some((field) => {
+      const value = log[field];
+      return typeof value === "boolean" ? value : value !== undefined;
+    });
+  }
+  if (part === "intimacy") {
+    return log.actualAction !== undefined || Boolean(log.notes?.trim()) || log.reconciled === true ||
+      (log.events ?? []).some((event) => !isSensitiveEvent(event));
+  }
+  if (part === "sensitive") {
+    return (log.events ?? []).some(isSensitiveEvent);
+  }
+  return false;
+}
+
+function latestTimestamp(...values: Array<string | undefined>): string | undefined {
+  return values.filter((value): value is string => value !== undefined).sort().at(-1);
+}
+
+/**
+ * Apply a UI edit while retaining enough information for an emptied split
+ * dataset part to publish a deletion tombstone on the next sync.
+ */
+export function updateCalendarDayLog(
+  current: CalendarDayLog | undefined,
+  patch: Partial<CalendarDayLog>,
+  updatedAt: string,
+): CalendarDayLog {
+  const next: CalendarDayLog = { ...current, ...patch, updatedAt };
+  const affected = new Set<Exclude<DatasetPart, "plan">>();
+  if (INTIMACY_LOG_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(patch, field))) {
+    affected.add("intimacy");
+  }
+  if (CYCLE_LOG_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(patch, field))) {
+    affected.add("cycle");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "events")) {
+    for (const event of [...(current?.events ?? []), ...(next.events ?? [])]) {
+      affected.add(isSensitiveEvent(event) ? "sensitive" : "intimacy");
+    }
+  }
+
+  const deleted = { ...(current?.deletedDatasetParts ?? {}) };
+  for (const part of affected) {
+    if (hasDayLogDataForPart(next, part)) delete deleted[part];
+    else deleted[part] = updatedAt;
+  }
+  if (Object.keys(deleted).length > 0) next.deletedDatasetParts = deleted;
+  else delete next.deletedDatasetParts;
+  return next;
+}
+
 function projectDayLog(log: CalendarDayLog, part: DatasetPart): CalendarDayLog | null {
   const out: CalendarDayLog = {};
   if (part === "cycle") {
@@ -263,12 +317,26 @@ function projectDayLog(log: CalendarDayLog, part: DatasetPart): CalendarDayLog |
   } else {
     return null;
   }
-  if (Object.keys(out).length === 0) return null;
-  if (log.updatedAt !== undefined) out.updatedAt = log.updatedAt;
-  return out;
+  const deletedAt = log.deletedDatasetParts?.[part];
+  const hasData = hasDayLogDataForPart(out, part);
+  if (hasData && (!deletedAt || (log.updatedAt ?? "") > deletedAt)) {
+    if (log.updatedAt !== undefined) out.updatedAt = log.updatedAt;
+    return out;
+  }
+  if (deletedAt) return { updatedAt: latestTimestamp(log.updatedAt, deletedAt) };
+  const hasAnyData = (["cycle", "intimacy", "sensitive"] as const)
+    .some((candidate) => hasDayLogDataForPart(log, candidate));
+  if (!hasAnyData && !log.deletedDatasetParts && log.updatedAt) {
+    return { updatedAt: log.updatedAt };
+  }
+  return null;
 }
 
-function mergeDayLogSections(a: CalendarDayLog | undefined, b: CalendarDayLog): CalendarDayLog {
+function mergeDayLogSections(
+  a: CalendarDayLog | undefined,
+  b: CalendarDayLog,
+  part: DatasetPart,
+): CalendarDayLog {
   const merged: CalendarDayLog = { ...(a ?? {}), ...b };
   const events = [...(a?.events ?? []), ...(b.events ?? [])];
   if (events.length > 0) {
@@ -286,6 +354,13 @@ function mergeDayLogSections(a: CalendarDayLog | undefined, b: CalendarDayLog): 
   if (updatedAts.length > 0) {
     merged.updatedAt = updatedAts.sort().at(-1);
   }
+  const deleted = { ...(a?.deletedDatasetParts ?? {}), ...(b.deletedDatasetParts ?? {}) };
+  if (part !== "plan") {
+    if (hasDayLogDataForPart(b, part)) delete deleted[part];
+    else if (b.updatedAt) deleted[part] = b.updatedAt;
+  }
+  if (Object.keys(deleted).length > 0) merged.deletedDatasetParts = deleted;
+  else delete merged.deletedDatasetParts;
   return merged;
 }
 
@@ -360,7 +435,7 @@ export function combineDatasetParts(
       out.ecJournal = payload.ecJournal;
     }
     for (const [date, log] of Object.entries(payload.calendarDayLogs)) {
-      out.calendarDayLogs[date] = mergeDayLogSections(out.calendarDayLogs[date], log);
+      out.calendarDayLogs[date] = mergeDayLogSections(out.calendarDayLogs[date], log, part);
     }
   }
   if (exportedAts.length > 0) {

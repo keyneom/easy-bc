@@ -48,6 +48,22 @@ describe("mergeSyncPayloads", () => {
     expect(merged.calendarDayLogs["2026-01-02"]?.notes).toBe("new");
   });
 
+  it("lets a timestamp-only day tombstone replace older data", () => {
+    const active = payload(30, "2026-01-01T00:00:00.000Z");
+    active.calendarDayLogs["2026-08-12"] = {
+      actualAction: "C",
+      updatedAt: "2026-07-12T00:00:00.000Z",
+    };
+    const deleted = payload(30, "2026-01-01T00:00:00.000Z");
+    deleted.calendarDayLogs["2026-08-12"] = {
+      updatedAt: "2026-07-13T00:00:00.000Z",
+    };
+
+    expect(mergeSyncPayloads(active, deleted).calendarDayLogs["2026-08-12"]).toEqual({
+      updatedAt: "2026-07-13T00:00:00.000Z",
+    });
+  });
+
   it("preserves an explicit configured marker when upgrading an equal-time legacy planner", () => {
     const legacy = payload(35, "2026-02-01T00:00:00.000Z");
     const current = payload(35, "2026-02-01T00:00:00.000Z");

@@ -89,11 +89,31 @@ data class SyncDayLog(
     val breastTender: Boolean? = null,
     val reconciled: Boolean? = null,
     val events: List<SyncDayEvent> = emptyList(),
+    /**
+     * Per-dataset deletion clocks used by split profiles. A timestamp-only
+     * row is the on-wire tombstone inside an individual dataset file; this
+     * map preserves which part that tombstone came from after the files are
+     * recombined into one app payload.
+     */
+    val deletedDatasetParts: Map<String, String> = emptyMap(),
     val updatedAt: String? = null,
 ) {
     fun hasUserData(): Boolean = actualAction != null || notes != null || mucus != null ||
         bbtCelsius != null || opk != null || mittelschmerz == true || breastTender == true ||
         reconciled == true || events.isNotEmpty()
+}
+
+const val DAY_LOG_PART_CYCLE = "cycle"
+const val DAY_LOG_PART_INTIMACY = "intimacy"
+const val DAY_LOG_PART_SENSITIVE = "sensitive"
+
+fun SyncDayLog.hasDataForDatasetPart(part: String): Boolean = when (part) {
+    DAY_LOG_PART_CYCLE -> mucus != null || bbtCelsius != null || opk != null ||
+        mittelschmerz == true || breastTender == true
+    DAY_LOG_PART_INTIMACY -> !actualAction.isNullOrBlank() || !notes.isNullOrBlank() || reconciled == true ||
+        events.any { it.kind != "plan_b_taken" }
+    DAY_LOG_PART_SENSITIVE -> events.any { it.kind == "plan_b_taken" }
+    else -> false
 }
 
 @Serializable

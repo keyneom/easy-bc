@@ -94,7 +94,11 @@ import {
   sharedPayloadToSyncPayload,
   type SharedSyncState,
 } from "./sync/sharedTypes";
-import { DATASET_PART_LABELS, type DatasetPart } from "./sync/datasets";
+import {
+  DATASET_PART_LABELS,
+  updateCalendarDayLog,
+  type DatasetPart,
+} from "./sync/datasets";
 import { profileDisplayLabel } from "./sync/profileLabels";
 import { shouldOpenSyncSettings } from "./sync/sharedRoute";
 import {
@@ -2144,17 +2148,13 @@ export default function App() {
                     ...current,
                     calendarDayLogs: {
                       ...current.calendarDayLogs,
-                      [selectedDayIso]: (() => {
-                        const next = {
-                          ...current.calendarDayLogs[selectedDayIso],
-                          ...patch,
-                          updatedAt: new Date().toISOString(),
-                        } satisfies CalendarDayLog;
-                        if ("actualAction" in patch) {
-                          next.reconciled = patch.actualAction ? true : undefined;
-                        }
-                        return next;
-                      })(),
+                      [selectedDayIso]: updateCalendarDayLog(
+                        current.calendarDayLogs[selectedDayIso],
+                        "actualAction" in patch
+                          ? { ...patch, reconciled: patch.actualAction ? true : undefined }
+                          : patch,
+                        new Date().toISOString(),
+                      ),
                     },
                   }));
                 }}

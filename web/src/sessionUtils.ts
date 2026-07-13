@@ -40,6 +40,12 @@ export type CalendarDayLog = {
   breastTender?: boolean;
   reconciled?: boolean;
   events?: DayEvent[];
+  /**
+   * Per-file deletion clocks for split datasets. Individual files carry a
+   * timestamp-only row; this map preserves the originating part after those
+   * files are recombined into one app session.
+   */
+  deletedDatasetParts?: Partial<Record<"cycle" | "intimacy" | "sensitive", string>>;
   /** Used only to resolve cross-device edits; it is not shown in the UI. */
   updatedAt?: string;
 };

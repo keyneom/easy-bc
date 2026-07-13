@@ -3,6 +3,10 @@ package com.easybc.planner.data
 import com.easybc.planner.BuildConfig
 import com.easybc.planner.bridge.PlannerBridge
 import com.easybc.planner.data.db.*
+import com.easybc.planner.sync.DAY_LOG_PART_CYCLE
+import com.easybc.planner.sync.DAY_LOG_PART_INTIMACY
+import com.easybc.planner.sync.DAY_LOG_PART_SENSITIVE
+import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.util.CycleCalculator
 import com.easybc.planner.util.EcModel
 import kotlinx.coroutines.CoroutineScope
@@ -560,6 +564,9 @@ class PlannerRepository(
         )
         dayLogDao.upsert(merged)
         syncMetadataDao.delete(dayDeletionKey(date.toEpochDay()))
+        syncMetadataDao.delete(
+            SyncPayloadStore.dayPartDeletionKey(DAY_LOG_PART_INTIMACY, date.toEpochDay())
+        )
     }
 
     /**
@@ -613,6 +620,13 @@ class PlannerRepository(
         )
         dayLogDao.upsert(merged)
         syncMetadataDao.delete(dayDeletionKey(date.toEpochDay()))
+        updateDayPartDeletion(
+            DAY_LOG_PART_CYCLE,
+            date.toEpochDay(),
+            hasData = merged.mucus != null || merged.bbtCelsius != null || merged.opk != null ||
+                merged.mittelschmerz || merged.breastTender,
+            updatedAt = merged.updatedAt,
+        )
     }
 
     /**
@@ -624,18 +638,27 @@ class PlannerRepository(
      */
     suspend fun clearDayAction(date: LocalDate) {
         val existing = dayLogDao.getForDate(date.toEpochDay()) ?: return
+        val now = System.currentTimeMillis()
         val hasSignals = existing.mucus != null || existing.bbtCelsius != null ||
             existing.opk != null || existing.mittelschmerz || existing.breastTender
         val hasNotes = !existing.notes.isNullOrBlank()
-        val hasEvents = dayEventDao.countForDate(date.toEpochDay()) > 0
+        val events = dayEventDao.getForDate(date.toEpochDay())
+        val hasEvents = events.isNotEmpty()
         if (hasSignals || hasNotes || hasEvents) {
             dayLogDao.upsert(
-                existing.copy(actualAction = "", reconciled = false, updatedAt = System.currentTimeMillis())
+                existing.copy(actualAction = "", reconciled = false, updatedAt = now)
+            )
+            updateDayPartDeletion(
+                DAY_LOG_PART_INTIMACY,
+                date.toEpochDay(),
+                hasData = hasNotes || events.any { it.kind != "plan_b_taken" },
+                updatedAt = now,
             )
         } else {
             dayLogDao.delete(existing)
+            clearDayPartDeletions(date.toEpochDay())
             syncMetadataDao.put(
-                SyncMetadataEntity(dayDeletionKey(date.toEpochDay()), System.currentTimeMillis().toString())
+                SyncMetadataEntity(dayDeletionKey(date.toEpochDay()), now.toString())
             )
         }
     }
@@ -674,11 +697,48 @@ class PlannerRepository(
         )
         touchDayLog(date, now)
         syncMetadataDao.delete(dayDeletionKey(date.toEpochDay()))
+        syncMetadataDao.delete(
+            SyncPayloadStore.dayPartDeletionKey(
+                if (kind == "plan_b_taken") DAY_LOG_PART_SENSITIVE else DAY_LOG_PART_INTIMACY,
+                date.toEpochDay(),
+            )
+        )
     }
 
     suspend fun deleteDayEvent(event: DayEventEntity) {
+        val now = System.currentTimeMillis()
         dayEventDao.delete(event)
-        touchDayLog(LocalDate.ofEpochDay(event.date), System.currentTimeMillis())
+        val remaining = dayEventDao.getForDate(event.date)
+        val log = dayLogDao.getForDate(event.date)
+        val part = if (event.kind == "plan_b_taken") DAY_LOG_PART_SENSITIVE else DAY_LOG_PART_INTIMACY
+        val hasPartData = if (part == DAY_LOG_PART_SENSITIVE) {
+            remaining.any { it.kind == "plan_b_taken" }
+        } else {
+            !log?.actualAction.isNullOrBlank() || !log?.notes.isNullOrBlank() ||
+                remaining.any { it.kind != "plan_b_taken" }
+        }
+        touchDayLog(LocalDate.ofEpochDay(event.date), now)
+        updateDayPartDeletion(part, event.date, hasPartData, now)
+    }
+
+    private suspend fun updateDayPartDeletion(
+        part: String,
+        epochDay: Long,
+        hasData: Boolean,
+        updatedAt: Long,
+    ) {
+        val key = SyncPayloadStore.dayPartDeletionKey(part, epochDay)
+        if (hasData) {
+            syncMetadataDao.delete(key)
+        } else {
+            syncMetadataDao.put(SyncMetadataEntity(key, updatedAt.toString()))
+        }
+    }
+
+    private suspend fun clearDayPartDeletions(epochDay: Long) {
+        listOf(DAY_LOG_PART_CYCLE, DAY_LOG_PART_INTIMACY, DAY_LOG_PART_SENSITIVE).forEach { part ->
+            syncMetadataDao.delete(SyncPayloadStore.dayPartDeletionKey(part, epochDay))
+        }
     }
 
     private suspend fun touchDayLog(date: LocalDate, updatedAt: Long) {

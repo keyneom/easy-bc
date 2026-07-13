@@ -80,6 +80,21 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
                 dayLogs[iso] = SyncDayLog(updatedAt = instant(deletedAt))
             }
         }
+        metadata.entries.filter { it.key.startsWith(DAY_PART_DELETED_PREFIX) }.forEach { (key, value) ->
+            val suffix = key.removePrefix(DAY_PART_DELETED_PREFIX)
+            val part = suffix.substringBefore(':')
+            val epochDay = suffix.substringAfter(':', missingDelimiterValue = "").toLongOrNull()
+                ?: return@forEach
+            if (part !in DAY_LOG_DATASET_PARTS) return@forEach
+            val deletedAt = instant(value.toLongOrNull() ?: 0L)
+            val iso = date(epochDay)
+            val current = dayLogs[iso] ?: SyncDayLog(updatedAt = deletedAt)
+            dayLogs[iso] = current.copy(
+                deletedDatasetParts = current.deletedDatasetParts + (part to deletedAt),
+                updatedAt = listOfNotNull(current.updatedAt, deletedAt)
+                    .maxByOrNull { timestamp(it) },
+            )
+        }
 
         // Android's NONE outcome and the web's voluntary-abstinence credit
         // describe the same as-lived event. Keep both representations in
@@ -228,6 +243,7 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
         db.dayEventDao().deleteAll()
         db.syncMetadataDao().deleteByPrefix(PERIOD_DELETED_PREFIX)
         db.syncMetadataDao().deleteByPrefix(DAY_DELETED_PREFIX)
+        db.syncMetadataDao().deleteByPrefix(DAY_PART_DELETED_PREFIX)
 
         payload.periodRecords.forEach { row ->
             db.periodRecordDao().insert(
@@ -268,6 +284,11 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
         }
         effectiveDayLogs.forEach { (iso, row) ->
             val epochDay = LocalDate.parse(iso).toEpochDay()
+            row.deletedDatasetParts.forEach { (part, deletedAt) ->
+                if (part in DAY_LOG_DATASET_PARTS) {
+                    putMetadata(dayPartDeletionKey(part, epochDay), timestamp(deletedAt).toString())
+                }
+            }
             if (row.hasUserData()) {
                 db.dayLogDao().upsert(
                     DayLog(
@@ -338,6 +359,12 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
     companion object {
         const val PERIOD_DELETED_PREFIX = "period_deleted:"
         const val DAY_DELETED_PREFIX = "day_deleted:"
+        const val DAY_PART_DELETED_PREFIX = "day_part_deleted:"
+        val DAY_LOG_DATASET_PARTS = setOf(
+            DAY_LOG_PART_CYCLE,
+            DAY_LOG_PART_INTIMACY,
+            DAY_LOG_PART_SENSITIVE,
+        )
         private const val META_PRESERVED_WEB = "sync:preserved_web"
         private const val META_FILE_ID = "sync:file_id"
         private const val META_LAST_SYNCED = "sync:last_synced_at"
@@ -352,5 +379,8 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
             if (value > 0L) Instant.ofEpochMilli(value).toString() else SYNC_EPOCH
 
         fun date(epochDay: Long): String = LocalDate.ofEpochDay(epochDay).toString()
+
+        fun dayPartDeletionKey(part: String, epochDay: Long): String =
+            "$DAY_PART_DELETED_PREFIX$part:$epochDay"
     }
 }

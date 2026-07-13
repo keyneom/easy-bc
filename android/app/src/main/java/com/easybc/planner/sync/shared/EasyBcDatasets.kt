@@ -1,7 +1,9 @@
 package com.easybc.planner.sync.shared
 
 import com.easybc.planner.sync.SyncDayLog
+import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.SyncPayloadV1
+import com.easybc.planner.sync.hasDataForDatasetPart
 import com.keyneom.synckit.sharing.SharingDatasetGrantV1
 import com.keyneom.synckit.sharing.SharingRole
 
@@ -285,11 +287,32 @@ private fun projectDayLog(log: SyncDayLog, part: String): SyncDayLog? {
         )
         else -> return null
     }
-    return if (projected.hasUserData()) projected else null
+    val deletedAt = log.deletedDatasetParts[part]
+    val projectedAt = projected.updatedAt
+    return when {
+        projected.hasDataForDatasetPart(part) &&
+            (deletedAt == null || SyncPayloadStore.timestamp(projectedAt) > SyncPayloadStore.timestamp(deletedAt)) ->
+            projected
+        deletedAt != null -> SyncDayLog(
+            updatedAt = listOfNotNull(projectedAt, deletedAt)
+                .maxByOrNull { SyncPayloadStore.timestamp(it) },
+        )
+        !log.hasUserData() && log.deletedDatasetParts.isEmpty() && projectedAt != null ->
+            SyncDayLog(updatedAt = projectedAt)
+        else -> null
+    }
 }
 
-private fun mergeDayLogSections(a: SyncDayLog?, b: SyncDayLog): SyncDayLog {
-    if (a == null) return b
+private fun mergeDayLogSections(a: SyncDayLog?, b: SyncDayLog, part: String): SyncDayLog {
+    val deletedParts = a?.deletedDatasetParts.orEmpty().toMutableMap().apply {
+        putAll(b.deletedDatasetParts)
+        if (b.hasDataForDatasetPart(part)) {
+            remove(part)
+        } else if (b.updatedAt != null) {
+            this[part] = b.updatedAt
+        }
+    }
+    if (a == null) return b.copy(deletedDatasetParts = deletedParts)
     val events = (a.events + b.events).distinctBy { it.id }
     return SyncDayLog(
         actualAction = b.actualAction ?: a.actualAction,
@@ -301,6 +324,7 @@ private fun mergeDayLogSections(a: SyncDayLog?, b: SyncDayLog): SyncDayLog {
         breastTender = b.breastTender ?: a.breastTender,
         reconciled = b.reconciled ?: a.reconciled,
         events = events,
+        deletedDatasetParts = deletedParts,
         updatedAt = listOfNotNull(a.updatedAt, b.updatedAt).maxOrNull(),
     )
 }
@@ -370,7 +394,7 @@ fun combineDatasetParts(parts: Map<String, SyncPayloadV1>): SyncPayloadV1 {
             else -> out
         }
         for ((date, log) in payload.calendarDayLogs) {
-            logs[date] = mergeDayLogSections(logs[date], log)
+            logs[date] = mergeDayLogSections(logs[date], log, part)
         }
     }
     return out.copy(
