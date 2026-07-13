@@ -20,6 +20,12 @@ updates:
     directory: /android
     schedule:
       interval: weekly
+    # sync-kit RC upgrades are coordinated manually with the web package so
+    # cross-platform protocol parity remains a release gate. Dependabot also
+    # cannot query this GitHub Packages artifact without separate package
+    # credentials, even though Actions can resolve the pinned version.
+    ignore:
+      - dependency-name: com.keyneom:sync-kit-android
     groups:
       android-dependencies:
         patterns: ["*"]
