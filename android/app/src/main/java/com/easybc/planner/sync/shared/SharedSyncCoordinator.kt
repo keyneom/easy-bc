@@ -421,7 +421,20 @@ class SharedSyncCoordinator(
             lastSyncedAt = syncedAt,
             needsInitialLoad = false,
         )
-        val next = registry.upsertProfile(nextProfile)
+        var next = registry.upsertProfile(nextProfile)
+        // Existing installations do not rerun setup. Discover profiles made
+        // on Web during every normal owner sync so the local registry remains
+        // cross-platform in both directions.
+        if (isOwnedProfile(next, nextProfile)) {
+            val appFolderId = nextProfile.appFolderId ?: controller.ensureStorage().appFolderId
+            val listedDatasets = controller.listDatasets()
+            next = recoverAdditionalOwnedProfiles(
+                initialState = next,
+                listedDatasets = listedDatasets.map { it.datasetId to it.fileId },
+                appFolderId = appFolderId,
+                trustedOwnerKeyId = nextProfile.trustedOwnerKeyId,
+            )
+        }
         store.rememberSync(result.fileId, syncedAt)
         SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
         return refreshControlEnrollment(next, nextProfile)

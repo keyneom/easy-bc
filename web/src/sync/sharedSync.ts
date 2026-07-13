@@ -121,6 +121,7 @@ type Runtime = {
   controller: SharedBackupController<SharedSyncPayloadV1>;
   identityProvider: ReturnType<typeof createSharingIdentityProvider>;
   authorizationProvider: CachingAuthorizationProvider;
+  googleIdentity: GoogleWebIdentityProvider;
 };
 
 let runtime: Runtime | null = null;
@@ -640,6 +641,7 @@ function createRuntimeForProfile(
     local,
     identityProvider,
     authorizationProvider,
+    googleIdentity,
     controller: buildController(
       state,
       profile,
@@ -1165,6 +1167,7 @@ export async function setupSharedSync(
         local: createdPayload,
         identityProvider,
         authorizationProvider,
+        googleIdentity,
         controller,
       };
       return {
@@ -1237,9 +1240,29 @@ async function syncActiveDatasetInternal(
       lastSyncedAt: new Date().toISOString(),
       needsInitialLoad: false,
     }, result.payload);
-    const nextState = upsertProfile(refreshed, updatedProfile);
+    let nextState = upsertProfile(refreshed, updatedProfile);
     cachedState = nextState;
     await saveSharedSyncState(nextState);
+    // Existing installations skip setup, so setup-only discovery never sees
+    // profiles created on another platform. Scan the owner's Drive folder on
+    // every normal sync and adopt any valid profile datasets that are absent
+    // from this device's local registry.
+    if (isOwnedProfile(nextState, updatedProfile)) {
+      const storage = updatedProfile.appFolderId
+        ? { appFolderId: updatedProfile.appFolderId }
+        : await active.controller.ensureStorage();
+      const listedDatasets = await active.controller.listDatasets();
+      nextState = await recoverAdditionalOwnedProfiles(
+        config,
+        nextState,
+        listedDatasets,
+        storage.appFolderId,
+        active.identityProvider,
+        active.authorizationProvider,
+        active.googleIdentity,
+      );
+      cachedState = nextState;
+    }
     active.state = nextState;
     return {
       payload: result.payload,
@@ -3105,6 +3128,7 @@ export async function submitJoinFromLink(
         local: {} as SharedSyncPayloadV1,
         identityProvider,
         authorizationProvider,
+        googleIdentity,
         controller,
       };
       const landingUrl =
@@ -3404,6 +3428,7 @@ export async function submitJoinResponse(
       local: {} as SharedSyncPayloadV1,
       identityProvider,
       authorizationProvider,
+      googleIdentity,
       controller,
     };
   });
