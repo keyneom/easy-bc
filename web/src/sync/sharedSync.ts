@@ -29,6 +29,7 @@ import {
 import {
   createSharedBackupController,
   type SharedBackupController,
+  type SharedBackupControllerCodec,
 } from "@keyneom/sync-kit/sharing/controller";
 import { verifySharingInvitationV1 } from "@keyneom/sync-kit/sharing/web-crypto";
 import {
@@ -40,6 +41,10 @@ import {
 import { GoogleDriveSharedBackupTransport } from "@keyneom/sync-kit/stores/google-drive/sharing";
 import { idbDelete, idbGet, idbSet, KV_SHARING_SYNC_CHECKPOINT } from "../idbStore";
 import { appendDeveloperLog } from "../diagnostics/developerLog";
+import {
+  createLegacyControlRepairCodec,
+  repairLegacyControlSignature,
+} from "./controlSignatureRepair";
 import { pickSharedDatasetFiles } from "./sharedPicker";
 import { easyBcSharedCodec } from "./sharedCodec";
 import { createSharingIdentityProvider } from "./sharedIdentity";
@@ -415,7 +420,6 @@ function buildControlDataset(
 ): SharingControlDataset {
   const datasetId = profile.controlDatasetId;
   if (!datasetId) throw new Error("This profile has no sharing control dataset.");
-  const scopeKey = profileKey(profile.ownerEmail, profile.datasetId);
   // The control profileId must survive hard-cutover rebases (the profile's
   // base dataset id changes generation, the control dataset never does), so
   // it derives from the control id's base — identical to the profile key at
@@ -426,20 +430,80 @@ function buildControlDataset(
       ? datasetId.slice(0, -CONTROL_DATASET_SUFFIX.length)
       : profile.datasetId,
   );
-  const controller = createSharedBackupController<SharingControlStateV1>({
+  return createSharingControlDataset({
+    controller: buildControlController(
+      state,
+      profile,
+      identityProvider,
+      authorizationProvider,
+    ),
+    datasetId,
+    profileId: controlProfileId,
+    identity: () => identityProvider.getOrCreate(),
+  });
+}
+
+function buildControlController(
+  state: SharedSyncState,
+  profile: ProfileRecord,
+  identityProvider: ReturnType<typeof createSharingIdentityProvider>,
+  authorizationProvider: CachingAuthorizationProvider,
+  codec: SharedBackupControllerCodec<SharingControlStateV1> = sharingControlCodec,
+): SharedBackupController<SharingControlStateV1> {
+  const scopeKey = profileKey(profile.ownerEmail, profile.datasetId);
+  return createSharedBackupController<SharingControlStateV1>({
     appId: EASY_BC_APP_ID,
-    codec: sharingControlCodec,
+    codec,
     identity: () => identityProvider.getOrCreate(),
     transport: buildTransport(state, profile, authorizationProvider),
     registry: new ProfileScopedSharedBackupRegistry(loadSharedSyncState, scopeKey),
     resolveFork: async () => "merge",
   });
-  return createSharingControlDataset({
-    controller,
-    datasetId,
-    profileId: controlProfileId,
-    identity: () => identityProvider.getOrCreate(),
-  });
+}
+
+async function readControlWithLegacyRepair(
+  state: SharedSyncState,
+  profile: ProfileRecord,
+  identityProvider: ReturnType<typeof createSharingIdentityProvider>,
+  authorizationProvider: CachingAuthorizationProvider,
+) {
+  const control = buildControlDataset(state, profile, identityProvider, authorizationProvider);
+  try {
+    return await control.read();
+  } catch (original) {
+    if (profile.role !== "owner" || !profile.controlDatasetId) throw original;
+    const identity = await identityProvider.getOrCreate();
+    const loaded = await buildControlController(
+      state,
+      profile,
+      identityProvider,
+      authorizationProvider,
+    ).loadDataset(profile.controlDatasetId);
+    const repair = await repairLegacyControlSignature(loaded.value, identity).catch(() => null);
+    if (!repair) throw original;
+    await buildControlController(
+      state,
+      profile,
+      identityProvider,
+      authorizationProvider,
+      createLegacyControlRepairCodec(repair),
+    ).syncDataset(profile.controlDatasetId, repair.state);
+    void appendDeveloperLog("migration", "control-signature-repaired", {
+      eventId: repair.eventId,
+      repair: "rc15-target-order",
+    });
+    const refreshed = (await refreshCachedState()) ?? state;
+    const current = findProfile(
+      refreshed,
+      profileKey(profile.ownerEmail, profile.datasetId),
+    ) ?? profile;
+    return buildControlDataset(
+      refreshed,
+      current,
+      identityProvider,
+      authorizationProvider,
+    ).read();
+  }
 }
 
 function createRuntimeForProfile(
@@ -1375,7 +1439,12 @@ export async function beginSplitMigration(
 
     // Target generation: reuse an already-announced migration's targets, or
     // an interrupted attempt's files, before minting a new generation.
-    const verified = await control.read().catch(() => null);
+    const verified = await readControlWithLegacyRepair(
+      refreshedForControl,
+      currentProfile,
+      active.identityProvider,
+      active.authorizationProvider,
+    ).catch(() => null);
     const open = findOpenMigration(verified, profile.datasetId);
     let files = await controller.listDatasets();
     const datasetIds = files.map((file) => file.datasetId);
@@ -1526,6 +1595,12 @@ export async function acknowledgeSplitMigration(
       active.identityProvider,
       active.authorizationProvider,
     );
+    await readControlWithLegacyRepair(
+      state,
+      profile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
     await control.acknowledgeMigration({
       migrationId: pending.migrationId,
       openedFileIds: pending.requiredFileIds,
@@ -1615,6 +1690,12 @@ export async function splitMigrationStatusForActive(
       active.identityProvider,
       active.authorizationProvider,
     );
+    await readControlWithLegacyRepair(
+      active.state,
+      profile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
     const status = await control.migrationStatus(profile.openMigrationId);
     const emails = profile.participantEmails ?? {};
     return {
@@ -1650,6 +1731,12 @@ export async function closeSplitMigration(
       throw new Error("Only the owner can close a migration.");
     }
     const control = buildControlDataset(
+      state,
+      profile,
+      active.identityProvider,
+      active.authorizationProvider,
+    );
+    await readControlWithLegacyRepair(
       state,
       profile,
       active.identityProvider,
@@ -1734,15 +1821,14 @@ async function reconcileOpenMigration(
     return { profile, freeze: false };
   }
   migrationReconcileChecked.add(memoKey);
-  const control = buildControlDataset(
-    runtime.state,
-    profile,
-    runtime.identityProvider,
-    runtime.authorizationProvider,
-  );
   let verified: Awaited<ReturnType<SharingControlDataset["read"]>>;
   try {
-    verified = await control.read();
+    verified = await readControlWithLegacyRepair(
+      runtime.state,
+      profile,
+      runtime.identityProvider,
+      runtime.authorizationProvider,
+    );
     void appendDeveloperLog("migration", "control-read-succeeded", {
       migrations: verified.migrations.size,
       closedMigrations: verified.closedMigrations.size,
@@ -1988,8 +2074,19 @@ async function synchronizeProfileControlMembers(
     runtimeForProfile.identityProvider,
     runtimeForProfile.authorizationProvider,
   );
+  await readControlWithLegacyRepair(
+    runtimeForProfile.state,
+    profile,
+    runtimeForProfile.identityProvider,
+    runtimeForProfile.authorizationProvider,
+  );
   await control.synchronizeMembers(metadata);
-  const verified = await control.read();
+  const verified = await readControlWithLegacyRepair(
+    runtimeForProfile.state,
+    profile,
+    runtimeForProfile.identityProvider,
+    runtimeForProfile.authorizationProvider,
+  );
   const required = await requiredProfileMemberKeyIds(runtimeForProfile, profile);
   const enrollment = required.every((keyId) => verified.members.has(keyId))
     ? "enrolled"

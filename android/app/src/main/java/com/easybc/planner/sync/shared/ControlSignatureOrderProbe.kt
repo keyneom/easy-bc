@@ -1,6 +1,11 @@
 package com.easybc.planner.sync.shared
 
 import com.keyneom.synckit.crypto.CanonicalJson
+import com.keyneom.synckit.sharing.SharedBackupControllerCodec
+import com.keyneom.synckit.sharing.SharingControlStateV1
+import com.keyneom.synckit.sharing.SharingIdentity
+import com.keyneom.synckit.sharing.createSharingControlCodec
+import com.keyneom.synckit.sharing.verifySharingControlStateV1
 import java.math.BigInteger
 import java.security.AlgorithmParameters
 import java.security.KeyFactory
@@ -27,6 +32,77 @@ internal data class ControlSignatureOrderProbeResult(
     val match: String?,
     val attempts: Int,
 )
+
+internal data class LegacyControlSignatureRepair(
+    val state: SharingControlStateV1,
+    val eventId: String,
+)
+
+/**
+ * Re-attests the one confirmed rc.15 migration-announcement defect using the
+ * original owner key. No event semantics or ids change; only the signature is
+ * replaced with one over rc.16's normalized representation.
+ */
+internal fun repairLegacyControlSignature(
+    state: JsonObject,
+    identity: SharingIdentity,
+): LegacyControlSignatureRepair? {
+    val results = probeControlSignatureOrdering(state)
+    if (results.any { it.match == null }) return null
+    val repair = results.singleOrNull {
+        it.type == "migration-announced" && it.match == "target-order"
+    } ?: return null
+    if (results.any { it.eventId != repair.eventId && it.match != "stored-order" }) return null
+
+    val events = state.getValue("events").jsonArray.map { it.jsonObject }
+    val genesis = events.minWithOrNull(
+        compareBy<JsonObject> { it.getValue("sequence").jsonPrimitive.long }
+            .thenBy { it.getValue("eventId").jsonPrimitive.content },
+    ) ?: return null
+    val ownerKeyId = genesis["member"]?.jsonObject
+        ?.get("publicKey")?.jsonObject
+        ?.get("keyId")?.jsonPrimitive?.content ?: return null
+    if (identity.publicKey.keyId != ownerKeyId) return null
+
+    val repairedEvents = events.map { event ->
+        if (event.getValue("eventId").jsonPrimitive.content != repair.eventId) return@map event
+        if (event.getValue("actorKeyId").jsonPrimitive.content != ownerKeyId) return null
+        val unsigned = JsonObject(event - "signature")
+        JsonObject(event + ("signature" to JsonPrimitive(sign(identity, unsigned))))
+    }
+    val repairedJson = JsonObject(state + ("events" to JsonArray(repairedEvents)))
+    val repairedState = createSharingControlCodec().parse(repairedJson)
+    verifySharingControlStateV1(repairedState, ownerKeyId)
+    return LegacyControlSignatureRepair(repairedState, repair.eventId)
+}
+
+/** Codec used only for the owner's one-time publication of a repaired event. */
+internal object LegacyControlRepairCodec : SharedBackupControllerCodec<SharingControlStateV1> {
+    private val standard = createSharingControlCodec()
+
+    override fun serialize(value: SharingControlStateV1): JsonElement = standard.serialize(value)
+
+    override fun parse(value: JsonElement): SharingControlStateV1 = standard.parse(value)
+
+    override fun fingerprint(value: SharingControlStateV1): String = standard.fingerprint(value)
+
+    override fun merge(
+        local: SharingControlStateV1,
+        remote: SharingControlStateV1,
+    ): SharingControlStateV1 = runCatching { standard.merge(local, remote) }.getOrElse { conflict ->
+        val localJson = standard.serialize(local).jsonObject
+        val remoteJson = standard.serialize(remote).jsonObject
+        if (withoutEventSignatures(localJson) != withoutEventSignatures(remoteJson)) throw conflict
+        val ownerKeyId = local.events.minWithOrNull(
+            compareBy<com.keyneom.synckit.sharing.SharingControlEventV1> { it.sequence }
+                .thenBy { it.eventId },
+        )?.actorKeyId ?: throw conflict
+        val localValid = runCatching { verifySharingControlStateV1(local, ownerKeyId) }.isSuccess
+        val remoteLegacyValid = probeControlSignatureOrdering(remoteJson).all { it.match != null }
+        if (!localValid || !remoteLegacyValid) throw conflict
+        local
+    }
+}
 
 /**
  * Diagnostic-only verifier for control ledgers written by sync-kit rc.15.
@@ -223,6 +299,20 @@ private fun memberSigningKey(member: JsonObject): PublicKey {
     )
 }
 
+private fun withoutEventSignatures(state: JsonObject): JsonObject {
+    val events = state.getValue("events").jsonArray.map { raw ->
+        JsonObject(raw.jsonObject - "signature")
+    }
+    return JsonObject(state + ("events" to JsonArray(events)))
+}
+
+private fun sign(identity: SharingIdentity, unsigned: JsonObject): String {
+    val signer = Signature.getInstance("SHA256withECDSA")
+    signer.initSign(identity.signingPrivateKey)
+    signer.update(CanonicalJson.encodeAad(unsigned))
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(derToP1363(signer.sign()))
+}
+
 private fun verify(publicKey: PublicKey, unsigned: JsonObject, encodedSignature: String): Boolean =
     runCatching {
         val verifier = Signature.getInstance("SHA256withECDSA")
@@ -241,4 +331,21 @@ private fun p1363ToDer(raw: ByteArray): ByteArray {
     }
     val body = integer(raw.copyOfRange(0, 32)) + integer(raw.copyOfRange(32, 64))
     return byteArrayOf(0x30, body.size.toByte()) + body
+}
+
+private fun derToP1363(der: ByteArray): ByteArray {
+    require(der.size > 2 && der[0] == 0x30.toByte())
+    var index = 2
+    fun integer(): ByteArray {
+        require(index + 2 <= der.size && der[index++] == 0x02.toByte())
+        val length = der[index++].toInt() and 0xff
+        require(index + length <= der.size)
+        return der.copyOfRange(index, index + length).also { index += length }
+    }
+    fun component(value: ByteArray): ByteArray {
+        val unsigned = value.dropWhile { it == 0.toByte() }.toByteArray()
+        require(unsigned.size <= 32)
+        return ByteArray(32 - unsigned.size) + unsigned
+    }
+    return component(integer()) + component(integer())
 }

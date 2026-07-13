@@ -12,6 +12,7 @@ import com.keyneom.synckit.crypto.SyncKitJson
 import com.keyneom.synckit.sharing.AcceptedDatasetResult
 import com.keyneom.synckit.sharing.InviteParticipantInput
 import com.keyneom.synckit.sharing.SharedBackupController
+import com.keyneom.synckit.sharing.SharedBackupControllerCodec
 import com.keyneom.synckit.sharing.SharingCrypto
 import com.keyneom.synckit.sharing.SharingCryptoOptions
 import com.keyneom.synckit.sharing.SharingDatasetGrantV1
@@ -730,7 +731,7 @@ class SharedSyncCoordinator(
         val refreshed = registry.load() ?: state
         val current = findProfile(refreshed, refreshed.activeProfileKey) ?: profile
         val required = requiredProfileMemberKeyIds(refreshed, current)
-        val verified = controlDatasetFor(refreshed, current).read()
+        val verified = readControlWithLegacyRepair(refreshed, current)
         return registry.upsertProfile(
             current.copy(
                 controlDatasetId = controlDatasetId,
@@ -910,7 +911,7 @@ class SharedSyncCoordinator(
         // Target generation: reuse an announced migration's targets or an
         // interrupted attempt's files before minting a new generation.
         val control = controlDatasetFor(registry.load()!!, currentProfile)
-        val verified = runCatching { control.read() }.getOrNull()
+        val verified = runCatching { readControlWithLegacyRepair(state, currentProfile) }.getOrNull()
         val open = verified?.migrations?.values?.firstOrNull {
             !verified.closedMigrations.contains(it.migrationId) &&
                 it.sourceDatasetIds.contains(profile.datasetId)
@@ -1028,6 +1029,7 @@ class SharedSyncCoordinator(
             "None of the reorganized files could be opened yet — grant access in the browser first."
         }
 
+        readControlWithLegacyRepair(state, profile)
         controlDatasetFor(state, profile).acknowledgeMigration(
             migrationId = pending.migrationId,
             openedFileIds = pending.requiredFileIds,
@@ -1081,6 +1083,7 @@ class SharedSyncCoordinator(
         val state = registry.load() ?: error("Shared sync is not configured on this device.")
         val profile = registry.activeProfile(state)
         val migrationId = profile.openMigrationId ?: error("This profile has no open migration.")
+        readControlWithLegacyRepair(state, profile)
         val status = controlDatasetFor(state, profile).migrationStatus(migrationId)
         val emails = profile.participantEmails.orEmpty()
         return MigrationAckStatus(
@@ -1102,6 +1105,7 @@ class SharedSyncCoordinator(
         val retired = profile.retiredDatasetId ?: error("This profile has no open migration.")
         require(profile.role == "owner") { "Only the owner can close a migration." }
         val control = controlDatasetFor(state, profile)
+        readControlWithLegacyRepair(state, profile)
         val status = control.migrationStatus(migrationId)
         if (!status.closed) {
             require(status.pendingKeyIds.isEmpty()) {
@@ -1186,7 +1190,7 @@ class SharedSyncCoordinator(
             return none
         }
         val verified = try {
-            controlDatasetFor(state, profile).read().also { control ->
+            readControlWithLegacyRepair(state, profile).also { control ->
                 developerLog.append(
                     "migration",
                     "control-read-succeeded",
@@ -1367,7 +1371,7 @@ class SharedSyncCoordinator(
             profile.datasetRecords?.get(profile.controlDatasetId)?.fileId != null
         ) {
             runCatching {
-                controlDatasetFor(state, profile).read().members
+                readControlWithLegacyRepair(state, profile).members
                     .filterValues { !it.googleSubject.isNullOrBlank() }
                     .keys
             }.getOrDefault(emptySet())
@@ -2065,10 +2069,11 @@ class SharedSyncCoordinator(
     ) {
         if (profile.controlDatasetId == null) return
         val control = controlDatasetFor(state, profile)
+        readControlWithLegacyRepair(state, profile)
         control.synchronizeMembers(
             mapOf(keyId to SharingControlMemberMetadataV1(email = email)),
         )
-        val verified = control.read()
+        val verified = readControlWithLegacyRepair(state, profile)
         val required = requiredProfileMemberKeyIds(state, profile)
         registry.upsertProfile(
             refreshedProfile(profile).copy(
@@ -2099,7 +2104,7 @@ class SharedSyncCoordinator(
         val current = findProfile(state, profileKey(profile.ownerEmail, profile.datasetId)) ?: profile
         if (current.datasetRecords?.get(controlDatasetId)?.fileId == null) return state
         val enrolled = runCatching {
-            val verified = controlDatasetFor(state, current).read()
+            val verified = readControlWithLegacyRepair(state, current)
             verified.members.containsKey(identityStore.getOrCreate().publicKey.keyId)
         }.getOrDefault(false)
         return if (enrolled && current.controlEnrollment != "enrolled") {
@@ -2160,17 +2165,53 @@ class SharedSyncCoordinator(
     private fun controlControllerFor(
         state: SharedSyncState,
         profile: ProfileRecord,
+        codec: SharedBackupControllerCodec<SharingControlStateV1> = createSharingControlCodec(),
     ): SharedBackupController<SharingControlStateV1> {
         val scopeKey = profileKey(profile.ownerEmail, profile.datasetId)
         return SharedBackupController(
             appId = EASY_BC_APP_ID,
-            codec = createSharingControlCodec(),
+            codec = codec,
             identity = { identityStore.getOrCreate() },
             transport = EasyBcSharedTransport.forProfile(state, profile, driveAuth),
             registry = ProfileScopedSharedBackupRegistry(registry, scopeKey),
             cryptoOptions = SharingCryptoOptions(),
             resolveFork = { _ -> "merge" },
         )
+    }
+
+    private suspend fun readControlWithLegacyRepair(
+        state: SharedSyncState,
+        profile: ProfileRecord,
+    ): com.keyneom.synckit.sharing.VerifiedSharingControlStateV1 {
+        val control = controlDatasetFor(state, profile)
+        try {
+            return control.read()
+        } catch (original: Exception) {
+            if (!profile.role.equals("owner", ignoreCase = true)) throw original
+            val datasetId = profile.controlDatasetId ?: throw original
+            val repairController = controlControllerFor(state, profile, LegacyControlRepairCodec)
+            val loaded = repairController.loadDataset(datasetId)
+            val raw = LegacyControlRepairCodec.serialize(loaded.value).jsonObject
+            val repair = runCatching {
+                repairLegacyControlSignature(raw, identityStore.getOrCreate())
+            }.getOrNull() ?: throw original
+            repairController.syncDataset(datasetId, repair.state)
+            developerLog.append(
+                "migration",
+                "control-signature-repaired",
+                mapOf("eventId" to repair.eventId, "repair" to "rc15-target-order"),
+            )
+            Log.i(
+                "EasyBCMigration",
+                "control-signature-repaired eventId=${repair.eventId} repair=rc15-target-order",
+            )
+            val refreshedState = registry.load() ?: state
+            val refreshed = findProfile(
+                refreshedState,
+                profileKey(profile.ownerEmail, profile.datasetId),
+            ) ?: profile
+            return controlDatasetFor(refreshedState, refreshed).read()
+        }
     }
 
     private suspend fun logControlSignatureOrderProbe(
