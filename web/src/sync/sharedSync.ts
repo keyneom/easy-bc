@@ -38,7 +38,11 @@ import {
   type SharingControlDataset,
   type SharingControlStateV1,
 } from "@keyneom/sync-kit/sharing/control";
-import { GoogleDriveSharedBackupTransport } from "@keyneom/sync-kit/stores/google-drive/sharing";
+import {
+  GoogleDriveSharedBackupTransport,
+  listAccessibleSyncKitDatasets,
+  type AccessibleSyncKitDataset,
+} from "@keyneom/sync-kit/stores/google-drive/sharing";
 import {
   GoogleDriveFileStore,
   listAccessibleSyncKitAppFolders,
@@ -59,6 +63,7 @@ import {
   newOwnedDatasetId,
   profileDisplayLabel,
 } from "./profileLabels";
+import { selectedAppFolderIdForProfile } from "./profileRouting";
 import { createEmptySharedSyncPayload } from "./sharedEmptyPayload";
 import {
   createInitialSharedSyncState,
@@ -441,17 +446,17 @@ async function recoverAdditionalOwnedProfiles(
   return state;
 }
 
-type DiscoveryFolder = {
-  appFolderId: string;
-  name: string;
-};
-
 type DiscoveredDatasetAccess = {
   datasetId: string;
   fileId: string;
   ownerEmail: string;
   participant: SharedBackupParticipantV1;
   trustedOwnerKeyId: string;
+};
+
+type DiscoveryFolder = {
+  appFolderId: string;
+  name: string;
 };
 
 export type ProfileDiscoveryResult = {
@@ -468,10 +473,17 @@ export type ProfileDiscoveryResult = {
  * single owner key; Drive metadata supplies the owner's account email used for
  * the stable cross-device profile key.
  *
- * `pickSharedFolder` is the explicit drive.file recovery path for a share that
- * has never been opened by this Web OAuth client. Google requires the user to
- * select both the folder and its dataset files; selecting a folder alone does
- * not grant access to its children.
+ * Discovery combines two Drive queries:
+ * 1. App-root folders visible to this token (`listAccessibleSyncKitAppFolders`)
+ * 2. Dataset files already granted via Picker / create (`listAccessibleSyncKitDatasets`)
+ *
+ * The second path is required after the Android join hand-off, which grants the
+ * dataset files but often not the parent app-root folder — folder listing alone
+ * would miss those shares even though the files are already readable.
+ *
+ * `pickSharedFolder` is the explicit recovery path for a share that has never
+ * been opened by this OAuth client. Google requires selecting both the folder
+ * and its dataset files; selecting a folder alone does not grant children.
  */
 export async function discoverAvailableProfiles(
   config: SharedSyncConfig,
@@ -543,30 +555,42 @@ export async function discoverAvailableProfiles(
       }
     }
 
+    // File-level grants (e.g. Android join Picker hand-off) are visible here
+    // even when the parent app-root folder is not.
+    const accessibleDatasetFiles = await listAccessibleSyncKitDatasets({
+      appId: EASY_BC_APP_ID,
+      authorization,
+      drive,
+    });
+    const datasetsByParent = new Map<string, AccessibleSyncKitDataset[]>();
+    for (const dataset of accessibleDatasetFiles) {
+      const appFolderId = dataset.appFolderId?.trim();
+      if (!appFolderId) continue;
+      if (!folders.has(appFolderId)) {
+        folders.set(appFolderId, {
+          appFolderId,
+          name: "Shared EasyBC profile",
+        });
+      }
+      const grouped = datasetsByParent.get(appFolderId) ?? [];
+      grouped.push(dataset);
+      datasetsByParent.set(appFolderId, grouped);
+    }
+
     let state: SharedSyncState = { ...previous, ownerEmail: selfEmail };
     cachedState = state;
     await saveSharedSyncState(state);
     const discoveredProfileKeys: string[] = [];
-    let skippedFolderCount = 0;
 
     for (const folder of folders.values()) {
+      const listed = datasetsByParent.get(folder.appFolderId) ?? [];
+      if (listed.length === 0) continue;
       const transport = new GoogleDriveSharedBackupTransport({
         appId: EASY_BC_APP_ID,
         authorizationProvider: bootstrap.authorizationProvider,
         folderName: folder.name,
         selectedAppFolderId: folder.appFolderId,
       });
-      let listed: Awaited<ReturnType<typeof transport.listDatasets>>;
-      try {
-        listed = await transport.listDatasets();
-      } catch (error) {
-        skippedFolderCount += 1;
-        await appendDeveloperLog("profile-discovery", "folder-list-skipped", {
-          appFolderId: folder.appFolderId,
-          error: error instanceof Error ? error.message : String(error),
-        }).catch(() => undefined);
-        continue;
-      }
 
       const accessibleDatasets: DiscoveredDatasetAccess[] = [];
       for (const listedDataset of listed) {
@@ -675,7 +699,7 @@ export async function discoverAvailableProfiles(
           ...existing,
           datasetId: group.baseDatasetId,
           ownerEmail: first.ownerEmail,
-          folderName: folder.name,
+          folderName: easyBcSyncFolderName(first.ownerEmail),
           appFolderId: folder.appFolderId,
           role,
           trustedOwnerKeyId: first.trustedOwnerKeyId,
@@ -764,7 +788,7 @@ export async function discoverAvailableProfiles(
       state,
       discoveredProfileKeys,
       scannedFolderCount: folders.size,
-      skippedFolderCount,
+      skippedFolderCount: 0,
     };
   });
 }
@@ -816,13 +840,12 @@ function buildTransport(
   profile: ProfileRecord,
   authorizationProvider: AuthorizationProvider,
 ): GoogleDriveSharedBackupTransport {
+  const selectedAppFolderId = selectedAppFolderIdForProfile(state, profile);
   return new GoogleDriveSharedBackupTransport({
     appId: EASY_BC_APP_ID,
     authorizationProvider,
     folderName: profile.folderName,
-    ...(isOwnedProfile(state, profile)
-      ? {}
-      : { selectedAppFolderId: profile.appFolderId ?? state.selectedAppFolderId }),
+    ...(selectedAppFolderId ? { selectedAppFolderId } : {}),
   });
 }
 
@@ -3881,6 +3904,7 @@ export async function createSharingChangeDetectorForActiveProfile(
   if (!state) return null;
   const profile = profileForActive(state);
   const { authorizationProvider } = createProviders(config, state.activeProfileKey);
+  const selectedAppFolderId = selectedAppFolderIdForProfile(state, profile);
   const transport = new GoogleDriveSharedBackupTransport({
     appId: EASY_BC_APP_ID,
     authorizationProvider: createPollingAuthorizationProvider(
@@ -3888,9 +3912,7 @@ export async function createSharingChangeDetectorForActiveProfile(
       state.activeProfileKey,
     ),
     folderName: profile.folderName,
-    ...(isOwnedProfile(state, profile)
-      ? {}
-      : { selectedAppFolderId: profile.appFolderId ?? state.selectedAppFolderId }),
+    ...(selectedAppFolderId ? { selectedAppFolderId } : {}),
   });
   return createSharingChangeDetectorFromTransport(transport, {
     tokenExpiresAt: () => tokenExpiresAtByProfile.get(state.activeProfileKey),

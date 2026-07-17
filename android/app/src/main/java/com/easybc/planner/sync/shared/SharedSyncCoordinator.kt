@@ -38,7 +38,10 @@ import com.keyneom.synckit.sharing.sharedBackupParticipants
 import com.keyneom.synckit.stores.GoogleDriveSharedBackupTransport
 import com.keyneom.synckit.stores.GoogleDriveFileStore
 import com.keyneom.synckit.stores.ListAccessibleSyncKitAppFoldersOptions
+import com.keyneom.synckit.stores.ListAccessibleSyncKitDatasetsOptions
+import com.keyneom.synckit.stores.SyncKitAppFolder
 import com.keyneom.synckit.stores.listAccessibleSyncKitAppFolders
+import com.keyneom.synckit.stores.listAccessibleSyncKitDatasets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.jsonObject
@@ -84,8 +87,14 @@ class SharedSyncCoordinator(
      * Android OAuth client can already access. Both owned and shared-recipient
      * profiles are accepted, but only when the current app-data passkey
      * identity is an encrypted-envelope participant and the owner key is
-     * unambiguous. Shares that are not yet visible still use the existing
-     * Android file-selection join flow to grant drive.file access.
+     * unambiguous.
+     *
+     * Discovery joins app-root folder metadata with sync-kit's read-only list
+     * of accessible dataset files. The file query is required after the join
+     * Picker hand-off, which grants dataset files without necessarily making
+     * the parent app-root folder visible. Shares that are not yet visible still
+     * use the existing Android file-selection join flow to grant drive.file
+     * access.
      */
     suspend fun discoverAvailableProfiles(accessToken: String): Int {
         rememberAccess(accessToken)
@@ -94,13 +103,37 @@ class SharedSyncCoordinator(
         val identity = identityStore.getOrCreate()
         val authorization = driveAuth.provider().authorize()
         val drive = GoogleDriveFileStore()
-        val folders = listAccessibleSyncKitAppFolders(
+        val folders = linkedMapOf<String, SyncKitAppFolder>()
+        for (folder in listAccessibleSyncKitAppFolders(
             ListAccessibleSyncKitAppFoldersOptions(
                 appId = EASY_BC_APP_ID,
                 authorization = authorization,
                 drive = drive,
             ),
+        )) {
+            folders[folder.appFolderId] = folder
+        }
+
+        val accessibleDatasetFiles = listAccessibleSyncKitDatasets(
+            ListAccessibleSyncKitDatasetsOptions(
+                appId = EASY_BC_APP_ID,
+                authorization = authorization,
+                drive = drive,
+            ),
         )
+        for (file in accessibleDatasetFiles) {
+            val appFolderId = file.appFolderId ?: continue
+            if (appFolderId !in folders) {
+                folders[appFolderId] = SyncKitAppFolder(
+                    appFolderId = appFolderId,
+                    name = "Shared EasyBC profile",
+                )
+            }
+        }
+        val datasetsByParent = accessibleDatasetFiles
+            .filter { !it.appFolderId.isNullOrBlank() }
+            .groupBy { it.appFolderId!! }
+
         var state = previous.copy(ownerEmail = selfEmail)
         registry.save(state)
         var discoveredCount = 0
@@ -113,26 +146,16 @@ class SharedSyncCoordinator(
             val trustedOwnerKeyId: String,
         )
 
-        for (folder in folders) {
+        for (folder in folders.values) {
+            val listed = datasetsByParent[folder.appFolderId].orEmpty()
+            if (listed.isEmpty()) continue
             val transport = GoogleDriveSharedBackupTransport(
                 appId = EASY_BC_APP_ID,
                 authorizationProvider = driveAuth.provider(),
                 folderName = folder.name,
                 selectedAppFolderId = folder.appFolderId,
             )
-            val listed = try {
-                transport.listDatasets()
-            } catch (error: Exception) {
-                developerLog.append(
-                    "profile-discovery",
-                    "folder-list-skipped",
-                    mapOf(
-                        "appFolderId" to folder.appFolderId,
-                        "error" to (error.message ?: error.javaClass.simpleName),
-                    ),
-                )
-                continue
-            }
+
             val accessible = mutableListOf<DatasetAccess>()
             for (listedDataset in listed) {
                 try {
@@ -249,13 +272,13 @@ class SharedSyncCoordinator(
                 val profile = (existing ?: ProfileRecord(
                     datasetId = group.baseDatasetId,
                     ownerEmail = first.ownerEmail,
-                    folderName = folder.name,
+                    folderName = easyBcSyncFolderName(first.ownerEmail),
                     role = first.participantRole,
                     trustedOwnerKeyId = first.trustedOwnerKeyId,
                 )).copy(
                     datasetId = group.baseDatasetId,
                     ownerEmail = first.ownerEmail,
-                    folderName = folder.name,
+                    folderName = easyBcSyncFolderName(first.ownerEmail),
                     role = grants?.let(::highestGrantedRole) ?: first.participantRole,
                     trustedOwnerKeyId = first.trustedOwnerKeyId,
                     appFolderId = folder.appFolderId,
