@@ -21,7 +21,6 @@ import androidx.compose.ui.Modifier
 import com.easybc.planner.notify.ReminderScheduler
 import com.easybc.planner.sync.CloudAutoSyncSession
 import com.easybc.planner.sync.SyncPayloadStore
-import com.easybc.planner.sync.shared.SharedSyncCoordinator
 import com.easybc.planner.sync.shared.parseSharedJoinLink
 import com.easybc.planner.ui.navigation.AppNavigation
 import com.easybc.planner.ui.theme.EasyBCTheme
@@ -64,7 +63,7 @@ class MainActivity : ComponentActivity() {
             repo = app.repository,
             store = store,
             resolveAuthorization = ::resolveCloudAutoSyncAuthorization,
-            sharedSync = SharedSyncCoordinator(app, app.database, store),
+            sharedSync = app.sharedSyncCoordinator,
         )
     }
 

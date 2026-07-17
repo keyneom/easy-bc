@@ -41,7 +41,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val calendarSync = app.calendarSync
     private val syncStore = SyncPayloadStore(app.database)
     private val legacyCloudSync = CloudSyncCoordinator(syncStore)
-    private val sharedSync = SharedSyncCoordinator(app, app.database, syncStore)
+    private val sharedSync = app.sharedSyncCoordinator
     private val googleAuthorization = GoogleAuthorization()
 
     val settings: StateFlow<UserSettingsEntity?> = repo.settingsFlow

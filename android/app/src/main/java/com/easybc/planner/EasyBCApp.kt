@@ -10,6 +10,8 @@ import com.easybc.planner.calendar.EasyBCCalendarSync
 import com.easybc.planner.data.PlannerRepository
 import com.easybc.planner.data.db.AppDatabase
 import com.easybc.planner.sync.EasyBcSyncRuntime
+import com.easybc.planner.sync.SyncPayloadStore
+import com.easybc.planner.sync.shared.SharedSyncCoordinator
 import com.easybc.planner.util.CycleCalculator
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -39,6 +41,15 @@ class EasyBCApp : Application() {
     }
 
     val calendarSync: EasyBCCalendarSync by lazy { EasyBCCalendarSync(this) }
+
+    /**
+     * One process-wide sharing session for autosync and every navigation-scoped
+     * view model. The coordinator owns the single unlocked sharing identity, so
+     * moving between screens cannot trigger another passkey prompt.
+     */
+    val sharedSyncCoordinator: SharedSyncCoordinator by lazy {
+        SharedSyncCoordinator(this, database, SyncPayloadStore(database))
+    }
 
     private val calendarAutoSync: CalendarAutoSync by lazy {
         CalendarAutoSync(repository, cycleCalculator, calendarSync, appScope)

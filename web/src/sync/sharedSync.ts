@@ -55,7 +55,10 @@ import {
 } from "./controlSignatureRepair";
 import { pickSharedAppFolder, pickSharedDatasetFiles } from "./sharedPicker";
 import { easyBcSharedCodec } from "./sharedCodec";
-import { createSharingIdentityProvider } from "./sharedIdentity";
+import {
+  clearSharingIdentitySession,
+  createSharingIdentityProvider,
+} from "./sharedIdentity";
 import { easyBcSyncFolderName, profileKey } from "./sharedFolderName";
 import {
   findOwnedStorageProfile,
@@ -500,6 +503,7 @@ export async function discoverAvailableProfiles(
       (profileDiscoverySession.clientId !== config.clientId ||
         profileDiscoverySession.rpId !== config.rpId)
     ) {
+      clearSharingIdentitySession();
       profileDiscoverySession.identityProvider.clear();
       profileDiscoverySession = null;
     }
@@ -524,6 +528,7 @@ export async function discoverAvailableProfiles(
       profileDiscoverySession.accountEmail &&
       profileDiscoverySession.accountEmail.toLowerCase() !== selfEmail.toLowerCase()
     ) {
+      clearSharingIdentitySession();
       profileDiscoverySession.identityProvider.clear();
       profileDiscoverySession.identityProvider = createSharingIdentityProvider(config.rpId, () =>
         bootstrap.authorizationProvider.authorize(),
@@ -1046,6 +1051,7 @@ export function disposeSensitiveSyncSession(): void {
   disposeRuntime();
   profileDiscoverySession?.identityProvider.clear();
   profileDiscoverySession = null;
+  clearSharingIdentitySession();
 }
 
 /* ---------- Multi-file dataset groups (docs/sync-kit-multi-file-datasets.md) ---------- */
@@ -3877,6 +3883,7 @@ export function buildJoinUrl(input: {
 
 export async function forgetSharedSync(): Promise<void> {
   disposeRuntime();
+  clearSharingIdentitySession();
   cachedState = null;
   tokenExpiresAtByProfile.clear();
   await forgetSharedSyncState();

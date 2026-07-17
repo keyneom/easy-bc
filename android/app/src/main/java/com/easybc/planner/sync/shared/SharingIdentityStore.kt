@@ -78,15 +78,13 @@ class SharingIdentityStore(
         V1EnvelopeCrypto(easyBcSharingProfile, EasyBcSyncCodec),
     )
 
-    @Volatile
-    private var cached: SharingIdentity? = null
+    private val session = SingleFlightSessionValue<SharingIdentity>()
 
-    suspend fun getOrCreate(): SharingIdentity {
-        cached?.let { return it }
+    suspend fun getOrCreate(): SharingIdentity = session.getOrLoad {
         // 1. App-data is authoritative: the same Google account returns the same
         //    blob on every device, so the identity follows the user.
         appDataStore.load(EASY_BC_APP_ID)?.let { record ->
-            return unlockRecord(record).also { cached = it }
+            return@getOrLoad unlockRecord(record)
         }
         // 2. No app-data identity yet: wrap this device's pre-existing keypair
         //    (migration) or a freshly minted one, then promote it to app-data so
@@ -105,10 +103,10 @@ class SharingIdentityStore(
             created.key.fill(0)
         }
         appDataStore.save(wrapped.record)
-        return wrapped.identity.also { cached = it }
+        wrapped.identity
     }
 
-    fun get(): SharingIdentity? = cached
+    fun get(): SharingIdentity? = session.get()
 
     /**
      * Forgets the identity on this device only: clears the in-memory cache and
@@ -116,7 +114,7 @@ class SharingIdentityStore(
      * user's other devices, so it is intentionally left in place.
      */
     fun clear() {
-        cached = null
+        session.clear()
         prefs.edit().clear().apply()
     }
 
