@@ -67,6 +67,45 @@ export type LocalSyncState = {
   lastSyncedAt: string;
 };
 
+export type SyncPayloadParseReason =
+  | "invalid-json"
+  | "unsupported-schema"
+  | "missing-field"
+  | "invalid-type"
+  | "invalid-profile-metadata";
+
+export class SyncPayloadParseError extends Error {
+  constructor(
+    readonly reasonCode: SyncPayloadParseReason,
+    readonly path: string,
+    readonly observedType: string,
+    message = "The Drive snapshot is not a supported EasyBC sync file.",
+  ) {
+    super(message);
+    this.name = "SyncPayloadParseError";
+  }
+}
+
+function jsonType(value: unknown): string {
+  if (value === undefined) return "missing";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requirePayloadField(
+  condition: boolean,
+  value: unknown,
+  path: string,
+  reasonCode: SyncPayloadParseReason = value === undefined ? "missing-field" : "invalid-type",
+): void {
+  if (!condition) throw new SyncPayloadParseError(reasonCode, path, jsonType(value));
+}
+
 export function portablePlannerOptions(options: WasmOptions): PortablePlannerOptions {
   const { calendarCycles: _calendarCycles, ...portable } = options;
   return portable;
@@ -196,19 +235,46 @@ export function mergeSyncPayloads(a: SyncPayloadV1, b: SyncPayloadV1): SyncPaylo
 }
 
 export function parseSyncPayload(value: unknown): SyncPayloadV1 {
-  const parsed = (
-    typeof value === "string" ? JSON.parse(value) : value
-  ) as Partial<SyncPayloadV1>;
-  if (
-    parsed.schemaVersion !== 1 ||
-    !parsed.planner ||
-    !Array.isArray(parsed.periodRecords) ||
-    !parsed.calendarDayLogs ||
-    !parsed.voluntaryAbstinenceDates ||
-    !parsed.ecJournal
-  ) {
-    throw new Error("The Drive snapshot is not a supported EasyBC sync file.");
+  let decoded: unknown;
+  try {
+    decoded = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    throw new SyncPayloadParseError("invalid-json", "$", jsonType(value));
   }
+  requirePayloadField(isJsonObject(decoded), decoded, "$", "invalid-type");
+  const parsed = decoded as Partial<SyncPayloadV1>;
+  requirePayloadField(
+    parsed.schemaVersion === 1,
+    parsed.schemaVersion,
+    "$.schemaVersion",
+    parsed.schemaVersion === undefined ? "missing-field" : "unsupported-schema",
+  );
+  requirePayloadField(typeof parsed.exportedAt === "string", parsed.exportedAt, "$.exportedAt");
+  requirePayloadField(isJsonObject(parsed.planner), parsed.planner, "$.planner");
+  requirePayloadField(isJsonObject(parsed.planner?.value), parsed.planner?.value, "$.planner.value");
+  requirePayloadField(
+    typeof parsed.planner?.updatedAt === "string",
+    parsed.planner?.updatedAt,
+    "$.planner.updatedAt",
+  );
+  requirePayloadField(Array.isArray(parsed.periodRecords), parsed.periodRecords, "$.periodRecords");
+  requirePayloadField(isJsonObject(parsed.calendarDayLogs), parsed.calendarDayLogs, "$.calendarDayLogs");
+  requirePayloadField(
+    isJsonObject(parsed.voluntaryAbstinenceDates),
+    parsed.voluntaryAbstinenceDates,
+    "$.voluntaryAbstinenceDates",
+  );
+  requirePayloadField(isJsonObject(parsed.ecJournal), parsed.ecJournal, "$.ecJournal");
+  requirePayloadField(
+    typeof parsed.ecJournal?.value === "boolean",
+    parsed.ecJournal?.value,
+    "$.ecJournal.value",
+  );
+  requirePayloadField(
+    typeof parsed.ecJournal?.updatedAt === "string",
+    parsed.ecJournal?.updatedAt,
+    "$.ecJournal.updatedAt",
+  );
   if (
     parsed.profileMeta &&
     (typeof parsed.profileMeta.updatedAt !== "string" ||
@@ -223,14 +289,40 @@ export function parseSyncPayload(value: unknown): SyncPayloadV1 {
       (parsed.profileMeta.displayNameUpdatedAt !== undefined &&
         typeof parsed.profileMeta.displayNameUpdatedAt !== "string"))
   ) {
-    throw new Error("The Drive snapshot contains invalid profile display metadata.");
+    const metadata = parsed.profileMeta;
+    const invalidPath = typeof metadata.updatedAt !== "string"
+      ? "$.profileMeta.updatedAt"
+      : metadata.avatarWebp !== undefined &&
+          (typeof metadata.avatarWebp !== "string" || metadata.avatarWebp.length > 16_384)
+        ? "$.profileMeta.avatarWebp"
+        : metadata.displayName !== undefined &&
+            (typeof metadata.displayName !== "string" ||
+              !metadata.displayName.trim() ||
+              metadata.displayName.length > 120)
+          ? "$.profileMeta.displayName"
+          : "$.profileMeta.displayNameUpdatedAt";
+    const invalidValue = invalidPath === "$.profileMeta.updatedAt"
+      ? metadata.updatedAt
+      : invalidPath === "$.profileMeta.avatarWebp"
+        ? metadata.avatarWebp
+        : invalidPath === "$.profileMeta.displayName"
+          ? metadata.displayName
+          : metadata.displayNameUpdatedAt;
+    throw new SyncPayloadParseError(
+      "invalid-profile-metadata",
+      invalidPath,
+      jsonType(invalidValue),
+      "The Drive snapshot contains invalid profile display metadata.",
+    );
   }
-  return {
+  const normalized = {
     ...parsed,
     deletedPeriodStarts: parsed.deletedPeriodStarts ?? {},
     voluntaryAbstinenceUpdatedAt: parsed.voluntaryAbstinenceUpdatedAt ?? {},
     deletedVoluntaryAbstinenceDates: parsed.deletedVoluntaryAbstinenceDates ?? {},
   } as SyncPayloadV1;
+  if (normalized.profileMeta === null) delete normalized.profileMeta;
+  return normalized;
 }
 
 function mergeProfileMeta(

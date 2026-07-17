@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { PortablePlannerOptions, SyncPayloadV1 } from "./types";
-import { mergeSyncPayloads, parseSyncPayload, plannerConfiguredFromPayload } from "./types";
+import {
+  mergeSyncPayloads,
+  parseSyncPayload,
+  plannerConfiguredFromPayload,
+  SyncPayloadParseError,
+} from "./types";
 
 const options = (ageYears: number): PortablePlannerOptions => ({
   ageYears,
@@ -178,5 +183,25 @@ describe("parseSyncPayload", () => {
       updatedAt: "2026-01-01T00:00:00.000Z",
     };
     expect(() => parseSyncPayload(invalid)).toThrow("invalid profile display metadata");
+  });
+
+  it("reports a redacted path and type for an incompatible payload", () => {
+    try {
+      parseSyncPayload({ kind: "sync-kit-sharing-control" });
+      throw new Error("Expected parsing to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SyncPayloadParseError);
+      expect(error).toMatchObject({
+        reasonCode: "missing-field",
+        path: "$.schemaVersion",
+        observedType: "missing",
+      });
+      expect((error as Error).message).not.toContain("sync-kit-sharing-control");
+    }
+  });
+
+  it("normalizes a legacy null profile metadata field to absence", () => {
+    const legacy = { ...payload(30, "2026-01-01T00:00:00.000Z"), profileMeta: null };
+    expect(parseSyncPayload(legacy).profileMeta).toBeUndefined();
   });
 });

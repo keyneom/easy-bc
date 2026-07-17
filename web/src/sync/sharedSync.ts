@@ -56,6 +56,12 @@ import {
 import { pickSharedAppFolder, pickSharedDatasetFiles } from "./sharedPicker";
 import { easyBcSharedCodec } from "./sharedCodec";
 import {
+  adoptProfileDataset,
+  ProfileDatasetOperationError,
+  wrapProfileDatasetError,
+  type ProfileDatasetFailure,
+} from "./profileDatasetRouting";
+import {
   clearSharingIdentitySession,
   createSharingIdentityProvider,
 } from "./sharedIdentity";
@@ -411,16 +417,41 @@ async function recoverAdditionalOwnedProfiles(
       authorizationProvider,
       googleIdentity,
     );
+    const controlController = buildControlController(
+      provisional,
+      profile,
+      identityProvider,
+      authorizationProvider,
+    );
     try {
-      await controller.adoptDataset(group.baseDatasetId, { requireOwned: true });
+      await adoptProfileDataset({
+        dataController: controller,
+        controlController,
+        baseDatasetId: group.baseDatasetId,
+        datasetId: group.baseDatasetId,
+        controlDatasetId: profile.controlDatasetId,
+        requireOwned: true,
+      });
       for (const part of DATASET_PARTS) {
         if (part === "plan" || !group.companionFileIds[part]) continue;
-        await controller.adoptDataset(datasetIdForPart(group.baseDatasetId, part), {
+        await adoptProfileDataset({
+          dataController: controller,
+          controlController,
+          baseDatasetId: group.baseDatasetId,
+          datasetId: datasetIdForPart(group.baseDatasetId, part),
+          controlDatasetId: profile.controlDatasetId,
           requireOwned: true,
         });
       }
       if (profile.controlDatasetId && group.controlFileId) {
-        await controller.adoptDataset(profile.controlDatasetId, { requireOwned: true });
+        await adoptProfileDataset({
+          dataController: controller,
+          controlController,
+          baseDatasetId: group.baseDatasetId,
+          datasetId: profile.controlDatasetId,
+          controlDatasetId: profile.controlDatasetId,
+          requireOwned: true,
+        });
       }
       const loaded = await syncProfileDatasetGroup(
         controller,
@@ -439,9 +470,21 @@ async function recoverAdditionalOwnedProfiles(
       state = upsertProfile(refreshed, recovered);
       await saveSharedSyncState(state);
     } catch (error) {
+      const failure = error instanceof ProfileDatasetOperationError
+        ? error.failure
+        : wrapProfileDatasetError(error, {
+            baseDatasetId: group.baseDatasetId,
+            datasetId: group.baseDatasetId,
+            controlDatasetId: profile.controlDatasetId,
+            stage: "load",
+          }).failure;
       await appendDeveloperLog("profile-recovery", "owned-profile-skipped", {
-        datasetId: group.baseDatasetId,
-        error: error instanceof Error ? error.message : String(error),
+        datasetId: failure.datasetId,
+        datasetPart: failure.datasetPart,
+        stage: failure.stage,
+        reasonCode: failure.reasonCode,
+        ...(failure.path ? { path: failure.path } : {}),
+        ...(failure.observedType ? { observedType: failure.observedType } : {}),
       }).catch(() => undefined);
       await saveSharedSyncState(state);
     }
@@ -467,6 +510,7 @@ export type ProfileDiscoveryResult = {
   discoveredProfileKeys: string[];
   scannedFolderCount: number;
   skippedFolderCount: number;
+  profileLoadFailures: ProfileDatasetFailure[];
 };
 
 /**
@@ -586,6 +630,7 @@ export async function discoverAvailableProfiles(
     cachedState = state;
     await saveSharedSyncState(state);
     const discoveredProfileKeys: string[] = [];
+    const profileLoadFailures: ProfileDatasetFailure[] = [];
 
     for (const folder of folders.values()) {
       const listed = datasetsByParent.get(folder.appFolderId) ?? [];
@@ -740,9 +785,20 @@ export async function discoverAvailableProfiles(
           bootstrap.authorizationProvider,
           bootstrap.googleIdentity,
         );
+        const controlController = buildControlController(
+          state,
+          profile,
+          identityProvider,
+          bootstrap.authorizationProvider,
+        );
         try {
           for (const access of groupAccess) {
-            await controller.adoptDataset(access.datasetId, {
+            await adoptProfileDataset({
+              dataController: controller,
+              controlController,
+              baseDatasetId: group.baseDatasetId,
+              datasetId: access.datasetId,
+              controlDatasetId: profile.controlDatasetId,
               requireOwned: access.participant.role === "owner",
             });
           }
@@ -768,6 +824,15 @@ export async function discoverAvailableProfiles(
           await saveSharedSyncState(state);
           if (!beforeProfile) discoveredProfileKeys.push(key);
         } catch (error) {
+          const failure = error instanceof ProfileDatasetOperationError
+            ? error.failure
+            : wrapProfileDatasetError(error, {
+                baseDatasetId: group.baseDatasetId,
+                datasetId: group.baseDatasetId,
+                controlDatasetId: profile.controlDatasetId,
+                stage: "load",
+              }).failure;
+          profileLoadFailures.push(failure);
           const refreshed = (await loadSharedSyncState()) ?? state;
           state = beforeProfile
             ? upsertProfile(refreshed, beforeProfile)
@@ -781,8 +846,12 @@ export async function discoverAvailableProfiles(
           await saveSharedSyncState(state);
           await appendDeveloperLog("profile-discovery", "profile-load-skipped", {
             appFolderId: folder.appFolderId,
-            datasetId: group.baseDatasetId,
-            error: error instanceof Error ? error.message : String(error),
+            datasetId: failure.datasetId,
+            datasetPart: failure.datasetPart,
+            stage: failure.stage,
+            reasonCode: failure.reasonCode,
+            ...(failure.path ? { path: failure.path } : {}),
+            ...(failure.observedType ? { observedType: failure.observedType } : {}),
           }).catch(() => undefined);
         }
       }
@@ -794,6 +863,7 @@ export async function discoverAvailableProfiles(
       discoveredProfileKeys,
       scannedFolderCount: folders.size,
       skippedFolderCount: 0,
+      profileLoadFailures,
     };
   });
 }
@@ -1098,10 +1168,19 @@ async function syncProfileDatasetGroup(
     if (upgraded) {
       profile = upgraded;
     } else {
-      const result =
-        mode === "load"
+      let result;
+      try {
+        result = mode === "load"
           ? await controller.loadDataset(profile.datasetId)
           : await controller.syncDataset(profile.datasetId, local);
+      } catch (error) {
+        throw wrapProfileDatasetError(error, {
+          baseDatasetId: profile.datasetId,
+          datasetId: profile.datasetId,
+          controlDatasetId: profile.controlDatasetId,
+          stage: mode,
+        });
+      }
       return {
         payload: result.value as SharedSyncPayloadV1,
         fileId: result.fileId,
@@ -1117,9 +1196,19 @@ async function syncProfileDatasetGroup(
   for (const part of grantedParts(profile)) {
     const datasetId = datasetIdForPart(profile.datasetId, part);
     const writable = mode === "sync" && partIsWritable(profile, part);
-    const result = writable
-      ? await controller.syncDataset(datasetId, projectDatasetPart(local, part))
-      : await controller.loadDataset(datasetId);
+    let result;
+    try {
+      result = writable
+        ? await controller.syncDataset(datasetId, projectDatasetPart(local, part))
+        : await controller.loadDataset(datasetId);
+    } catch (error) {
+      throw wrapProfileDatasetError(error, {
+        baseDatasetId: profile.datasetId,
+        datasetId,
+        controlDatasetId: profile.controlDatasetId,
+        stage: writable ? "sync" : "load",
+      });
+    }
     values[part] = result.value as SharedSyncPayloadV1;
     if (part === "plan" || baseInfo.revisionId === undefined) {
       baseInfo = { fileId: result.fileId, revisionId: result.revisionId };
@@ -1469,12 +1558,39 @@ export async function setupSharedSync(
       let createdPayload: SharedSyncPayloadV1;
       if (existing) {
         try {
-          await controller.adoptDataset(connectedProfile.datasetId, { requireOwned: true });
+          const controlController = buildControlController(
+            provisional,
+            connectedProfile,
+            identityProvider,
+            authorizationProvider,
+          );
+          await adoptProfileDataset({
+            dataController: controller,
+            controlController,
+            baseDatasetId: connectedProfile.datasetId,
+            datasetId: connectedProfile.datasetId,
+            controlDatasetId: connectedProfile.controlDatasetId,
+            requireOwned: true,
+          });
           for (const companionId of companionIds) {
-            await controller.adoptDataset(companionId, { requireOwned: true });
+            await adoptProfileDataset({
+              dataController: controller,
+              controlController,
+              baseDatasetId: connectedProfile.datasetId,
+              datasetId: companionId,
+              controlDatasetId: connectedProfile.controlDatasetId,
+              requireOwned: true,
+            });
           }
           if (existingControl) {
-            await controller.adoptDataset(existingControl.datasetId, { requireOwned: true });
+            await adoptProfileDataset({
+              dataController: controller,
+              controlController,
+              baseDatasetId: connectedProfile.datasetId,
+              datasetId: existingControl.datasetId,
+              controlDatasetId: connectedProfile.controlDatasetId,
+              requireOwned: true,
+            });
           }
         } catch (error) {
           throw new Error(

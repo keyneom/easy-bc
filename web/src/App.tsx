@@ -1298,6 +1298,12 @@ export default function App() {
           // decision so the user can switch into it immediately afterward.
           setTab("settings");
           setSettingsView("profiles");
+        } else if (result.profileLoadFailures.length > 0) {
+          const failure = result.profileLoadFailures[0]!;
+          setProfileSwitchNotice(
+            `EasyBC found a profile but could not open its ${failure.datasetPart} dataset ` +
+              `(${failure.datasetId}). Update EasyBC and try profile discovery again.`,
+          );
         } else if (!hasEncryptedProfile) {
           setProfileSwitchNotice(
             pickSharedFolder

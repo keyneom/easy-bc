@@ -23,10 +23,15 @@ export function isNewerVersion(candidate: string, current: string): boolean {
   return compareSemver(candidate, current) > 0;
 }
 
+export function publishedVersionUrl(base: string, pageUrl: string): URL {
+  const baseUrl = new URL(base || "./", pageUrl);
+  return new URL("version.json", baseUrl);
+}
+
 export async function fetchPublishedVersion(): Promise<PublishedVersionInfo | null> {
   if (typeof fetch === "undefined") return null;
   const base = import.meta.env.BASE_URL ?? "/";
-  const url = new URL("version.json", window.location.origin + base);
+  const url = publishedVersionUrl(base, window.location.href);
   url.searchParams.set("t", String(Date.now()));
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) return null;
