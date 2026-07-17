@@ -97,7 +97,8 @@ Pack the candidate Web package and consume it from EasyBC. With the existing
 5. Open the same profile on Android from the coordinated release and confirm
    identical behavior without duplicate passkey prompts.
 
-EasyBC Web carries a temporary defensive workaround that uses its dedicated
-control controller for ordinary control-dataset adoption. Keep that workaround
-through RC validation; remove it only after the package contract and parity
-tests above are released and the live `primary.g2` gate passes.
+EasyBC should pass ordinary control-dataset lifecycle operations through its
+application controller and rely on the corrected `codecForDataset` contract.
+The dedicated control controller remains appropriate for the higher-level
+sharing-control API itself, but is not a fallback for application-controller
+adoption.

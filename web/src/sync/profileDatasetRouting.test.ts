@@ -8,44 +8,38 @@ import {
 import { SyncPayloadParseError } from "./types";
 
 describe("profile dataset codec routing", () => {
-  it("adopts a control ledger with the dedicated control controller", async () => {
-    const dataController = { adoptDataset: vi.fn().mockResolvedValue(undefined) };
-    const controlController = { adoptDataset: vi.fn().mockResolvedValue(undefined) };
+  it("passes a control dataset ID to the rc19-configured application controller", async () => {
+    const controller = { adoptDataset: vi.fn().mockResolvedValue(undefined) };
 
     await adoptProfileDataset({
-      dataController,
-      controlController,
+      controller,
       baseDatasetId: "primary.g2",
       datasetId: "primary.control",
       controlDatasetId: "primary.control",
       requireOwned: true,
     });
 
-    expect(dataController.adoptDataset).not.toHaveBeenCalled();
-    expect(controlController.adoptDataset).toHaveBeenCalledWith(
+    expect(controller.adoptDataset).toHaveBeenCalledWith(
       "primary.control",
       { requireOwned: true },
     );
   });
 
-  it("keeps ordinary split parts on the EasyBC data controller", async () => {
-    const dataController = { adoptDataset: vi.fn().mockResolvedValue(undefined) };
-    const controlController = { adoptDataset: vi.fn().mockResolvedValue(undefined) };
+  it("passes ordinary split parts through the same application controller", async () => {
+    const controller = { adoptDataset: vi.fn().mockResolvedValue(undefined) };
 
     await adoptProfileDataset({
-      dataController,
-      controlController,
+      controller,
       baseDatasetId: "primary.g2",
       datasetId: "primary.g2.cycle",
       controlDatasetId: "primary.control",
       requireOwned: false,
     });
 
-    expect(dataController.adoptDataset).toHaveBeenCalledWith(
+    expect(controller.adoptDataset).toHaveBeenCalledWith(
       "primary.g2.cycle",
       { requireOwned: false },
     );
-    expect(controlController.adoptDataset).not.toHaveBeenCalled();
   });
 
   it("preserves redacted parser diagnostics without payload values", () => {

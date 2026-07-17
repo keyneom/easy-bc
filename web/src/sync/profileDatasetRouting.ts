@@ -73,24 +73,16 @@ export function wrapProfileDatasetError(
   );
 }
 
-/**
- * sync-kit Web rc.17 only applies codecForDataset inside mixed invitation and
- * participant operations. Use the dedicated control controller for ordinary
- * adoption so a control ledger is never sent to the EasyBC payload codec.
- */
+/** Attach a safe dataset/part/stage context to sync-kit adoption failures. */
 export async function adoptProfileDataset(input: {
-  dataController: AdoptController;
-  controlController: AdoptController;
+  controller: AdoptController;
   baseDatasetId: string;
   datasetId: string;
   controlDatasetId?: string;
   requireOwned: boolean;
 }): Promise<void> {
-  const controller = input.controlDatasetId === input.datasetId
-    ? input.controlController
-    : input.dataController;
   try {
-    await controller.adoptDataset(input.datasetId, { requireOwned: input.requireOwned });
+    await input.controller.adoptDataset(input.datasetId, { requireOwned: input.requireOwned });
   } catch (error) {
     throw wrapProfileDatasetError(error, { ...input, stage: "adopt" });
   }

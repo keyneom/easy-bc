@@ -417,16 +417,9 @@ async function recoverAdditionalOwnedProfiles(
       authorizationProvider,
       googleIdentity,
     );
-    const controlController = buildControlController(
-      provisional,
-      profile,
-      identityProvider,
-      authorizationProvider,
-    );
     try {
       await adoptProfileDataset({
-        dataController: controller,
-        controlController,
+        controller,
         baseDatasetId: group.baseDatasetId,
         datasetId: group.baseDatasetId,
         controlDatasetId: profile.controlDatasetId,
@@ -435,8 +428,7 @@ async function recoverAdditionalOwnedProfiles(
       for (const part of DATASET_PARTS) {
         if (part === "plan" || !group.companionFileIds[part]) continue;
         await adoptProfileDataset({
-          dataController: controller,
-          controlController,
+          controller,
           baseDatasetId: group.baseDatasetId,
           datasetId: datasetIdForPart(group.baseDatasetId, part),
           controlDatasetId: profile.controlDatasetId,
@@ -445,8 +437,7 @@ async function recoverAdditionalOwnedProfiles(
       }
       if (profile.controlDatasetId && group.controlFileId) {
         await adoptProfileDataset({
-          dataController: controller,
-          controlController,
+          controller,
           baseDatasetId: group.baseDatasetId,
           datasetId: profile.controlDatasetId,
           controlDatasetId: profile.controlDatasetId,
@@ -785,17 +776,10 @@ export async function discoverAvailableProfiles(
           bootstrap.authorizationProvider,
           bootstrap.googleIdentity,
         );
-        const controlController = buildControlController(
-          state,
-          profile,
-          identityProvider,
-          bootstrap.authorizationProvider,
-        );
         try {
           for (const access of groupAccess) {
             await adoptProfileDataset({
-              dataController: controller,
-              controlController,
+              controller,
               baseDatasetId: group.baseDatasetId,
               datasetId: access.datasetId,
               controlDatasetId: profile.controlDatasetId,
@@ -1558,15 +1542,8 @@ export async function setupSharedSync(
       let createdPayload: SharedSyncPayloadV1;
       if (existing) {
         try {
-          const controlController = buildControlController(
-            provisional,
-            connectedProfile,
-            identityProvider,
-            authorizationProvider,
-          );
           await adoptProfileDataset({
-            dataController: controller,
-            controlController,
+            controller,
             baseDatasetId: connectedProfile.datasetId,
             datasetId: connectedProfile.datasetId,
             controlDatasetId: connectedProfile.controlDatasetId,
@@ -1574,8 +1551,7 @@ export async function setupSharedSync(
           });
           for (const companionId of companionIds) {
             await adoptProfileDataset({
-              dataController: controller,
-              controlController,
+              controller,
               baseDatasetId: connectedProfile.datasetId,
               datasetId: companionId,
               controlDatasetId: connectedProfile.controlDatasetId,
@@ -1584,8 +1560,7 @@ export async function setupSharedSync(
           }
           if (existingControl) {
             await adoptProfileDataset({
-              dataController: controller,
-              controlController,
+              controller,
               baseDatasetId: connectedProfile.datasetId,
               datasetId: existingControl.datasetId,
               controlDatasetId: connectedProfile.controlDatasetId,
