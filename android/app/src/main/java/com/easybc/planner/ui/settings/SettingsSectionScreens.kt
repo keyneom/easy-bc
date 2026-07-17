@@ -2,6 +2,7 @@ package com.easybc.planner.ui.settings
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -58,6 +59,7 @@ internal fun SettingsSubScreen(
     title: String,
     onBack: () -> Unit,
     saveOnExit: (() -> Unit)? = null,
+    profileChip: @Composable () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val exit = {
@@ -65,7 +67,9 @@ internal fun SettingsSubScreen(
         onBack()
     }
     BackHandler { exit() }
+    // Zero insets: the app-level scaffold already consumed the system bars.
     Scaffold(
+        contentWindowInsets = WindowInsets(0.dp),
         topBar = {
             TopAppBar(
                 title = { Text(title) },
@@ -74,6 +78,8 @@ internal fun SettingsSubScreen(
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
+                actions = { profileChip() },
+                windowInsets = WindowInsets(0.dp),
             )
         },
     ) { padding ->
@@ -111,9 +117,13 @@ private fun rememberSaveOnExit(vm: SettingsViewModel): () -> Unit {
 /* ---------- Plan basics ---------- */
 
 @Composable
-fun PlanBasicsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
+fun PlanBasicsScreen(
+    onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
     val draft by vm.draft.collectAsState()
-    SettingsSubScreen("Plan basics", onBack, saveOnExit = rememberSaveOnExit(vm)) {
+    SettingsSubScreen("Plan basics", onBack, saveOnExit = rememberSaveOnExit(vm), profileChip = profileChip) {
         Text(
             "The two numbers everything else builds on. Changes apply to the active profile only.",
             style = MaterialTheme.typography.bodySmall,
@@ -147,9 +157,13 @@ fun PlanBasicsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-fun ProtectionScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
+fun ProtectionScreen(
+    onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
     val draft by vm.draft.collectAsState()
-    SettingsSubScreen("Protection", onBack, saveOnExit = rememberSaveOnExit(vm)) {
+    SettingsSubScreen("Protection", onBack, saveOnExit = rememberSaveOnExit(vm), profileChip = profileChip) {
         Text("Persistent / background method", style = MaterialTheme.typography.labelLarge)
         Text(
             "An always-on method that reduces baseline risk for all days.",
@@ -277,10 +291,14 @@ fun ProtectionScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
 /* ---------- Risk & comfort ---------- */
 
 @Composable
-fun RiskComfortScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
+fun RiskComfortScreen(
+    onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
     val draft by vm.draft.collectAsState()
     var advancedOpen by remember { mutableStateOf(false) }
-    SettingsSubScreen("Risk & comfort", onBack, saveOnExit = rememberSaveOnExit(vm)) {
+    SettingsSubScreen("Risk & comfort", onBack, saveOnExit = rememberSaveOnExit(vm), profileChip = profileChip) {
         SliderField(
             label = "Cumulative failure target",
             value = draft.targetCumulativeFailure,
@@ -333,34 +351,37 @@ fun RiskComfortScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
     }
 }
 
-/* ---------- Profiles, storage & sharing ---------- */
-
-@Composable
-fun StorageSharingScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
-    SettingsSubScreen("Profiles & sharing", onBack) {
-        EncryptedSyncSection(vm)
-    }
-}
-
 /* ---------- Device sections ---------- */
 
 @Composable
-fun RemindersScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
-    SettingsSubScreen("Reminders", onBack) {
+fun RemindersScreen(
+    onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
+    SettingsSubScreen("Reminders", onBack, profileChip = profileChip) {
         ReminderSection(vm)
     }
 }
 
 @Composable
-fun DeviceCalendarScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
-    SettingsSubScreen("Device calendar", onBack) {
+fun DeviceCalendarScreen(
+    onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
+    SettingsSubScreen("Device calendar", onBack, profileChip = profileChip) {
         DeviceCalendarSection(vm)
     }
 }
 
 @Composable
-fun BackupScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
-    SettingsSubScreen("Backup & restore", onBack) {
+fun BackupScreen(
+    onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
+    vm: SettingsViewModel = viewModel(),
+) {
+    SettingsSubScreen("Backup & restore", onBack, profileChip = profileChip) {
         BackupRestoreSection(vm)
     }
 }
@@ -368,13 +389,17 @@ fun BackupScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
 /* ---------- About ---------- */
 
 @Composable
-fun AboutScreen(onBack: () -> Unit, onOpenSetup: () -> Unit = {}) {
+fun AboutScreen(
+    onBack: () -> Unit,
+    onOpenSetup: () -> Unit = {},
+    profileChip: @Composable () -> Unit = {},
+) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val developerLog = remember { DeveloperLog(context.applicationContext) }
     var logEntries by remember { mutableStateOf(developerLog.entries()) }
     var diagnosticsExpanded by remember { mutableStateOf(false) }
-    SettingsSubScreen("About EasyBC", onBack) {
+    SettingsSubScreen("About EasyBC", onBack, profileChip = profileChip) {
         Text("Version ${BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(8.dp))
         Text("Disclaimers", style = MaterialTheme.typography.labelLarge)
@@ -472,7 +497,10 @@ fun OnboardingWizardScreen(
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Set up") }) },
+        contentWindowInsets = WindowInsets(0.dp),
+        topBar = {
+            TopAppBar(title = { Text("Set up") }, windowInsets = WindowInsets(0.dp))
+        },
     ) { padding ->
         Column(
             modifier = Modifier

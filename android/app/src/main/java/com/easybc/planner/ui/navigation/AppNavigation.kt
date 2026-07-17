@@ -14,9 +14,11 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timeline
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -28,14 +30,17 @@ import com.easybc.planner.ui.history.HistoryScreen
 import com.easybc.planner.ui.planner.PlannerScreen
 import com.easybc.planner.ui.reconcile.ReconcileScreen
 import com.easybc.planner.ui.settings.AboutScreen
+import com.easybc.planner.ui.settings.AcceptResponseScreen
 import com.easybc.planner.ui.settings.BackupScreen
 import com.easybc.planner.ui.settings.DeviceCalendarScreen
+import com.easybc.planner.ui.settings.JoinProfileScreen
+import com.easybc.planner.ui.settings.ManageProfilesScreen
 import com.easybc.planner.ui.settings.PlanBasicsScreen
+import com.easybc.planner.ui.settings.ProfileDetailScreen
 import com.easybc.planner.ui.settings.ProtectionScreen
 import com.easybc.planner.ui.settings.RemindersScreen
 import com.easybc.planner.ui.settings.RiskComfortScreen
 import com.easybc.planner.ui.settings.SettingsScreen
-import com.easybc.planner.ui.settings.StorageSharingScreen
 import com.easybc.planner.ui.update.UpdateAvailableBanner
 
 enum class Screen(
@@ -56,7 +61,7 @@ fun AppNavigation(
     pendingReconcileDeepLink: Boolean = false,
     /** Called once we've navigated to the reconcile screen. */
     onReconcileDeepLinkConsumed: () -> Unit = {},
-    /** True when a sharing join/response link should open Encrypted Sync settings. */
+    /** True when a sharing join/response link should open the profile screens. */
     pendingSettingsDeepLink: Boolean = false,
     onSettingsDeepLinkConsumed: () -> Unit = {},
     /** Pull-to-refresh resync; null hides the gesture (e.g. previews). */
@@ -65,6 +70,7 @@ fun AppNavigation(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
+    val context = LocalContext.current
 
     // Activity-scoped view model backing the global profile chip. Screens keep
     // their own back-stack-scoped instances; refreshing on every navigation
@@ -73,6 +79,17 @@ fun AppNavigation(
         androidx.lifecycle.viewmodel.compose.viewModel()
     androidx.compose.runtime.LaunchedEffect(navBackStackEntry) {
         chipVm.refreshSharedState()
+    }
+
+    fun openManageProfiles() {
+        navController.navigate(Screen.Settings.route) { launchSingleTop = true }
+        navController.navigate("settings/profiles") { launchSingleTop = true }
+    }
+
+    // Every screen renders this in its own title row — profile identity stays
+    // ambient without a dedicated bar of vertical space.
+    val profileChip: @Composable () -> Unit = {
+        ProfileChipAction(vm = chipVm, onOpenManageProfiles = ::openManageProfiles)
     }
 
     // Handle the reminder notification deep-link. We push the reconcile
@@ -87,14 +104,16 @@ fun AppNavigation(
 
     androidx.compose.runtime.LaunchedEffect(pendingSettingsDeepLink) {
         if (pendingSettingsDeepLink) {
-            // Land on the sharing screen (where join/response links are
-            // handled), with the settings hub beneath it on the back stack.
-            navController.navigate(Screen.Settings.route) {
-                launchSingleTop = true
-            }
-            navController.navigate("settings/storage") {
-                launchSingleTop = true
-            }
+            // Join and response links each land on the screen that handles
+            // them. Accepting a response is intentionally not scoped to the
+            // active profile: the pending exchange identifies its profile.
+            val isResponse = com.easybc.planner.sync.shared.PendingSharedJoin
+                .responseToAccept(context) != null
+            navController.navigate(Screen.Settings.route) { launchSingleTop = true }
+            navController.navigate("settings/profiles") { launchSingleTop = true }
+            navController.navigate(
+                if (isResponse) "settings/accept" else "settings/join",
+            ) { launchSingleTop = true }
             onSettingsDeepLinkConsumed()
         }
     }
@@ -136,13 +155,6 @@ fun AppNavigation(
                 .padding(innerPadding),
         ) {
             UpdateAvailableBanner()
-            ProfileChipHost(
-                vm = chipVm,
-                onOpenManageProfiles = {
-                    navController.navigate(Screen.Settings.route) { launchSingleTop = true }
-                    navController.navigate("settings/profiles") { launchSingleTop = true }
-                },
-            )
             NavHost(
                 navController = navController,
                 startDestination = Screen.Calendar.route,
@@ -152,25 +164,26 @@ fun AppNavigation(
                 CalendarScreen(
                     onOpenReconcile = { navController.navigate("reconcile") },
                     onManualSync = onManualSync,
+                    profileChip = profileChip,
                 )
             }
-            composable(Screen.Planner.route) { PlannerScreen() }
-            composable(Screen.History.route) { HistoryScreen() }
+            composable(Screen.Planner.route) { PlannerScreen(profileChip = profileChip) }
+            composable(Screen.History.route) { HistoryScreen(profileChip = profileChip) }
             composable(Screen.Settings.route) {
-                SettingsScreen(onOpen = { route -> navController.navigate(route) })
+                SettingsScreen(
+                    onOpen = { route -> navController.navigate(route) },
+                    profileChip = profileChip,
+                )
             }
             // Settings sub-screens (docs/settings-profiles-redesign.md §2).
             composable("settings/basics") {
-                PlanBasicsScreen(onBack = { navController.popBackStack() })
+                PlanBasicsScreen(onBack = { navController.popBackStack() }, profileChip = profileChip)
             }
             composable("settings/protection") {
-                ProtectionScreen(onBack = { navController.popBackStack() })
+                ProtectionScreen(onBack = { navController.popBackStack() }, profileChip = profileChip)
             }
             composable("settings/risk") {
-                RiskComfortScreen(onBack = { navController.popBackStack() })
-            }
-            composable("settings/storage") {
-                StorageSharingScreen(onBack = { navController.popBackStack() })
+                RiskComfortScreen(onBack = { navController.popBackStack() }, profileChip = profileChip)
             }
             composable("onboarding") {
                 com.easybc.planner.ui.settings.OnboardingWizardScreen(
@@ -181,22 +194,57 @@ fun AppNavigation(
                     },
                 )
             }
+            // The profiles home: list, new, join. Tap a profile for detail.
             composable("settings/profiles") {
-                com.easybc.planner.ui.settings.ManageProfilesScreen(
+                ManageProfilesScreen(
                     onBack = { navController.popBackStack() },
-                    onOpenStorage = {
-                        navController.navigate("settings/storage") { launchSingleTop = true }
+                    onOpenProfile = { key ->
+                        navController.navigate(
+                            "settings/profile/${android.net.Uri.encode(key)}",
+                        ) { launchSingleTop = true }
                     },
+                    onOpenJoin = {
+                        navController.navigate("settings/join") { launchSingleTop = true }
+                    },
+                    profileChip = profileChip,
+                )
+            }
+            composable("settings/profile/{profileKey}") { entry ->
+                val key = entry.arguments?.getString("profileKey").orEmpty()
+                ProfileDetailScreen(
+                    profileKeyArg = android.net.Uri.decode(key),
+                    onBack = { navController.popBackStack() },
+                    profileChip = profileChip,
+                )
+            }
+            composable("settings/join") {
+                JoinProfileScreen(
+                    onBack = { navController.popBackStack() },
+                    profileChip = profileChip,
+                )
+            }
+            composable("settings/accept") {
+                AcceptResponseScreen(
+                    onDone = { navController.popBackStack() },
+                    profileChip = profileChip,
+                )
+            }
+            // Legacy alias (old deep links / stored routes): the active
+            // profile's detail screen replaced "Profiles & sharing".
+            composable("settings/storage") {
+                ActiveProfileDetailAlias(
+                    navController = navController,
+                    profileChip = profileChip,
                 )
             }
             composable("settings/reminders") {
-                RemindersScreen(onBack = { navController.popBackStack() })
+                RemindersScreen(onBack = { navController.popBackStack() }, profileChip = profileChip)
             }
             composable("settings/device-calendar") {
-                DeviceCalendarScreen(onBack = { navController.popBackStack() })
+                DeviceCalendarScreen(onBack = { navController.popBackStack() }, profileChip = profileChip)
             }
             composable("settings/backup") {
-                BackupScreen(onBack = { navController.popBackStack() })
+                BackupScreen(onBack = { navController.popBackStack() }, profileChip = profileChip)
             }
             composable("settings/about") {
                 AboutScreen(
@@ -204,14 +252,49 @@ fun AppNavigation(
                     onOpenSetup = {
                         navController.navigate("onboarding") { launchSingleTop = true }
                     },
+                    profileChip = profileChip,
                 )
             }
             // "reconcile" isn't a bottom-nav destination — it's a full-screen
             // child pushed from the Calendar screen's chip.
             composable("reconcile") {
-                ReconcileScreen(onBack = { navController.popBackStack() })
+                ReconcileScreen(
+                    onBack = { navController.popBackStack() },
+                    profileChip = profileChip,
+                )
             }
         }
         }
+    }
+}
+
+/** Resolves the active profile at render time for the legacy storage route. */
+@Composable
+private fun ActiveProfileDetailAlias(
+    navController: androidx.navigation.NavController,
+    profileChip: @Composable () -> Unit,
+) {
+    val vm: com.easybc.planner.ui.settings.SettingsViewModel =
+        androidx.lifecycle.viewmodel.compose.viewModel()
+    val state by vm.sharedSyncState.collectAsState()
+    val activeKey = state?.activeProfileKey
+    if (activeKey == null) {
+        // Registry still loading (or no profiles yet): fall back to the list.
+        ManageProfilesScreen(
+            onBack = { navController.popBackStack() },
+            onOpenProfile = { key ->
+                navController.navigate("settings/profile/${android.net.Uri.encode(key)}") {
+                    launchSingleTop = true
+                }
+            },
+            onOpenJoin = { navController.navigate("settings/join") { launchSingleTop = true } },
+            profileChip = profileChip,
+        )
+    } else {
+        ProfileDetailScreen(
+            profileKeyArg = activeKey,
+            onBack = { navController.popBackStack() },
+            profileChip = profileChip,
+        )
     }
 }

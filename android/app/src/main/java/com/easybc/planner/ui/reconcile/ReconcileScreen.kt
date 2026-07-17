@@ -30,6 +30,7 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun ReconcileScreen(
     onBack: () -> Unit,
+    profileChip: @Composable () -> Unit = {},
     vm: ReconcileViewModel = viewModel(),
 ) {
     // null = planner still computing (show a spinner); emptyList = computed
@@ -38,7 +39,9 @@ fun ReconcileScreen(
     val selected by vm.selectedDates.collectAsState()
     val dateFmt = remember { DateTimeFormatter.ofPattern("EEE, MMM d") }
 
+    // Zero insets: the app-level scaffold already consumed the system bars.
     Scaffold(
+        contentWindowInsets = WindowInsets(0.dp),
         topBar = {
             TopAppBar(
                 title = { Text("Reconcile days") },
@@ -48,6 +51,7 @@ fun ReconcileScreen(
                     }
                 },
                 actions = {
+                    profileChip()
                     val loadedRows = rows
                     if (!loadedRows.isNullOrEmpty()) {
                         TextButton(onClick = {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertAcceptedDatasetResults,
   assertSplitUpgradeAllowed,
+  mergedControlMemberMetadata,
   sharedSyncConfigFromEnv,
 } from "./sharedSync";
 
@@ -84,5 +85,44 @@ describe("assertSplitUpgradeAllowed", () => {
         participantEmails: { "key-1": "mark@example.com" },
       }),
     ).toThrow(/remove everyone's access/i);
+  });
+});
+
+describe("mergedControlMemberMetadata", () => {
+  it("preserves the complete verified directory while adding fresh invite data", () => {
+    const members = new Map([
+      ["owner-key", {
+        email: "owner@example.com",
+        googleSubject: "owner-subject",
+        drivePermissionId: "owner-permission",
+      }],
+      ["existing-key", { googleSubject: "existing-subject" }],
+    ]);
+    const profile = {
+      datasetId: "primary",
+      ownerEmail: "owner@example.com",
+      folderName: "EasyBC — owner@example.com",
+      role: "owner" as const,
+      trustedOwnerKeyId: "owner-key",
+      syncMode: "encrypted" as const,
+      participantEmails: { "existing-key": "existing@example.com" },
+    };
+
+    expect(
+      mergedControlMemberMetadata(members, profile, {
+        "new-key": { email: "new@example.com" },
+      }),
+    ).toEqual({
+      "owner-key": {
+        email: "owner@example.com",
+        googleSubject: "owner-subject",
+        drivePermissionId: "owner-permission",
+      },
+      "existing-key": {
+        email: "existing@example.com",
+        googleSubject: "existing-subject",
+      },
+      "new-key": { email: "new@example.com" },
+    });
   });
 });

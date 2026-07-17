@@ -53,6 +53,8 @@ fun CalendarScreen(
     onManualSync: (
         suspend () -> com.easybc.planner.sync.CloudAutoSyncSession.ManualSyncOutcome
     )? = null,
+    /** Global profile chip, rendered inline with the month header. */
+    profileChip: @Composable () -> Unit = {},
     vm: CalendarViewModel = viewModel(),
 ) {
     val currentMonth by vm.currentMonth.collectAsState()
@@ -82,7 +84,9 @@ fun CalendarScreen(
     }
     val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
 
+    // Zero insets: the app-level scaffold already consumed the system bars.
     Scaffold(
+        contentWindowInsets = WindowInsets(0.dp),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             Column {
@@ -114,6 +118,8 @@ fun CalendarScreen(
                     }) {
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, "Next")
                     }
+
+                    profileChip()
                 }
 
                 // View mode toggle + today button

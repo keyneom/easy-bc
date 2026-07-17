@@ -156,7 +156,7 @@ class MainActivity : ComponentActivity() {
                 com.easybc.planner.sync.shared.PendingSharedJoin.setJoinLink(this, url)
                 Toast.makeText(
                     this,
-                    "Join link ready in Settings → Encrypted Cloud Sync.",
+                    "Join link ready in Settings → Profiles → Join.",
                     Toast.LENGTH_LONG,
                 ).show()
             }
@@ -166,7 +166,7 @@ class MainActivity : ComponentActivity() {
             com.easybc.planner.sync.shared.PendingSharedJoin.setResponseToAccept(this, url)
             Toast.makeText(
                 this,
-                "Response link ready. Review it in Settings to finish sharing.",
+                "Response link ready — finishing the share…",
                 Toast.LENGTH_LONG,
             ).show()
         } else {

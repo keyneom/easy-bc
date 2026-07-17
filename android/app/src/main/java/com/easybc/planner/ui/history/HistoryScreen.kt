@@ -64,7 +64,10 @@ class HistoryViewModel(application: Application) : AndroidViewModel(application)
 }
 
 @Composable
-fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
+fun HistoryScreen(
+    profileChip: @Composable () -> Unit = {},
+    vm: HistoryViewModel = viewModel(),
+) {
     val periods by vm.periods.collectAsState()
     val stats by vm.stats.collectAsState()
     val fmt = DateTimeFormatter.ofPattern("MMM d, yyyy")
@@ -74,13 +77,20 @@ fun HistoryScreen(vm: HistoryViewModel = viewModel()) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // Stats summary
+        // Stats summary — the title row carries the global profile chip.
         item {
-            Text(
-                "Cycle History",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Cycle History",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                profileChip()
+            }
         }
 
         item {

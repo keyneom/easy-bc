@@ -27,7 +27,10 @@ import com.easybc.planner.ui.theme.*
 import kotlin.math.roundToInt
 
 @Composable
-fun PlannerScreen(vm: PlannerViewModel = viewModel()) {
+fun PlannerScreen(
+    profileChip: @Composable () -> Unit = {},
+    vm: PlannerViewModel = viewModel(),
+) {
     val state by vm.state.collectAsState()
 
     if (state.settings?.onboardingComplete != true) {
@@ -61,6 +64,22 @@ fun PlannerScreen(vm: PlannerViewModel = viewModel()) {
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        // Title row carries the global profile chip.
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Plan",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                profileChip()
+            }
+        }
+
         // Cumulative risk summary
         item { RiskSummaryCard(result) }
 

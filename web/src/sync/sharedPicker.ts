@@ -1,6 +1,7 @@
 import { GoogleDriveFolderPicker } from "@keyneom/sync-kit/stores/google-drive/picker";
 import type { Authorization } from "@keyneom/sync-kit/core";
 import type { SharingDatasetFileV1 } from "@keyneom/sync-kit/sharing";
+import { pickFilesWithCheckboxes } from "./listPicker";
 
 export function createEasyBcFolderPicker(title?: string): GoogleDriveFolderPicker | null {
   const developerKey = import.meta.env.VITE_GOOGLE_API_KEY?.trim() ?? "";
@@ -19,20 +20,34 @@ export function createEasyBcFolderPicker(title?: string): GoogleDriveFolderPicke
  * `drive.file` read on each. A folder grant doesn't cascade to reading files
  * inside it, so the recipient must pick the files themselves — they appear in
  * the Picker because the owner shared them to this account's email.
+ *
+ * Uses the LIST-mode picker: with multi-select enabled it renders a checkbox
+ * per row, so every shared file is selectable in one visit on touch devices
+ * too (the default grid view forced one-at-a-time picking on mobile).
  */
 export async function pickSharedDatasetFiles(
   authorization: Authorization,
   expectedFiles: SharingDatasetFileV1[] = [],
 ): Promise<Array<{ fileId: string; name?: string }>> {
-  const picker = createEasyBcFolderPicker("Select the shared EasyBC file(s)");
-  if (!picker) {
+  const developerKey = import.meta.env.VITE_GOOGLE_API_KEY?.trim() ?? "";
+  const cloudProjectNumber =
+    import.meta.env.VITE_GOOGLE_CLOUD_PROJECT_NUMBER?.trim() ?? "";
+  if (!developerKey || !cloudProjectNumber) {
     throw new Error(
       "Google Picker is not configured. Set VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLOUD_PROJECT_NUMBER.",
     );
   }
   document.body.dataset.pickerOpen = "true";
   try {
-    const picked = await picker.pickFiles(authorization, { multiSelect: true });
+    const picked = await pickFilesWithCheckboxes({
+      accessToken: authorization.accessToken,
+      developerKey,
+      cloudProjectNumber,
+      title:
+        expectedFiles.length > 1
+          ? `Tick all ${expectedFiles.length} shared EasyBC files, then Select`
+          : "Select the shared EasyBC file",
+    });
     const selected = picked.map((file) => ({ fileId: file.fileId, name: file.name }));
     validatePickedDatasetFiles(expectedFiles, selected);
     return selected;

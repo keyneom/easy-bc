@@ -9,13 +9,11 @@ import {
   Pencil,
   RefreshCw,
   Trash2,
-  Unplug,
   UserMinus,
   UserPlus,
 } from "lucide-react";
 import type { SharingRole } from "@keyneom/sync-kit/sharing";
 import type { WasmOptions } from "../App";
-import { ProfileSwitcher } from "./ProfileSwitcher";
 import type { PersistedSession } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
 import { idbGet, KV_SYNC_STATE } from "../idbStore";
@@ -28,7 +26,6 @@ import {
   acceptPendingKeyResponse,
   acceptResponseFromLink,
   connectActiveLocalProfile,
-  createLocalProfile,
   deleteManagedProfile,
   disconnectProfileToLocal,
   enrollActiveControlDataset,
@@ -48,7 +45,6 @@ import {
   beginSplitMigration,
   closeSplitMigration,
   splitMigrationStatusForActive,
-  switchManagedProfile,
   syncActiveDataset,
   upgradeActiveProfileToSplit,
   updateParticipantDatasetRole,
@@ -86,6 +82,7 @@ import {
   type EbAccessLevel,
   EbAccessSegmented,
   EbDatasetRow,
+  EbModeCard,
   EbPersonCard,
   EbPresetChip,
 } from "../ui/Kit";
@@ -100,6 +97,12 @@ type Props = {
   onApplyPayload: (payload: SyncPayloadV1) => Promise<void>;
   onSharedSyncStateChange: (state: SharedSyncState | null) => void;
   onSyncComplete?: (payload: SyncPayloadV1 | null) => void;
+  /**
+   * Which slice of the sharing engine to render: "detail" is a profile's
+   * storage/people/invite screen; "join" is the standalone join flow that
+   * lives with "add a profile" (docs/settings-profiles-redesign.md §4).
+   */
+  view?: "detail" | "join";
 };
 
 type Notice = { kind: "info" | "success" | "error"; message: string } | null;
@@ -123,6 +126,37 @@ export function canManageParticipantAccess(
   );
 }
 
+export function safeParseSharingJoinLinkV1(input: string) {
+  try {
+    return parseSharingJoinLinkV1(input);
+  } catch {
+    return null;
+  }
+}
+
+export function safeParseSharingResponseLinkV1(input: string) {
+  try {
+    return parseSharingResponseLinkV1(input);
+  } catch {
+    return null;
+  }
+}
+
+export function sharingJoinErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("file manifest is not authenticated by its invitation")) {
+    return "This invite was created by an older EasyBC release. Ask the owner to create and send a new invite link.";
+  }
+  return message;
+}
+
+export function shouldAutoSubmitJoinDeepLink(
+  view: "detail" | "join",
+  hasParsedJoin: boolean,
+): boolean {
+  return view !== "join" && hasParsedJoin;
+}
+
 const CONTROL_DATASETS_WIRED = true;
 
 export function SyncSettings({
@@ -133,7 +167,9 @@ export function SyncSettings({
   onApplyPayload,
   onSharedSyncStateChange,
   onSyncComplete,
+  view = "detail",
 }: Props) {
+  const isJoinView = view === "join";
   const rpId = useMemo(currentRpId, []);
   const config = useMemo(() => sharedSyncConfigFromEnv(rpId), [rpId]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -153,6 +189,8 @@ export function SyncSettings({
   const [lastJoinUrl, setLastJoinUrl] = useState<string | null>(null);
   const [joinLinkInput, setJoinLinkInput] = useState("");
   const [responseLink, setResponseLink] = useState<string | null>(null);
+  const sharePanelRef = useRef<HTMLDivElement | null>(null);
+  const [shareAfterSetup, setShareAfterSetup] = useState(false);
   const [responseLinkInput, setResponseLinkInput] = useState("");
   const [pendingResponses, setPendingResponses] = useState<
     Array<{ responseFileId: string; invitationFileId: string; recipientEmail: string }>
@@ -189,6 +227,18 @@ export function SyncSettings({
     ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
     : null;
   const activeIsLocal = activeProfile ? isLocalProfile(activeProfile) : true;
+
+  useEffect(() => {
+    if (!shareAfterSetup || !sharedConfigured || activeIsLocal) return;
+    setShareAfterSetup(false);
+    setNotice({
+      kind: "info",
+      message: "Private cloud is ready. Invite someone below to make this a shared profile.",
+    });
+    requestAnimationFrame(() => {
+      sharePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [activeIsLocal, shareAfterSetup, sharedConfigured]);
 
   const localShared = () =>
     buildSharedSyncPayload(options, periodRecords, session, activeProfile);
@@ -240,6 +290,7 @@ export function SyncSettings({
         message: "Encrypted sync is set up. Your data lives in a private Drive folder labeled with your email.",
       });
     } catch (error) {
+      setShareAfterSetup(false);
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       setBusy(null);
@@ -472,7 +523,7 @@ export function SyncSettings({
   const runJoinFromLink = async (linkText?: string) => {
     if (!config) return;
     const source = (linkText ?? joinLinkInput).trim();
-    const parsed = parseSharingJoinLinkV1(source);
+    const parsed = safeParseSharingJoinLinkV1(source);
     if (!parsed) {
       setNotice({ kind: "error", message: "That join link is missing its invitation details." });
       return;
@@ -504,7 +555,7 @@ export function SyncSettings({
           "then they'll accept and your data will sync.",
       });
     } catch (error) {
-      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+      setNotice({ kind: "error", message: sharingJoinErrorMessage(error) });
     } finally {
       setBusy(null);
     }
@@ -513,7 +564,7 @@ export function SyncSettings({
   const runGrantSharedFiles = async (linkText?: string) => {
     if (!config) return;
     const source = (linkText ?? joinLinkInput).trim();
-    const parsed = parseSharingJoinLinkV1(source);
+    const parsed = safeParseSharingJoinLinkV1(source);
     if (!parsed) {
       setNotice({ kind: "error", message: "That join link is missing its invitation details." });
       return;
@@ -536,7 +587,7 @@ export function SyncSettings({
   const runAcceptResponseLink = async (linkText?: string) => {
     if (!config) return;
     const source = linkText ?? responseLinkInput;
-    const parsed = parseSharingResponseLinkV1(source);
+    const parsed = safeParseSharingResponseLinkV1(source);
     if (!parsed) {
       setNotice({ kind: "error", message: "That response link is not valid." });
       return;
@@ -629,42 +680,6 @@ export function SyncSettings({
       setNotice({
         kind: "success",
         message: "Encrypted sync was reset with this device's local data.",
-      });
-    } catch (error) {
-      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const switchProfile = async (key: string) => {
-    if (!sharedSyncState) return;
-    setBusy("switch");
-    try {
-      const result = await switchManagedProfile(config, key, localShared());
-      await applyShared(result.payload);
-      onSharedSyncStateChange(result.state);
-      onSyncComplete?.(
-        sharedPayloadToSyncPayload(result.payload, session.androidPreferences),
-      );
-      setNotice({ kind: "success", message: "Profile switched." });
-    } catch (error) {
-      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const addLocalProfile = async (displayName: string) => {
-    if (!sharedSyncState) return;
-    setBusy("create-profile");
-    try {
-      const result = await createLocalProfile(config, displayName, localShared());
-      await applyShared(result.payload);
-      onSharedSyncStateChange(result.state);
-      setNotice({
-        kind: "success",
-        message: `Created local profile ${displayName.trim()}.`,
       });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -901,8 +916,8 @@ export function SyncSettings({
     if (!config) return;
     const source = window.location.href;
     if (handledDeepLinkRef.current === source) return;
-    const parsedJoin = parseSharingJoinLinkV1(source);
-    const parsedResponse = parseSharingResponseLinkV1(source);
+    const parsedJoin = safeParseSharingJoinLinkV1(source);
+    const parsedResponse = safeParseSharingResponseLinkV1(source);
     if (parsedJoin) setJoinLinkInput(source);
     if (parsedResponse) setResponseLinkInput(source);
     if (legacyGrantOnlyRequested || fileGrantRequested) return;
@@ -912,44 +927,48 @@ export function SyncSettings({
       void runAcceptResponseLink(source);
       return;
     }
-    // Joiner opened an invite link → grant the file(s) and produce a response.
-    if (parsedJoin) {
+    // The standalone join screen must show the signed offer before any OAuth,
+    // passkey, Picker, or registry mutation begins. Older combined-screen
+    // routes retain their explicit handler for compatibility.
+    if (shouldAutoSubmitJoinDeepLink(view, Boolean(parsedJoin))) {
       handledDeepLinkRef.current = source;
       void runJoinFromLink(source);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config, fileGrantRequested, legacyGrantOnlyRequested]);
+  }, [config, fileGrantRequested, isJoinView, legacyGrantOnlyRequested]);
 
   return (
-    <section className="sync-card" aria-labelledby="profile-management-title">
-      <div className="sync-card-heading">
-        <span className="sync-icon"><Cloud aria-hidden /></span>
-        <div>
-          <p className="eyebrow">Profiles, storage & access</p>
-          <h3 id="profile-management-title">Profile management</h3>
-          <p>
-            Keep profiles local, sync them privately across your devices, or share selected
-            profiles with other people. Each profile is managed independently.
-          </p>
+    <section
+      className="sync-card"
+      aria-labelledby={isJoinView ? undefined : "profile-management-title"}
+      aria-label={isJoinView ? "Join a shared profile" : undefined}
+    >
+      {!isJoinView && (
+        <div className="sync-card-heading">
+          <span className="sync-icon"><Cloud aria-hidden /></span>
+          <div>
+            <p className="eyebrow">This profile</p>
+            <h3 id="profile-management-title">
+              {sharedSyncState && activeProfile
+                ? profileDisplayLabel(sharedSyncState, activeProfile)
+                : "Storage & sharing"}
+            </h3>
+            <p>
+              Where this profile lives, who can see it, and exactly what they can see.
+            </p>
+          </div>
         </div>
-      </div>
-
-      <div className="sync-security-row">
-        <span><HardDrive aria-hidden /> Local-first</span>
-        <span><KeyRound aria-hidden /> Passkey protected</span>
-        <span><LockKeyhole aria-hidden /> Encrypted before Drive</span>
-      </div>
-
-      {sharedSyncState && (
-        <ProfileSwitcher
-          sharedSyncState={sharedSyncState}
-          onSwitchProfile={(key) => void switchProfile(key)}
-          onCreateProfile={(name) => void addLocalProfile(name)}
-          disabled={busy !== null}
-        />
       )}
 
-      {sharedSyncState && activeProfile && (
+      {!isJoinView && (
+        <div className="sync-security-row">
+          <span><HardDrive aria-hidden /> Local-first</span>
+          <span><KeyRound aria-hidden /> Passkey protected</span>
+          <span><LockKeyhole aria-hidden /> Encrypted before Drive</span>
+        </div>
+      )}
+
+      {!isJoinView && sharedSyncState && activeProfile && (
         <div className="profile-detail-card">
           <div className="profile-detail-heading">
             <div>
@@ -1022,38 +1041,83 @@ export function SyncSettings({
             )}
           </div>
 
-          <div className="profile-storage-summary">
-            <strong>{activeIsLocal ? "Stored on this device" : "Encrypted Google Drive sync"}</strong>
-            <span>
-              {activeIsLocal
-                ? "This profile does not leave this browser."
-                : activeProfile.ownerEmail.toLowerCase() === sharedSyncState.ownerEmail.toLowerCase()
-                  ? "Available to your EasyBC identity on other authorized devices."
-                  : `${activeProfile.role} access from ${activeProfile.ownerEmail}.`}
-            </span>
-          </div>
+          {(() => {
+            // Storage mode selector — same three cards as Android (§6.1).
+            const sharedWithYou =
+              activeProfile.ownerEmail.toLowerCase() !==
+              sharedSyncState.ownerEmail.toLowerCase();
+            const participantCount = Object.keys(
+              activeProfile.participantEmails ?? {},
+            ).length;
+            const currentMode = activeIsLocal
+              ? "local"
+              : sharedWithYou || participantCount > 0
+                ? "shared"
+                : "private";
+            return (
+              <div className="profile-mode-cards" role="radiogroup" aria-label="Where this profile lives">
+                <EbModeCard
+                  mode="local"
+                  title="This device"
+                  description="Stays in this browser. No account needed."
+                  selected={currentMode === "local"}
+                  pending={busy === "setup" || busy === "disconnect-profile"}
+                  disabled={sharedWithYou || busy !== null}
+                  onSelect={() => {
+                    if (currentMode !== "local") void disconnectActiveProfile();
+                  }}
+                />
+                <EbModeCard
+                  mode="private"
+                  title="Private cloud"
+                  description="Encrypted in your Google Drive; your other devices unlock it with your passkey. Only you."
+                  selected={currentMode === "private"}
+                  pending={busy === "setup"}
+                  disabled={sharedWithYou || unavailable || busy !== null}
+                  onSelect={() => {
+                    if (currentMode === "local") void runSetup();
+                    else if (currentMode === "shared") {
+                      setNotice({
+                        kind: "info",
+                        message: "Remove everyone with access before making this profile private.",
+                      });
+                    }
+                  }}
+                />
+                <EbModeCard
+                  mode="shared"
+                  title="Shared"
+                  description="Private cloud, plus invited people can view or edit what you choose."
+                  selected={currentMode === "shared"}
+                  pending={busy === "setup"}
+                  disabled={sharedWithYou || unavailable || busy !== null}
+                  onSelect={() => {
+                    if (currentMode === "local") {
+                      setShareAfterSetup(true);
+                      void runSetup();
+                    } else if (currentMode === "private") {
+                      setNotice({
+                        kind: "info",
+                        message: "Invite someone below to make this a shared profile.",
+                      });
+                      sharePanelRef.current?.scrollIntoView({
+                        behavior: "smooth",
+                        block: "start",
+                      });
+                    }
+                  }}
+                />
+                {sharedWithYou && (
+                  <p className="field-hint">
+                    Storage is controlled by {activeProfile.ownerEmail}, this
+                    profile&rsquo;s owner. Your access: {activeProfile.role}.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
           <div className="profile-management-actions">
-            {activeIsLocal ? (
-              <button
-                type="button"
-                disabled={unavailable || busy !== null}
-                onClick={() => void runSetup()}
-              >
-                <Cloud aria-hidden />
-                {busy === "setup" ? "Connecting…" : "Enable private encrypted sync"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="ghost"
-                disabled={busy !== null}
-                onClick={() => void disconnectActiveProfile()}
-              >
-                <Unplug aria-hidden />
-                Keep local copy & disconnect
-              </button>
-            )}
             <button
               type="button"
               className="ghost danger"
@@ -1082,7 +1146,7 @@ export function SyncSettings({
         </div>
       )}
 
-      {sharedSyncState && activeProfile?.lastSyncedAt && (
+      {!isJoinView && sharedSyncState && activeProfile?.lastSyncedAt && (
         <div className="sync-connected">
           <span className="status-dot" aria-hidden />
           <div>
@@ -1092,7 +1156,8 @@ export function SyncSettings({
         </div>
       )}
 
-      {sharedSyncState &&
+      {!isJoinView &&
+        sharedSyncState &&
         activeProfile &&
         !activeIsLocal &&
         activeProfile.role === "owner" &&
@@ -1194,7 +1259,8 @@ export function SyncSettings({
           </>
         ))}
 
-      {sharedSyncState &&
+      {!isJoinView &&
+        sharedSyncState &&
         activeProfile &&
         !activeIsLocal &&
         activeProfile.role === "owner" &&
@@ -1233,7 +1299,7 @@ export function SyncSettings({
           </div>
         )}
 
-      {sharedSyncState && activeProfile?.pendingMigration && (
+      {!isJoinView && sharedSyncState && activeProfile?.pendingMigration && (
         <div className="sync-notice info">
           <div>
             <strong>{activeProfile.ownerEmail} reorganized this profile</strong>
@@ -1255,7 +1321,8 @@ export function SyncSettings({
         </div>
       )}
 
-      {CONTROL_DATASETS_WIRED &&
+      {!isJoinView &&
+        CONTROL_DATASETS_WIRED &&
         activeProfile &&
         !activeIsLocal &&
         (activeProfile.role === "owner" || activeProfile.role === "admin") &&
@@ -1277,7 +1344,7 @@ export function SyncSettings({
           </div>
         )}
 
-      {sharedSyncState && activeProfile && !activeIsLocal && isSplitProfile(activeProfile) && (
+      {!isJoinView && sharedSyncState && activeProfile && !activeIsLocal && isSplitProfile(activeProfile) && (
         <div className="dataset-access-panel">
           <p className="eyebrow">
             {activeProfile.role === "owner" ? "What this profile stores" : "What you can see"}
@@ -1325,7 +1392,7 @@ export function SyncSettings({
           Local development creates a passkey for <strong>{rpId}</strong>, not keyneom.github.io.
         </p>
       )}
-      {legacyAvailable && !sharedConfigured && (
+      {!isJoinView && legacyAvailable && !sharedConfigured && (
         <p className="sync-notice sync-notice-info">
           This device still uses legacy app-data encrypted sync.
           <button type="button" className="ghost" disabled={busy !== null} onClick={() => void runMigrateLegacy()}>
@@ -1359,9 +1426,10 @@ export function SyncSettings({
       )}
       {notice && <p className={`sync-notice sync-notice-${notice.kind}`} role="status">{notice.message}</p>}
 
+      {isJoinView && (
       <div className="sync-share-panel">
         <label className="field">
-          <span>Join a shared profile</span>
+          <span>Join link</span>
           <input
             type="text"
             placeholder="Paste the join link someone sent you"
@@ -1374,7 +1442,7 @@ export function SyncSettings({
           // what the link grants before anything runs — never a blind join.
           const source = joinLinkInput.trim();
           if (!source) return null;
-          const parsed = parseSharingJoinLinkV1(source);
+          const parsed = safeParseSharingJoinLinkV1(source);
           if (!parsed || parsed.files.length === 0) return null;
           let previewOwner: string | null = null;
           try {
@@ -1439,8 +1507,9 @@ export function SyncSettings({
           {busy === "join" ? "Joining…" : "Join shared profile"}
         </button>
       </div>
+      )}
 
-      {responseLink && (
+      {isJoinView && responseLink && (
         <div className="sync-share-panel">
           <p className="field-hint">
             Send this response link back to the person who invited you — they tap it to finish adding you.
@@ -1456,6 +1525,10 @@ export function SyncSettings({
         </div>
       )}
 
+      {!isJoinView &&
+        sharedConfigured &&
+        !activeIsLocal &&
+        (activeProfile?.role === "owner" || activeProfile?.role === "admin") && (
       <div className="sync-share-panel">
         <label className="field">
           <span>Finish a share you sent</span>
@@ -1474,8 +1547,9 @@ export function SyncSettings({
           {busy === "accept" ? "Accepting…" : "Accept response link"}
         </button>
       </div>
+      )}
 
-      {!activeIsLocal && (
+      {!isJoinView && !activeIsLocal && (
         <div className="sync-actions">
             <button type="button" disabled={unavailable || busy !== null} onClick={() => void runSync()}>
               <RefreshCw aria-hidden className={busy === "sync" ? "spin" : undefined} />
@@ -1490,10 +1564,11 @@ export function SyncSettings({
         </div>
       )}
 
-      {sharedConfigured &&
+      {!isJoinView &&
+        sharedConfigured &&
         !activeIsLocal &&
         (activeProfile?.role === "owner" || activeProfile?.role === "admin") && (
-        <div className="sync-share-panel">
+        <div ref={sharePanelRef} className="sync-share-panel">
           <p className="eyebrow">Share encrypted data</p>
           <label className="field">
             <span>Email address</span>
@@ -1724,10 +1799,12 @@ export function SyncSettings({
         </div>
       )}
 
-      <p className="field-hint sync-footnote">
-        Each owner gets a Drive folder named with their email, for example EasyBC — you@example.com.
-        Reloading this tab locks encrypted sync until you unlock with your passkey again.
-      </p>
+      {!isJoinView && (
+        <p className="field-hint sync-footnote">
+          Each owner gets a Drive folder named with their email, for example EasyBC — you@example.com.
+          Reloading this tab locks encrypted sync until you unlock with your passkey again.
+        </p>
+      )}
     </section>
   );
 }

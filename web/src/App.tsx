@@ -4,6 +4,7 @@ import {
   CalendarDays,
   ChartSpline,
   CheckCircle,
+  ChevronRight,
   Heart,
   History,
   Info,
@@ -151,7 +152,6 @@ import {
   EbButton,
   EbGroupLabel,
   EbNavRow,
-  EbPersonCard,
   EbProfileHeaderCard,
   EbStepDots,
   EbThemeModeToggle,
@@ -593,6 +593,7 @@ type SettingsView =
   | "risk"
   | "sharing"
   | "profiles"
+  | "join"
   | "setup"
   | "about";
 
@@ -863,6 +864,7 @@ function easyBcHistoryState(value: unknown): EasyBcHistoryState | null {
     "risk",
     "sharing",
     "profiles",
+    "join",
     "setup",
     "about",
   ];
@@ -892,13 +894,17 @@ export default function App() {
   const [viewYear, setViewYear] = useState(initDate.getFullYear());
   const [viewMonth, setViewMonth] = useState(initDate.getMonth());
 
-  // Settings is a hub (parity with Android): deep links land on the sharing
-  // panel (where SyncSettings processes them); everything else starts at hub.
-  const [settingsView, setSettingsView] = useState<SettingsView>(() =>
-    typeof window !== "undefined" && shouldOpenSyncSettings(window.location.search)
-      ? "sharing"
-      : "hub",
-  );
+  // Settings is a hub (parity with Android): join links land on the join
+  // screen, response links on the active profile's detail (where the accept
+  // flow lives); everything else starts at hub.
+  const [settingsView, setSettingsView] = useState<SettingsView>(() => {
+    if (typeof window === "undefined") return "hub";
+    if (!shouldOpenSyncSettings(window.location.search)) return "hub";
+    const params = new URLSearchParams(window.location.search);
+    return params.has("sk-inv") ? "join" : "sharing";
+  });
+  // Which profile the detail ("sharing") view shows; null = the active one.
+  const [detailProfileKey, setDetailProfileKey] = useState<string | null>(null);
   const historyReadyRef = useRef(false);
 
   useEffect(() => {
@@ -2508,7 +2514,7 @@ export default function App() {
                     colorKey={sharedSyncState.activeProfileKey}
                     photoUrl={active.avatarWebp ? avatarDataUrl(active.avatarWebp) : undefined}
                     badge={settingsProfileBadge(sharedSyncState, active)}
-                    actionLabel="Switch"
+                    actionLabel="Manage"
                     onAction={() => setSettingsView("profiles")}
                   />
                 );
@@ -2536,14 +2542,15 @@ export default function App() {
                 value={`${(opts.targetCumulativeFailure * 100).toFixed(1)}% over ${opts.horizonYears} ${calendarMode ? "predicted cycles" : "years"}`}
                 onClick={() => setSettingsView("risk")}
               />
+              <EbGroupLabel>Profiles</EbGroupLabel>
               <EbNavRow
                 icon={<Users />}
-                title="Profiles & sharing"
+                title="Profiles"
                 value={(() => {
                   const active = sharedSyncState
                     ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
                     : null;
-                  if (!sharedSyncState || !active) return "Set up sync and sharing";
+                  if (!sharedSyncState || !active) return "Create, switch, join, or share";
                   const count = sharedSyncState.profiles.length;
                   return `${count} profile${count === 1 ? "" : "s"} · ${settingsProfileMeta(sharedSyncState, active)}`;
                 })()}
@@ -2556,21 +2563,8 @@ export default function App() {
                     ? "shared"
                     : "default";
                 })()}
-                onClick={() => setSettingsView("sharing")}
+                onClick={() => setSettingsView("profiles")}
               />
-              {sharedSyncState && sharedSyncState.profiles.length > 0 && (
-                <>
-                  <EbGroupLabel>Profiles</EbGroupLabel>
-                  <EbNavRow
-                    icon={<Users />}
-                    title="Manage profiles"
-                    value={`${sharedSyncState.profiles.length} profile${
-                      sharedSyncState.profiles.length === 1 ? "" : "s"
-                    } on this device`}
-                    onClick={() => setSettingsView("profiles")}
-                  />
-                </>
-              )}
               <EbGroupLabel>Privacy on this browser</EbGroupLabel>
               <div className="card privacy-session-card">
                 <div>
@@ -3089,10 +3083,91 @@ export default function App() {
               <button
                 type="button"
                 className="ghost settings-back"
-                onClick={() => setSettingsView("hub")}
+                onClick={() => {
+                  setDetailProfileKey(null);
+                  setSettingsView("profiles");
+                }}
               >
-                ← Settings
+                ← Profiles
               </button>
+              {(() => {
+                // Detail of a non-active profile: cached summary + the switch
+                // gate — sharing operations act on the active profile only.
+                const detailKey = detailProfileKey;
+                const detailProfile =
+                  sharedSyncState && detailKey && detailKey !== sharedSyncState.activeProfileKey
+                    ? findProfile(sharedSyncState, detailKey)
+                    : null;
+                if (!detailProfile || !sharedSyncState) return null;
+                const row = switcherProfiles.find((profile) => profile.key === detailKey);
+                return (
+                  <>
+                    <EbProfileHeaderCard
+                      name={disambiguatedProfileLabel(sharedSyncState, detailProfile)}
+                      meta={settingsProfileMeta(sharedSyncState, detailProfile)}
+                      colorKey={detailKey!}
+                      photoUrl={
+                        detailProfile.avatarWebp
+                          ? avatarDataUrl(detailProfile.avatarWebp)
+                          : undefined
+                      }
+                      badge={settingsProfileBadge(sharedSyncState, detailProfile)}
+                      actionLabel={
+                        profileSwitchingKey === detailKey ? "Switching…" : "Switch"
+                      }
+                      onAction={() => {
+                        void handleSwitchProfile(detailKey!).then((switched) => {
+                          if (switched) setDetailProfileKey(null);
+                        });
+                      }}
+                    />
+                    <p className="hint">
+                      Storage, people, and sharing can be changed while this profile is
+                      active. Switching publishes your current profile first
+                      {row ? ` — ${row.meta}.` : "."}
+                    </p>
+                    {profileSwitchNotice && (
+                      <p className="sync-notice sync-notice-error" role="alert">
+                        {profileSwitchNotice}
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
+              {(!detailProfileKey ||
+                detailProfileKey === sharedSyncState?.activeProfileKey) && (
+                <SyncSettings
+                  options={opts}
+                  periodRecords={periodRecords}
+                  session={session}
+                  sharedSyncState={sharedSyncState}
+                  onApplyPayload={applySyncedPayload}
+                  onSharedSyncStateChange={setSharedSyncState}
+                  onSyncComplete={markSyncComplete}
+                  view="detail"
+                />
+              )}
+            </section>
+          )}
+
+          {tab === "settings" && settingsView === "join" && (
+            <section className="settings-screen">
+              <button
+                type="button"
+                className="ghost settings-back"
+                onClick={() => setSettingsView("profiles")}
+              >
+                ← Profiles
+              </button>
+              <div className="screen-heading">
+                <p className="eyebrow">Profiles</p>
+                <h2>Join a shared profile</h2>
+                <p>
+                  Paste the join link someone sent you. You&rsquo;ll see exactly what
+                  they&rsquo;re sharing before anything happens, and the new profile stays
+                  separate from every other profile on this device.
+                </p>
+              </div>
               <SyncSettings
                 options={opts}
                 periodRecords={periodRecords}
@@ -3101,6 +3176,7 @@ export default function App() {
                 onApplyPayload={applySyncedPayload}
                 onSharedSyncStateChange={setSharedSyncState}
                 onSyncComplete={markSyncComplete}
+                view="join"
               />
             </section>
           )}
@@ -3116,41 +3192,57 @@ export default function App() {
               </button>
               <div className="screen-heading">
                 <p className="eyebrow">Profiles</p>
-                <h2>Manage profiles</h2>
+                <h2>Profiles</h2>
                 <p>
-                  Every profile keeps its own settings, data, storage, and
-                  sharing. Switching publishes your current profile first.
+                  Every profile keeps its own settings, data, storage, and sharing.
+                  Open a profile to manage where it lives and who can see it.
                 </p>
               </div>
               {switcherProfiles.map((profile) => (
-                <EbPersonCard
+                <div
                   key={profile.key}
-                  name={profile.name}
-                  colorKey={profile.key}
-                  photoUrl={profile.photoUrl}
+                  className="profile-list-card"
                 >
-                  <div className="participant-summary">
-                    <span className="field-hint">
-                      {profileSwitchingKey === profile.key
-                        ? "Switching…"
-                        : profile.meta}
+                  <button
+                    type="button"
+                    className="profile-list-main"
+                    onClick={() => {
+                      setDetailProfileKey(profile.active ? null : profile.key);
+                      setSettingsView("sharing");
+                    }}
+                  >
+                    <EbAvatar
+                      name={profile.name}
+                      colorKey={profile.key}
+                      photoUrl={profile.photoUrl}
+                      size="md"
+                      badge={profile.badge}
+                    />
+                    <span className="profile-list-text">
+                      <span className="profile-list-name">{profile.name}</span>
+                      <span className="profile-list-meta">
+                        {profileSwitchingKey === profile.key ? "Switching…" : profile.meta}
+                      </span>
                     </span>
-                    {profile.active ? (
-                      <span className="profile-active-badge">Active</span>
-                    ) : (
-                      <div className="participant-actions">
-                        <button
-                          type="button"
-                          className="ghost"
-                          disabled={profileSwitchingKey !== null}
-                          onClick={() => void handleSwitchProfile(profile.key)}
-                        >
-                          Switch to this profile
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </EbPersonCard>
+                    <ChevronRight aria-hidden className="profile-list-chevron" />
+                  </button>
+                  {profile.active ? (
+                    <span className="profile-active-badge">Active</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="profile-list-switch"
+                      disabled={profileSwitchingKey !== null}
+                      onClick={() => {
+                        if (profileSwitchingKey === null) {
+                          void handleSwitchProfile(profile.key);
+                        }
+                      }}
+                    >
+                      Switch
+                    </button>
+                  )}
+                </div>
               ))}
               {profileSwitchNotice && (
                 <p className="sync-notice sync-notice-error" role="alert">
@@ -3192,13 +3284,13 @@ export default function App() {
               </div>
               <p className="field-hint">
                 New profiles start local to this device — choose Private cloud
-                or Shared later in Storage &amp; sharing.
+                or Shared any time on the profile&rsquo;s own screen.
               </p>
-              <EbButton variant="outline" onClick={() => setSettingsView("sharing")}>
-                Join a shared profile
-              </EbButton>
-              <EbButton variant="outline" onClick={() => setSettingsView("sharing")}>
-                Storage &amp; sharing for this profile
+              <EbButton
+                variant="outline"
+                onClick={() => setSettingsView("join")}
+              >
+                Join a profile shared with you
               </EbButton>
             </section>
           )}

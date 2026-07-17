@@ -2791,10 +2791,47 @@ export async function enrollActiveControlDataset(
   });
 }
 
+type ControlMemberMetadata = {
+  email?: string;
+  googleSubject?: string;
+  drivePermissionId?: string;
+};
+
+/**
+ * `synchronizeMembers` rebuilds every member record from the metadata map
+ * alone, so a call that only names the newest member would strip the emails
+ * off everyone else — the bug that left participants rendered as raw key ids.
+ * Merge the complete directory here: verified control metadata first, locally
+ * known invite emails as fallback, the caller's fresh details last.
+ */
+export function mergedControlMemberMetadata(
+  members: Map<string, ControlMemberMetadata>,
+  profile: ProfileRecord,
+  metadata: Record<string, ControlMemberMetadata>,
+): Record<string, ControlMemberMetadata> {
+  const merged: Record<string, ControlMemberMetadata> = {};
+  for (const [keyId, member] of members) {
+    const email = member.email ?? profile.participantEmails?.[keyId];
+    merged[keyId] = {
+      ...(email ? { email } : {}),
+      ...(member.googleSubject ? { googleSubject: member.googleSubject } : {}),
+      ...(member.drivePermissionId ? { drivePermissionId: member.drivePermissionId } : {}),
+    };
+  }
+  for (const [keyId, email] of Object.entries(profile.participantEmails ?? {})) {
+    if (!merged[keyId]) merged[keyId] = { email };
+    else if (!merged[keyId].email) merged[keyId] = { ...merged[keyId], email };
+  }
+  for (const [keyId, details] of Object.entries(metadata)) {
+    merged[keyId] = { ...merged[keyId], ...details };
+  }
+  return merged;
+}
+
 async function synchronizeProfileControlMembers(
   runtimeForProfile: Runtime,
   profile: ProfileRecord,
-  metadata: Record<string, { email?: string }> = {},
+  metadata: Record<string, ControlMemberMetadata> = {},
 ): Promise<void> {
   if (!CONTROL_DATASETS_WIRED || !profile.controlDatasetId) return;
   const control = buildControlDataset(
@@ -2803,13 +2840,15 @@ async function synchronizeProfileControlMembers(
     runtimeForProfile.identityProvider,
     runtimeForProfile.authorizationProvider,
   );
-  await readControlWithLegacyRepair(
+  const existing = await readControlWithLegacyRepair(
     runtimeForProfile.state,
     profile,
     runtimeForProfile.identityProvider,
     runtimeForProfile.authorizationProvider,
   );
-  await control.synchronizeMembers(metadata);
+  await control.synchronizeMembers(
+    mergedControlMemberMetadata(existing.members, profile, metadata),
+  );
   const verified = await readControlWithLegacyRepair(
     runtimeForProfile.state,
     profile,
@@ -2983,7 +3022,7 @@ export async function listProfileParticipants(
   try {
     const transport = buildTransport(state, profile, providers.authorizationProvider);
     const identity = await identityProvider.getOrCreate();
-    const controlMembers = profile.controlDatasetId &&
+    let controlMembers = profile.controlDatasetId &&
       profile.datasetRecords?.[profile.controlDatasetId]?.fileId
       ? await buildControlDataset(
           state,
@@ -2992,6 +3031,31 @@ export async function listProfileParticipants(
           providers.authorizationProvider,
         ).read().then((verified) => verified.members).catch(() => new Map())
       : new Map();
+    // Owner backfill: earlier releases synchronized members without emails,
+    // leaving other devices to render raw key ids. When this owner knows an
+    // email the verified directory lacks, republish the full directory once.
+    const missingEmails =
+      profile.role === "owner" &&
+      [...controlMembers.entries()].some(
+        ([memberKeyId, member]) =>
+          !member.email && profile.participantEmails?.[memberKeyId],
+      );
+    if (missingEmails) {
+      try {
+        const control = buildControlDataset(
+          state,
+          profile,
+          identityProvider,
+          providers.authorizationProvider,
+        );
+        await control.synchronizeMembers(
+          mergedControlMemberMetadata(controlMembers, profile, {}),
+        );
+        controlMembers = await control.read().then((verified) => verified.members);
+      } catch {
+        // Listing must not fail because the healing write couldn't land.
+      }
+    }
     const aggregated = new Map<string, ManagedParticipant>();
     for (const file of files) {
       const stored = await transport.readDataset(file.fileId);

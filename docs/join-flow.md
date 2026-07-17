@@ -53,7 +53,7 @@ Mechanics (Android):
 
 ```
 tap join link
-  → app opens JOIN screen (nav route "join-flow", not a Toast)
+  → app opens JOIN screen (nav route `settings/join`, not a Toast)
       shows: owner email · profile name · the files being shared (labels + your role)
       CTA: “Continue”
   → [1. auth] gate.run { Google authorize + passkey unlock/create }   “Confirming it's you…”
@@ -121,9 +121,9 @@ shell.
 | Web grant page (`ui/GrantAccessScreen.tsx`, routed from `main.tsx`) | **Built + tested** (checklist, partial-grant recovery, rc.11 ignore-unexpected-files, return intent link) |
 | `InteractiveAuthGate` + auto-sync deferral + deep-link marking | **Built** (`sync/InteractiveAuthGate.kt`, `CloudAutoSyncSession`, `MainActivity`) |
 | Join/accept presentational screens (`ui/kit/JoinFlowScreens.kt`) | **Built** — states + callbacks only |
-| Nav route `join-flow` + view model driving the states | To wire: reuse `SettingsViewModel.authorizeAndJoinLink` / `authorizeAndAcceptLink` bodies, moved behind `InteractiveAuthGate.run`, split at the hand-off (auth ↦ browser ↦ join) |
-| `sk-granted` in `MainActivity` → route to join-flow (replaces Toasts) | To wire (detection in place) |
-| Web join screen replacing auto-run in `SyncSettings` | To wire |
+| Join + accept routes and view-model state | **Built** (`settings/join`, `settings/accept`); identity auth is warmed before the browser hand-off and link operations run inside `InteractiveAuthGate` |
+| `sk-granted` in `MainActivity` → guided join auto-continue | **Built** |
+| Web join screen replacing auto-run in `SyncSettings` | **Built** — signed offer preview precedes OAuth, Picker, passkey, and registry mutation |
 
 ## Copy rules
 

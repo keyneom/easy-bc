@@ -353,3 +353,66 @@ reserved slots: Data section, pending card, danger zone.
 - Save model (shipped): plan sub-screens save on back with a toast ("Plan
   settings saved — the plan will recompute"), replacing the floating Save
   FAB; destructive/cloud actions stay explicit-confirm.
+
+## 11. Profiles IA v2 — shipped 2026-07-17 (both platforms)
+
+The §4/§5 structure is now the real one; the interim "Profiles & sharing"
+combined screen (Android `EncryptedSyncSection`, ~1,700 lines) is deleted.
+
+- **One entry point.** Settings hub has a single **Profiles** row. The hub's
+  header card action is "Manage" (opens Profiles); the hub's private switcher
+  sheet is gone — switching lives in the global chip sheet and on profile
+  cards.
+- **Profiles home** (`settings/profiles` / web `settingsView: "profiles"`):
+  profile cards (avatar · name · mode line · Active chip / Switch) → tap →
+  **Profile detail**; `+ New profile`; `Join a profile shared with you` →
+  Join screen; contextual recovery banners (legacy migrate, un-unlockable
+  cloud copy) live here.
+- **Profile detail** (`settings/profile/{key}` / web `"sharing"` view with
+  `detailProfileKey`): identity header (rename dialog, photo), §6.1 mode
+  cards (now on web too via `EbModeCard`), sync status + Sync now, upgrade /
+  migration-ceremony banners, per-dataset visibility, **People** (person
+  cards with per-dataset access grid, **Co-manager admin toggle**, remove),
+  **Invite** (presets + custom grid + join-link card), **Finish a share you
+  sent** (owner/admin only), danger zone incl. owner **Delete everywhere**
+  (Android parity with web). A non-active profile renders a cached summary +
+  "Switch to manage" gate — sharing ops always run against the registry's
+  active profile.
+- **Join screen** (`settings/join` / web `"join"` view): standalone guided
+  flow (Android finally wires `JoinFlowScreens.kt`): offline structured
+  preview from the link (owner, sections, roles), browser grant hand-off,
+  `sk-granted` auto-continue, reply-link share step. Join links deep-link
+  here; response links deep-link to a dedicated accept screen so the pending
+  exchange can resolve its profile even when a different profile is active.
+- **Feedback model.** One snackbar per screen (`CloudStatusSnackbar` +
+  `CloudActionRunner` replace ~15 copies of pending-auth plumbing) plus
+  per-button busy labels; contextual `EbBanner`s are reserved for state, not
+  operation feedback. Web keeps `notice` inline in the view that triggered it.
+- **Chip inlining.** The dedicated chip bar is gone on Android; every screen
+  hosts the chip in its own title row (`profileChip` slot from
+  `AppNavigation`). Web topbar is one line on phones (subtitle hidden).
+- **Participant emails.** `synchronizeMembers` call sites now always pass the
+  complete member directory (verified metadata + locally known invite emails
+  merged in `synchronizeControlMembers` / `mergedControlMemberMetadata`) —
+  previously each acceptance rewrote every other member with `email = null`,
+  which is why People showed raw key ids. Owners also backfill missing
+  directory emails once when listing participants.
+- **Picker.** Web joins select shared files with an app-local LIST-mode
+  Picker (`web/src/sync/listPicker.ts`) — checkbox multi-select works on
+  touch, replacing the one-file-per-visit grid flow.
+
+### sync-kit 0.2.1 security compatibility
+
+- Web and Android are pinned to sync-kit `0.2.1`.
+- Existing encrypted datasets and protected identities do not need migration.
+- Pending join links created by sync-kit `0.2.0` or earlier must be recreated;
+  both clients explain this when a recipient opens an older, unsigned-manifest
+  link.
+- Account binding remains optional in EasyBC until the Android origin allowlist,
+  Digital Asset Links, nonce-bearing Google ID token, identity migration, and
+  two-account device validation are complete. The verifier remains wired on Web,
+  but `requireAccountBinding` is intentionally false on both clients.
+- Normal destructive operations use sync-kit's cryptographic owner checks. The
+  explicit Android reset-and-replace recovery path continues to delete through
+  the authorized Drive transport so a user can recover from a cloud copy whose
+  local protected identity can no longer be unlocked.

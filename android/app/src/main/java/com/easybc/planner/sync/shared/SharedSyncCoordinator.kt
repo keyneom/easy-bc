@@ -22,6 +22,7 @@ import com.keyneom.synckit.sharing.SharingJoinParamStyle
 import com.keyneom.synckit.sharing.SharingJoinParams
 import com.keyneom.synckit.sharing.SharingRole
 import com.keyneom.synckit.sharing.SharingControlDataset
+import com.keyneom.synckit.sharing.SharingControlMemberV1
 import com.keyneom.synckit.sharing.SharingControlMemberMetadataV1
 import com.keyneom.synckit.sharing.SharingControlMigrationRequirementV1
 import com.keyneom.synckit.sharing.SharingControlMigrationTargetV1
@@ -819,6 +820,11 @@ class SharedSyncCoordinator(
      * to send back to the owner. Reading the dataset later requires granting the
      * shared file(s) via the browser Picker (drive.file has no native Android UI).
      */
+    suspend fun prepareJoin(accessToken: String) {
+        rememberAccess(accessToken)
+        identityStore.getOrCreate()
+    }
+
     suspend fun joinFromLink(accessToken: String, joinLinkUrl: String): String {
         rememberAccess(accessToken)
         val parsed = parseSharingJoinLinkV1(joinLinkUrl)
@@ -1794,7 +1800,7 @@ class SharedSyncCoordinator(
         // the row; otherwise the verified control directory is still enough
         // to render every participant and email.
         val currentKeyId = identityStore.get()?.publicKey?.keyId
-        val controlMembers = if (
+        var controlMembers = if (
             profile.controlDatasetId != null &&
             profile.datasetRecords?.get(profile.controlDatasetId)?.fileId != null
         ) {
@@ -1803,6 +1809,20 @@ class SharedSyncCoordinator(
             }.getOrDefault(emptyMap())
         } else {
             emptyMap()
+        }
+        // Owner backfill: earlier releases synchronized members without their
+        // emails, so other devices could only render raw key ids. When this
+        // owner knows an email the verified directory lacks, republish the
+        // full directory once and re-read it.
+        val missingEmails = profile.role == "owner" && controlMembers.any { (memberKeyId, member) ->
+            member.email.isNullOrBlank() &&
+                !profile.participantEmails?.get(memberKeyId).isNullOrBlank()
+        }
+        if (missingEmails) {
+            runCatching {
+                synchronizeControlMembers(state, profile)
+                controlMembers = readControlWithLegacyRepair(state, profile).members
+            }
         }
         val aggregated = linkedMapOf<String, ProfileParticipant>()
         for ((part, fileId) in files) {
@@ -2529,14 +2549,24 @@ class SharedSyncCoordinator(
     private suspend fun synchronizeControlMembers(
         state: SharedSyncState,
         profile: ProfileRecord,
-        keyId: String,
-        email: String,
+        keyId: String? = null,
+        email: String? = null,
     ) {
         if (profile.controlDatasetId == null) return
         val control = controlDatasetFor(state, profile)
-        readControlWithLegacyRepair(state, profile)
+        val existing = readControlWithLegacyRepair(state, profile)
+        // synchronizeMembers rebuilds every member record from the metadata
+        // map alone — any member omitted from it would lose its email (and
+        // with it, the "who is this key?" answer on every device). Always
+        // pass the complete directory: existing verified metadata first,
+        // locally known invite emails as fallback, the fresh email last.
         control.synchronizeMembers(
-            mapOf(keyId to SharingControlMemberMetadataV1(email = email)),
+            mergedControlMemberMetadata(
+                existing.members,
+                profile.participantEmails.orEmpty(),
+                keyId,
+                email,
+            ),
         )
         val verified = readControlWithLegacyRepair(state, profile)
         val required = requiredProfileMemberKeyIds(state, profile)
@@ -2844,4 +2874,33 @@ class SharedSyncCoordinator(
         /** Split profiles: the participant's role per dataset part they can see. */
         val datasetRoles: Map<String, String>? = null,
     )
+}
+
+internal fun mergedControlMemberMetadata(
+    members: Map<String, SharingControlMemberV1>,
+    participantEmails: Map<String, String>,
+    keyId: String? = null,
+    email: String? = null,
+): Map<String, SharingControlMemberMetadataV1> {
+    val metadata = mutableMapOf<String, SharingControlMemberMetadataV1>()
+    for ((memberKeyId, member) in members) {
+        metadata[memberKeyId] = SharingControlMemberMetadataV1(
+            email = member.email ?: participantEmails[memberKeyId],
+            googleSubject = member.googleSubject,
+            drivePermissionId = member.drivePermissionId,
+        )
+    }
+    participantEmails.forEach { (participantKeyId, participantEmail) ->
+        val current = metadata[participantKeyId]
+        if (current == null) {
+            metadata[participantKeyId] = SharingControlMemberMetadataV1(email = participantEmail)
+        } else if (current.email.isNullOrBlank()) {
+            metadata[participantKeyId] = current.copy(email = participantEmail)
+        }
+    }
+    if (keyId != null && email != null) {
+        metadata[keyId] = (metadata[keyId] ?: SharingControlMemberMetadataV1())
+            .copy(email = email)
+    }
+    return metadata
 }

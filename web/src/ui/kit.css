@@ -704,3 +704,166 @@
   font-size: 12.5px;
   color: var(--eb-muted);
 }
+
+/* ═════════ Profiles IA + mobile polish (2026-07 profiles redesign) ═════════ */
+
+/* Choice-grid dialogs (first-run privacy + profile discovery): every option
+   stacks its label over its description. Without this, `button.ghost`'s
+   inline-flex base pushed the label into a one-word-per-line column beside
+   the description on phones. */
+.privacy-choice-grid button,
+.privacy-choice-grid button.ghost {
+  display: grid;
+  gap: 0.3rem;
+  justify-items: start;
+  width: 100%;
+  border-radius: 18px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Profile list cards on the Profiles home: the main button opens profile
+   detail and the sibling Switch button changes the active profile. */
+.profile-list-card {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 56px;
+  border: 1px solid var(--eb-outline-variant);
+  border-radius: 14px;
+  background: var(--eb-surface);
+  color: var(--eb-ink);
+  overflow: hidden;
+}
+.profile-list-card:hover {
+  border-color: var(--eb-outline);
+}
+.profile-list-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 400;
+  text-align: left;
+}
+.profile-list-main:hover:not(:disabled) {
+  background: var(--eb-surface);
+}
+.profile-list-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.profile-list-name {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+.profile-list-meta {
+  color: var(--eb-muted);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.profile-list-switch {
+  flex-shrink: 0;
+  min-height: 36px;
+  margin-right: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--eb-outline-variant);
+  border-radius: 999px;
+  color: var(--eb-accent);
+  font-weight: 600;
+  font-size: 13px;
+}
+.profile-list-switch:hover {
+  border-color: var(--eb-accent);
+}
+.profile-list-card > .profile-active-badge {
+  flex-shrink: 0;
+  margin-right: 10px;
+}
+.profile-list-chevron {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  color: var(--eb-muted);
+}
+
+/* Long identifiers (join links, reply links, emails, key ids) wrap inside
+   their card instead of pushing the layout sideways. */
+.sync-card,
+.sync-share-panel,
+.sync-notice,
+.eb-person,
+.privacy-session-warning,
+.screen-heading {
+  overflow-wrap: anywhere;
+}
+
+/* Compact one-line topbar on phones — the page's own heading carries the
+   context, so the subtitle only spends vertical space. */
+@media (max-width: 680px) {
+  .web-topbar {
+    min-height: 52px;
+    padding-block: 0.4rem;
+  }
+  .web-topbar h1 {
+    font-size: 1.15rem;
+  }
+  .web-topbar > div > p {
+    display: none;
+  }
+  .privacy-session-warning {
+    padding: 0.6rem 0.8rem;
+  }
+}
+
+/* Contextual sharing banners: message left, action right; stacked on phones. */
+.sync-notice.info {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: center;
+}
+.sync-notice.info > div {
+  display: grid;
+  gap: 0.2rem;
+}
+.sync-notice.info > div > strong {
+  color: var(--eb-ink);
+}
+
+/* Sharing banners and action rows stack cleanly on phones. */
+@media (max-width: 680px) {
+  .sync-notice.info {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+  .sync-notice.info button,
+  .sync-share-panel > button,
+  .sync-actions button {
+    width: 100%;
+    justify-content: center;
+  }
+  .sync-pending-item {
+    grid-template-columns: 1fr;
+  }
+  .participant-summary {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
+  }
+}
+
+/* The global profile chip anchors to the right edge of the topbar. */
+.web-topbar .eb-profile-chip {
+  margin-left: auto;
+}

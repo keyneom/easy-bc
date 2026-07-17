@@ -52,19 +52,21 @@ private const val PROFILE_DISCOVERY_ENABLED = "enabled"
 /**
  * Global profile chip + switcher sheet (docs/settings-profiles-redesign.md §1).
  *
- * Rendered by [AppNavigation] above the NavHost so the active profile's
- * identity is visible on every screen — logging into the wrong profile is
- * the worst failure this app can have. Switching runs the same
- * publish-before-switch routine as the Settings hub (auth gate included);
- * the sheet shows progress until the switch confirms and surfaces errors
- * inline instead of flipping state silently.
+ * Each screen embeds this in its own title row (via [AppNavigation]'s
+ * `profileChip` lambda) so the active profile's identity is visible on every
+ * screen without spending a dedicated bar of vertical space — logging into
+ * the wrong profile is the worst failure this app can have. Switching runs
+ * the same publish-before-switch routine as the Settings hub (auth gate
+ * included); the sheet shows progress until the switch confirms and surfaces
+ * errors inline instead of flipping state silently.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ProfileChipHost(
+fun ProfileChipAction(
     vm: SettingsViewModel,
-    /** Navigate to the profiles / storage & sharing management screen. */
+    /** Navigate to the profiles management screen. */
     onOpenManageProfiles: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val activity = LocalContext.current as? ComponentActivity ?: return
     val scope = rememberCoroutineScope()
@@ -206,21 +208,14 @@ fun ProfileChipHost(
         }
     }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.End,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        EbProfileChip(
-            name = disambiguatedProfileLabel(state, activeProfile),
-            onClick = { openSwitcherAndDiscover() },
-            colorKey = state.activeProfileKey,
-            badge = hubProfileBadge(state, activeProfile),
-            photoBase64 = activeProfile.avatarWebp,
-        )
-    }
+    EbProfileChip(
+        name = disambiguatedProfileLabel(state, activeProfile),
+        onClick = { openSwitcherAndDiscover() },
+        colorKey = state.activeProfileKey,
+        badge = hubProfileBadge(state, activeProfile),
+        photoBase64 = activeProfile.avatarWebp,
+        modifier = modifier.padding(end = 4.dp),
+    )
 
     if (showSheet) {
         ModalBottomSheet(onDismissRequest = { if (!busy) showSheet = false }) {
@@ -339,7 +334,7 @@ fun ProfileChipHost(
                         contentColor = MaterialTheme.colorScheme.primary,
                     ),
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Manage profiles — new, join, storage & sharing") }
+                ) { Text("Manage profiles — new, join, sharing") }
             }
         }
     }

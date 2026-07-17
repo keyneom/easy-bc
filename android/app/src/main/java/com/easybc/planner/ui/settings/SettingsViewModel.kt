@@ -16,6 +16,7 @@ import com.easybc.planner.sync.CloudSyncCoordinator
 import com.easybc.planner.sync.CloudSyncOperation
 import com.easybc.planner.sync.EasyBcSyncRuntime
 import com.easybc.planner.sync.GoogleAuthorization
+import com.easybc.planner.sync.InteractiveAuthGate
 import com.easybc.planner.sync.SyncPayloadStore
 import com.easybc.planner.sync.shared.ProfileRecord
 import com.easybc.planner.sync.shared.PendingSharedJoin
@@ -33,6 +34,13 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 
 private const val SYNC_LOG_TAG = "EasyBcSync"
+
+internal fun sharingJoinErrorMessage(error: Exception): String? =
+    if (error.message?.contains("file manifest is not authenticated by its invitation") == true) {
+        "This invite was created by an older EasyBC release. Ask the owner to create and send a new invite link."
+    } else {
+        error.message
+    }
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EasyBCApp
@@ -394,13 +402,29 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    /** Confirm Google authorization and unlock the sharing identity before the Picker hand-off. */
+    fun prepareJoin(accessToken: String, onReady: () -> Unit) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                InteractiveAuthGate.run { sharedSync.prepareJoin(accessToken) }
+                _cloudStatus.value = SyncStatus.Idle
+                onReady()
+            } catch (error: Exception) {
+                _cloudStatus.value = cloudFailure("Prepare join", error, "Could not confirm your identity")
+            }
+        }
+    }
+
     /** Joiner side: run a join link, producing a response link to send to the owner. */
     fun joinFromLink(accessToken: String, joinLinkUrl: String) {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
             try {
                 val response = withTimeout(90_000) {
-                    sharedSync.joinFromLink(accessToken, joinLinkUrl)
+                    InteractiveAuthGate.run {
+                        sharedSync.joinFromLink(accessToken, joinLinkUrl)
+                    }
                 }
                 PendingSharedJoin.setProducedResponse(app, response)
                 PendingSharedJoin.clearJoinLink(app)
@@ -410,7 +434,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     "Access granted. Send the response link back to the owner to finish joining.",
                 )
             } catch (error: Exception) {
-                _cloudStatus.value = cloudFailure("Join", error, "Join failed")
+                Log.e(SYNC_LOG_TAG, "Join failed", error)
+                _cloudStatus.value = SyncStatus.Error(
+                    sharingJoinErrorMessage(error) ?: "Join failed (${error.javaClass.simpleName}).",
+                )
             }
         }
     }
@@ -421,7 +448,9 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch {
             try {
                 withTimeout(90_000) {
-                    sharedSync.acceptResponseFromLink(accessToken, responseLinkUrl)
+                    InteractiveAuthGate.run {
+                        sharedSync.acceptResponseFromLink(accessToken, responseLinkUrl)
+                    }
                 }
                 PendingSharedJoin.clearResponseToAccept(app)
                 refreshSharedSyncState()
@@ -679,6 +708,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         accessToken: String?,
         profileKeyValue: String,
         deleteEverywhere: Boolean,
+        onSuccess: () -> Unit = {},
     ) {
         _cloudStatus.value = SyncStatus.Running
         viewModelScope.launch {
@@ -688,6 +718,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 _cloudStatus.value = SyncStatus.Success(
                     if (deleteEverywhere) "Profile deleted everywhere." else "Profile removed.",
                 )
+                onSuccess()
             } catch (error: Exception) {
                 _cloudStatus.value = cloudFailure("Delete profile", error, "Delete failed")
             }
