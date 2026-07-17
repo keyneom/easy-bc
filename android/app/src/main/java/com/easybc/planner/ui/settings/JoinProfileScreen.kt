@@ -214,6 +214,14 @@ fun JoinProfileScreen(
         )
     }
 
+    // Leaving mid-join keeps the link (the screen prefills it again) but
+    // frees the auth gate so background sync doesn't wait on this screen.
+    fun leave() {
+        PendingSharedJoin.parkFlow()
+        onBack()
+    }
+    androidx.activity.compose.BackHandler { leave() }
+
     // Zero insets: the app-level scaffold already consumed the system bars.
     Scaffold(
         contentWindowInsets = WindowInsets(0.dp),
@@ -222,7 +230,7 @@ fun JoinProfileScreen(
             TopAppBar(
                 title = { Text("Join a shared profile") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = { leave() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                     }
                 },

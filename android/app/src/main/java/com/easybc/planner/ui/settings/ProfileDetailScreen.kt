@@ -145,6 +145,7 @@ fun ProfileDetailScreen(
     val participants by vm.profileParticipants.collectAsState()
     val migrationAckStatus by vm.migrationStatus.collectAsState()
     val joinUrl by vm.joinUrl.collectAsState()
+    val ownershipTransferLink by vm.ownershipTransferLink.collectAsState()
     val busy = status is SettingsViewModel.SyncStatus.Running
 
     val state = sharedState
@@ -170,6 +171,9 @@ fun ProfileDetailScreen(
     var confirmDeleteEverywhere by remember { mutableStateOf(false) }
     var confirmReset by remember { mutableStateOf(false) }
     var confirmRevoke by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var confirmTransfer by remember {
+        mutableStateOf<SharedSyncCoordinator.ProfileParticipant?>(null)
+    }
     var confirmSplitUpgrade by remember { mutableStateOf(false) }
     var confirmMigrationBegin by remember { mutableStateOf(false) }
     var confirmMigrationClose by remember { mutableStateOf(false) }
@@ -369,25 +373,32 @@ fun ProfileDetailScreen(
                     isSharedWithYou || participantCount > 0 -> EbStorageMode.SHARED
                     else -> EbStorageMode.PRIVATE
                 }
-                EbModeCard(
-                    mode = EbStorageMode.LOCAL,
-                    title = "This device",
-                    description = "Stays on this phone. No account needed.",
-                    selected = currentMode == EbStorageMode.LOCAL,
-                    pending = busy,
-                    enabled = !isSharedWithYou,
-                    onSelect = {
-                        if (currentMode != EbStorageMode.LOCAL) confirmDisconnect = true
-                    },
-                )
-                EbModeCard(
+                if (isSharedWithYou) {
+                    EbBanner(
+                        tone = EbBannerTone.INFO,
+                        title = "Shared by ${profile.ownerEmail}",
+                        text = "Your access is ${profile.role}. The owner controls storage and sharing.",
+                    )
+                } else {
+                    EbModeCard(
+                        mode = EbStorageMode.LOCAL,
+                        title = "This device",
+                        description = "Stays on this phone. No account needed.",
+                        selected = currentMode == EbStorageMode.LOCAL,
+                        pending = busy,
+                        enabled = true,
+                        onSelect = {
+                            if (currentMode != EbStorageMode.LOCAL) confirmDisconnect = true
+                        },
+                    )
+                    EbModeCard(
                     mode = EbStorageMode.PRIVATE,
                     title = "Private cloud",
                     description = "Encrypted in your Google Drive; your other devices " +
                         "unlock it with your passkey. Only you.",
                     selected = currentMode == EbStorageMode.PRIVATE,
                     pending = busy,
-                    enabled = !isSharedWithYou,
+                    enabled = true,
                     onSelect = {
                         if (currentMode == EbStorageMode.LOCAL) {
                             runner.run { token ->
@@ -400,14 +411,14 @@ fun ProfileDetailScreen(
                         }
                     },
                 )
-                EbModeCard(
+                    EbModeCard(
                     mode = EbStorageMode.SHARED,
                     title = "Shared",
                     description = "Private cloud, plus invited people can view or edit " +
                         "what you choose.",
                     selected = currentMode == EbStorageMode.SHARED,
                     pending = busy,
-                    enabled = !isSharedWithYou,
+                    enabled = true,
                     onSelect = {
                         inviteOpen = true
                         if (currentMode == EbStorageMode.LOCAL) {
@@ -417,12 +428,6 @@ fun ProfileDetailScreen(
                         }
                     },
                 )
-                if (isSharedWithYou) {
-                    Text(
-                        "Storage is controlled by ${profile.ownerEmail}, this profile's owner.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                 }
 
                 // ── Status + sync ──
@@ -652,11 +657,18 @@ fun ProfileDetailScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                    val pendingTransferToKeyId = remember(ownershipTransferLink) {
+                        ownershipTransferLink?.let {
+                            com.easybc.planner.sync.shared.parseOwnershipTransferLink(it)
+                        }?.toKeyId
+                    }
                     participants.forEach { participant ->
                         ParticipantCard(
                             participant = participant,
                             profileIsSplit = isSplitProfile(profile),
                             viewerCanAdminister = canAdminister,
+                            viewerIsOwner = profile.role == "owner",
+                            transferPending = participant.keyId == pendingTransferToKeyId,
                             busy = busy,
                             expanded = expandedParticipant == participant.keyId,
                             onToggleExpand = {
@@ -693,6 +705,43 @@ fun ProfileDetailScreen(
                                 confirmRevoke =
                                     participant.keyId to participant.emailAddress.orEmpty()
                             },
+                            onTransfer = { confirmTransfer = participant },
+                        )
+                    }
+                    ownershipTransferLink?.let { url ->
+                        EbBanner(
+                            tone = EbBannerTone.SUCCESS,
+                            title = "Transfer link ready",
+                            text = "Send it to the new owner — nothing changes until they " +
+                                "accept it inside EasyBC. Google Drive also emails them " +
+                                "about the file transfer, but that email alone doesn't " +
+                                "finish the switch.",
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                url,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 2,
+                            )
+                            IconButton(onClick = { clipboard.setText(AnnotatedString(url)) }) {
+                                Icon(Icons.Filled.ContentCopy, "Copy transfer link")
+                            }
+                            IconButton(onClick = { shareText(url, "Transfer profile ownership") }) {
+                                Icon(Icons.Filled.Share, "Share transfer link")
+                            }
+                        }
+                        TextButton(
+                            onClick = { vm.discardOwnershipTransferLink() },
+                            enabled = !busy,
+                        ) { Text("Discard link") }
+                        Text(
+                            "Discarding only removes the link from this device. The " +
+                                "pending Drive transfer stays until it's accepted or " +
+                                "cancelled in Google Drive.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     TextButton(
@@ -974,6 +1023,35 @@ fun ProfileDetailScreen(
         )
     }
 
+    confirmTransfer?.let { participant ->
+        AlertDialog(
+            onDismissRequest = { confirmTransfer = null },
+            title = { Text("Transfer ownership?") },
+            text = {
+                Text(
+                    "${participant.emailAddress} must accept the link. Afterward, you will remain an admin.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmTransfer = null
+                        runner.run { token ->
+                            vm.prepareOwnershipTransfer(
+                                token,
+                                participant.keyId,
+                                participant.emailAddress.orEmpty(),
+                            )
+                        }
+                    },
+                ) { Text("Create transfer link") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmTransfer = null }) { Text("Cancel") }
+            },
+        )
+    }
+
     if (confirmSplitUpgrade) {
         AlertDialog(
             onDismissRequest = { confirmSplitUpgrade = false },
@@ -1187,12 +1265,16 @@ private fun ParticipantCard(
     participant: SharedSyncCoordinator.ProfileParticipant,
     profileIsSplit: Boolean,
     viewerCanAdminister: Boolean,
+    viewerIsOwner: Boolean,
+    /** An outgoing ownership-transfer link names this person as recipient. */
+    transferPending: Boolean,
     busy: Boolean,
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onDatasetRole: (String, EbAccessLevel) -> Unit,
     onRole: (String) -> Unit,
     onRemove: () -> Unit,
+    onTransfer: () -> Unit,
 ) {
     val email = participant.emailAddress
     val name = when {
@@ -1241,6 +1323,13 @@ private fun ParticipantCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else if (manageable) {
+            if (transferPending) {
+                Text(
+                    "Ownership transfer pending — waiting for them to accept your link.",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onToggleExpand, enabled = !busy) {
                     Text(if (expanded) "Done" else "Manage access")
@@ -1314,6 +1403,15 @@ private fun ParticipantCard(
                         },
                         enabled = !busy,
                     )
+                }
+                // Rare and consequential, so it lives behind Manage access
+                // rather than at card level. Requires access to every section.
+                val canOwnAllDatasets = participant.datasetRoles == null ||
+                    DATASET_PARTS.all { participant.datasetRoles?.containsKey(it) == true }
+                if (viewerIsOwner && canOwnAllDatasets && !transferPending) {
+                    TextButton(onClick = onTransfer, enabled = !busy) {
+                        Text("Transfer ownership to $name…")
+                    }
                 }
             }
         }

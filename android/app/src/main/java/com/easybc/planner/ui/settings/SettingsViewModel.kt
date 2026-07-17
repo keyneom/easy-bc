@@ -93,6 +93,10 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val joinUrl: StateFlow<String?> = _joinUrl
     private val _responseLink = MutableStateFlow<String?>(null)
     val responseLink: StateFlow<String?> = _responseLink
+    private val _ownershipTransferLink = MutableStateFlow<String?>(null)
+    val ownershipTransferLink: StateFlow<String?> = _ownershipTransferLink
+    private val _incomingOwnershipTransferLink = MutableStateFlow<String?>(null)
+    val incomingOwnershipTransferLink: StateFlow<String?> = _incomingOwnershipTransferLink
 
     private val _pendingResponses = MutableStateFlow<List<SharedSyncCoordinator.PendingResponse>>(emptyList())
     val pendingResponses: StateFlow<List<SharedSyncCoordinator.PendingResponse>> = _pendingResponses
@@ -107,6 +111,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             val existing = repo.getSettings()
             _draft.value = existing ?: UserSettingsEntity()
             _responseLink.value = PendingSharedJoin.producedResponse(app)
+            _ownershipTransferLink.value = sharedSync.pendingOwnershipTransferLink()
+            _incomingOwnershipTransferLink.value = sharedSync.incomingOwnershipTransferLink()
             sharedSync.ensureProfileState()
             refreshSharedSyncState()
         }
@@ -790,6 +796,66 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     cloudFailure("Remove participant access", error, "Access removal failed")
             }
         }
+    }
+
+    fun prepareOwnershipTransfer(accessToken: String, keyId: String, email: String) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _ownershipTransferLink.value =
+                    sharedSync.prepareOwnershipTransfer(accessToken, keyId, email)
+                _cloudStatus.value = SyncStatus.Success(
+                    "Transfer link ready. Ownership changes only after they accept.",
+                )
+            } catch (error: Exception) {
+                _cloudStatus.value =
+                    cloudFailure("Transfer ownership", error, "Transfer setup failed")
+            }
+        }
+    }
+
+    fun acceptOwnershipTransfer(
+        accessToken: String,
+        proposalLink: String,
+        onSuccess: () -> Unit = {},
+    ) {
+        _cloudStatus.value = SyncStatus.Running
+        viewModelScope.launch {
+            try {
+                _sharedSyncState.value =
+                    sharedSync.acceptOwnershipTransfer(accessToken, proposalLink)
+                _ownershipTransferLink.value = null
+                _incomingOwnershipTransferLink.value = null
+                refreshSharedSyncState()
+                _cloudStatus.value = SyncStatus.Success(
+                    "Ownership transferred. You now control this profile.",
+                )
+                onSuccess()
+            } catch (error: Exception) {
+                _cloudStatus.value =
+                    cloudFailure("Accept ownership", error, "Ownership transfer failed")
+            }
+        }
+    }
+
+    fun dismissOwnershipTransferOffer() {
+        com.easybc.planner.sync.shared.PendingOwnershipTransferStore(app).clearIncoming()
+        _incomingOwnershipTransferLink.value = null
+    }
+
+    /** Leaving the offer screen undecided: free the auth gate, keep the offer. */
+    fun parkOwnershipTransferOffer() {
+        com.easybc.planner.sync.shared.PendingOwnershipTransferStore(app).parkIncoming()
+    }
+
+    /**
+     * Owner-side: forget the outgoing transfer link on this device. The Drive
+     * transfer request itself stays pending until accepted or cancelled in
+     * Google Drive — this only stops EasyBC from offering the link again.
+     */
+    fun discardOwnershipTransferLink() {
+        com.easybc.planner.sync.shared.PendingOwnershipTransferStore(app).setOutgoingLink(null)
+        _ownershipTransferLink.value = null
     }
 
     fun createOwnedProfile(accessToken: String, displayName: String) {

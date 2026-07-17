@@ -7,6 +7,7 @@ describe("shouldOpenSyncSettings", () => {
     "?sk-resp=1&sk-kr=response",
     "?sk-inv=invitation&grant-files=1",
     "?grant-folder=1",
+    "?sk-owner-transfer=signed-proposal",
   ])("routes sharing URL %s to Settings", (search) => {
     expect(shouldOpenSyncSettings(search)).toBe(true);
   });

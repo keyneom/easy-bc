@@ -64,6 +64,7 @@ class SharedSyncCoordinator(
         driveAuth.provider().authorize()
     }
     private val pendingInvites = PendingInviteStore(context.applicationContext)
+    private val pendingOwnershipTransfers = PendingOwnershipTransferStore(context.applicationContext)
     private val developerLog = DeveloperLog(context.applicationContext)
 
     suspend fun loadState(): SharedSyncState? = registry.load()
@@ -714,22 +715,84 @@ class SharedSyncCoordinator(
             needsInitialLoad = false,
         )
         var next = registry.upsertProfile(nextProfile)
+        next = reconcileProfileAuthority(controller, next, next.activeProfileKey)
+        val authoritativeProfile = findProfile(next, next.activeProfileKey) ?: nextProfile
         // Existing installations do not rerun setup. Discover profiles made
         // on Web during every normal owner sync so the local registry remains
         // cross-platform in both directions.
-        if (isOwnedProfile(next, nextProfile)) {
-            val appFolderId = nextProfile.appFolderId ?: controller.ensureStorage().appFolderId
+        if (isOwnedProfile(next, authoritativeProfile)) {
+            val appFolderId = authoritativeProfile.appFolderId ?: controller.ensureStorage().appFolderId
             val listedDatasets = controller.listDatasets()
             next = recoverAdditionalOwnedProfiles(
                 initialState = next,
                 listedDatasets = listedDatasets.map { it.datasetId to it.fileId },
                 appFolderId = appFolderId,
-                trustedOwnerKeyId = nextProfile.trustedOwnerKeyId,
+                trustedOwnerKeyId = authoritativeProfile.trustedOwnerKeyId,
             )
         }
         store.rememberSync(result.fileId, syncedAt)
         SharingSyncScheduler.schedule(context.applicationContext, driveAuth.tokenExpiresAt())
-        return refreshControlEnrollment(next, nextProfile)
+        return refreshControlEnrollment(next, authoritativeProfile)
+    }
+
+    /** Reconcile cached app labels/roles from sync-kit's authenticated ACL. */
+    private suspend fun reconcileProfileAuthority(
+        controller: SharedBackupController<SyncPayloadV1>,
+        state: SharedSyncState,
+        profileKeyValue: String,
+    ): SharedSyncState {
+        val profile = findProfile(state, profileKeyValue) ?: return state
+        if (isLocalProfile(profile)) return state
+        val identity = identityStore.getOrCreate()
+        val ownerKeyIds = linkedSetOf<String>()
+        val currentRoles = linkedSetOf<SharingRole>()
+        for (datasetId in profileDatasetIdsIncludingControl(profile)) {
+            val membership = controller.getDatasetParticipants(datasetId)
+            val owner = membership.participants.firstOrNull { it.role == SharingRole.OWNER }
+                ?: return state
+            val current = membership.participants.firstOrNull {
+                it.keyId == identity.publicKey.keyId
+            } ?: return state
+            ownerKeyIds += owner.keyId
+            currentRoles += current.role
+        }
+        // Do not relabel a partially finalized transfer. Every file must agree.
+        if (ownerKeyIds.size != 1 || currentRoles.size != 1) return state
+        val ownerKeyId = ownerKeyIds.single()
+        val currentRole = currentRoles.single()
+        val ownerEmail = if (ownerKeyId == identity.publicKey.keyId) {
+            state.ownerEmail
+        } else {
+            profile.participantEmails?.get(ownerKeyId)
+        } ?: return state
+        val participantEmails = profile.participantEmails.orEmpty().toMutableMap()
+        if (profile.role == "owner" && currentRole != SharingRole.OWNER) {
+            participantEmails[identity.publicKey.keyId] = profile.ownerEmail
+            pendingOwnershipTransfers.setOutgoingLink(null)
+        }
+        val updated = profile.copy(
+            controlProfileId = profile.controlProfileId ?: profileKey(
+                profile.ownerEmail,
+                profile.controlDatasetId
+                    ?.takeIf { it.endsWith(CONTROL_DATASET_SUFFIX) }
+                    ?.removeSuffix(CONTROL_DATASET_SUFFIX)
+                    ?: profile.datasetId,
+            ),
+            ownerEmail = ownerEmail,
+            role = currentRole.name.lowercase(),
+            participantEmails = participantEmails,
+            datasetGrants = profile.datasetGrants?.mapValues {
+                currentRole.name.lowercase()
+            },
+        )
+        val nextKey = profileKey(updated.ownerEmail, updated.datasetId)
+        return if (nextKey != profileKeyValue) {
+            registry.replaceProfile(profileKeyValue, updated)
+        } else if (updated.role != profile.role) {
+            registry.upsertProfile(updated)
+        } else {
+            state
+        }
     }
 
     suspend fun invite(
@@ -1772,6 +1835,99 @@ class SharedSyncCoordinator(
         }
     }
 
+    fun pendingOwnershipTransferLink(): String? = pendingOwnershipTransfers.outgoingLink()
+
+    fun incomingOwnershipTransferLink(): String? = pendingOwnershipTransfers.incomingLink()
+
+    suspend fun prepareOwnershipTransfer(
+        accessToken: String,
+        toKeyId: String,
+        recipientEmailAddress: String,
+    ): String {
+        rememberAccess(accessToken)
+        val state = registry.load() ?: error("Shared sync is not configured on this device.")
+        val profile = registry.activeProfile(state)
+        require(!isLocalProfile(profile)) { "That profile is local only." }
+        require(profile.role == "owner") { "Only the current owner can transfer this profile." }
+        val email = recipientEmailAddress.trim()
+        require(email.isNotEmpty()) { "The new owner needs a verified email address." }
+        val transfer = controllerFor(state, profile).prepareOwnershipTransfer(
+            datasetIds = profileDatasetIdsIncludingControl(profile),
+            toKeyId = toKeyId,
+            recipientEmailAddress = email,
+            previousOwnerRole = SharingRole.ADMIN,
+        )
+        return buildOwnershipTransferLink(transfer).also {
+            pendingOwnershipTransfers.setOutgoingLink(it)
+        }
+    }
+
+    suspend fun acceptOwnershipTransfer(
+        accessToken: String,
+        proposalLink: String,
+    ): SharedSyncState {
+        rememberAccess(accessToken)
+        val transfer = parseOwnershipTransferLink(proposalLink)
+            ?: error("That ownership-transfer link is invalid.")
+        val state = registry.load()
+            ?: error("Join and open this shared profile before accepting ownership.")
+        val transferIds = transfer.datasets.map { it.datasetId }.toSet()
+        val profile = state.profiles.firstOrNull { candidate ->
+            !isLocalProfile(candidate) &&
+                profileDatasetIdsIncludingControl(candidate).toSet() == transferIds
+        } ?: error("This ownership transfer does not match a profile on this device.")
+        val oldKey = profileKey(profile.ownerEmail, profile.datasetId)
+        val controller = controllerFor(state, profile)
+        val identity = identityStore.getOrCreate()
+        require(identity.publicKey.keyId == transfer.toKeyId) {
+            "This transfer was offered to a different sharing identity."
+        }
+        var accepted = pendingOwnershipTransfers.accepted(transfer.transferId)
+        if (
+            accepted != null &&
+            (accepted.ownerProof != transfer.ownerProof ||
+                accepted.fromKeyId != transfer.fromKeyId ||
+                accepted.toKeyId != transfer.toKeyId)
+        ) {
+            pendingOwnershipTransfers.deleteAccepted(transfer.transferId)
+            accepted = null
+        }
+        if (accepted?.newOwnerProof == null) {
+            accepted = controller.acceptOwnershipTransferProposal(transfer)
+            pendingOwnershipTransfers.saveAccepted(accepted)
+        }
+        val acceptedTransfer = accepted
+            ?: error("The ownership transfer could not be countersigned.")
+        val results = controller.finalizeOwnershipTransfer(acceptedTransfer)
+        val failed = results.filter { it.status == "failed" }
+        if (failed.isNotEmpty()) {
+            error(
+                "Ownership transfer is incomplete for " +
+                    failed.joinToString(", ") { it.datasetId } +
+                    ". Try again to resume it.",
+            )
+        }
+        val refreshed = registry.load() ?: state
+        val persisted = findProfile(refreshed, oldKey) ?: profile
+        val nextProfile = persisted.copy(
+            controlProfileId = persisted.controlProfileId ?: profileKey(
+                profile.ownerEmail,
+                persisted.controlDatasetId
+                    ?.takeIf { it.endsWith(CONTROL_DATASET_SUFFIX) }
+                    ?.removeSuffix(CONTROL_DATASET_SUFFIX)
+                    ?: persisted.datasetId,
+            ),
+            ownerEmail = refreshed.ownerEmail,
+            role = "owner",
+            participantEmails = persisted.participantEmails.orEmpty() +
+                (transfer.fromKeyId to profile.ownerEmail),
+            datasetGrants = persisted.datasetGrants?.mapValues { "owner" },
+        )
+        val next = registry.replaceProfile(oldKey, nextProfile)
+        pendingOwnershipTransfers.clear(transfer.transferId)
+        return next
+    }
+
     suspend fun listActiveParticipants(accessToken: String): List<ProfileParticipant> {
         rememberAccess(accessToken)
         val state = registry.load() ?: return emptyList()
@@ -2641,7 +2797,7 @@ class SharedSyncCoordinator(
         // profile's base dataset id changes generation, the control dataset
         // never does), so it derives from the control id's base — identical
         // to the profile key at creation time, stable forever after.
-        val controlProfileId = profileKey(
+        val controlProfileId = profile.controlProfileId ?: profileKey(
             profile.ownerEmail,
             if (controlDatasetId.endsWith(CONTROL_DATASET_SUFFIX)) {
                 controlDatasetId.removeSuffix(CONTROL_DATASET_SUFFIX)

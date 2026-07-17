@@ -69,6 +69,8 @@ data class ProfileRecord(
     val avatarUpdatedAt: String? = null,
     /** Protocol-owned coordination ledger for membership and migrations. */
     val controlDatasetId: String? = null,
+    /** Stable control-ledger profile id; owner email may change after a transfer. */
+    val controlProfileId: String? = null,
     val controlEnrollment: String = "none",
     val role: String,
     val trustedOwnerKeyId: String,

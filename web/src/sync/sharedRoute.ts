@@ -3,6 +3,7 @@ export function shouldOpenSyncSettings(search: string): boolean {
   return (
     params.has("sk-inv") ||
     params.get("sk-resp") === "1" ||
+    params.has("sk-owner-transfer") ||
     params.get("grant-files") === "1" ||
     params.get("grant-folder") === "1"
   );

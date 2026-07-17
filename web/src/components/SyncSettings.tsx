@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowRightLeft,
   Cloud,
   Copy,
   HardDrive,
@@ -16,7 +17,7 @@ import type { SharingRole } from "@keyneom/sync-kit/sharing";
 import type { WasmOptions } from "../App";
 import type { PersistedSession } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
-import { idbGet, KV_SYNC_STATE } from "../idbStore";
+import { idbDelete, idbGet, idbSet, KV_SYNC_STATE } from "../idbStore";
 import { currentRpId, passkeysSupported } from "../sync/passkey";
 import { formatLastSync, forgetSyncState } from "../sync/sessionSync";
 import { clearJoinLinkParams } from "../sync/sharedJoin";
@@ -35,6 +36,9 @@ import {
   listProfileParticipants,
   listPendingKeyResponses,
   type ManagedParticipant,
+  prepareProfileOwnershipTransfer,
+  profileKeyForOwnershipTransfer,
+  acceptProfileOwnershipTransfer,
   renameManagedProfile,
   resetSharedSync,
   revokeParticipant,
@@ -53,6 +57,11 @@ import {
   updateParticipantRole,
   updateManagedProfileAvatar,
 } from "../sync/sharedSync";
+import {
+  clearOwnershipTransferParams,
+  KV_OUTGOING_OWNERSHIP_TRANSFER,
+  parseOwnershipTransferLink,
+} from "../sync/ownershipTransfer";
 import {
   parseSharingJoinLinkV1,
   parseSharingResponseLinkV1,
@@ -197,6 +206,24 @@ export function SyncSettings({
   >([]);
   const [legacyAvailable, setLegacyAvailable] = useState(false);
   const [participants, setParticipants] = useState<ManagedParticipant[]>([]);
+  const [ownershipTransferLink, setOwnershipTransferLink] = useState<string | null>(null);
+  // The prepared link survives reloads: the owner must be able to re-copy it
+  // (or discard it) later, not just in the moment it was created.
+  useEffect(() => {
+    void idbGet<string>(KV_OUTGOING_OWNERSHIP_TRANSFER).then((stored) => {
+      if (stored) setOwnershipTransferLink(stored);
+    });
+  }, []);
+  const pendingTransferToKeyId = useMemo(
+    () =>
+      ownershipTransferLink
+        ? parseOwnershipTransferLink(ownershipTransferLink)?.toKeyId ?? null
+        : null,
+    [ownershipTransferLink],
+  );
+  const [incomingOwnershipTransfer, setIncomingOwnershipTransfer] = useState(() =>
+    typeof window === "undefined" ? null : parseOwnershipTransferLink(window.location.href),
+  );
   const [profileName, setProfileName] = useState("");
   const handledDeepLinkRef = useRef("");
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -227,6 +254,12 @@ export function SyncSettings({
     ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
     : null;
   const activeIsLocal = activeProfile ? isLocalProfile(activeProfile) : true;
+  const incomingOwnershipProfile = sharedSyncState && incomingOwnershipTransfer
+    ? (() => {
+        const key = profileKeyForOwnershipTransfer(sharedSyncState, incomingOwnershipTransfer);
+        return key ? findProfile(sharedSyncState, key) : null;
+      })()
+    : null;
 
   useEffect(() => {
     if (!shareAfterSetup || !sharedConfigured || activeIsLocal) return;
@@ -903,6 +936,60 @@ export function SyncSettings({
     }
   };
 
+  const offerOwnership = async (participant: ManagedParticipant) => {
+    if (!config || !sharedSyncState || !participant.emailAddress) return;
+    if (
+      !window.confirm(
+        `Transfer ownership to ${participant.emailAddress}? They must accept the link. Afterward, you will remain an admin.`,
+      )
+    ) return;
+    setBusy(`transfer-${participant.keyId}`);
+    try {
+      const prepared = await prepareProfileOwnershipTransfer(config, {
+        profileKey: sharedSyncState.activeProfileKey,
+        toKeyId: participant.keyId,
+        recipientEmailAddress: participant.emailAddress,
+      });
+      setOwnershipTransferLink(prepared.transferLink);
+      await idbSet(KV_OUTGOING_OWNERSHIP_TRANSFER, prepared.transferLink);
+      await navigator.clipboard.writeText(prepared.transferLink).catch(() => undefined);
+      setNotice({
+        kind: "success",
+        message: `Transfer link ready for ${participant.emailAddress}. Ownership changes only after they accept.`,
+      });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const discardOwnershipTransferLink = async () => {
+    setOwnershipTransferLink(null);
+    await idbDelete(KV_OUTGOING_OWNERSHIP_TRANSFER).catch(() => undefined);
+  };
+
+  const acceptOwnership = async () => {
+    if (!config || !incomingOwnershipTransfer) return;
+    if (
+      !window.confirm(
+        "Take ownership of this profile? You will control storage and sharing; the current owner will become an admin.",
+      )
+    ) return;
+    setBusy("accept-ownership");
+    try {
+      const accepted = await acceptProfileOwnershipTransfer(config, incomingOwnershipTransfer);
+      onSharedSyncStateChange(accepted.state);
+      setIncomingOwnershipTransfer(null);
+      clearOwnershipTransferParams();
+      setNotice({ kind: "success", message: "Ownership transferred. You now control this profile." });
+    } catch (error) {
+      setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // Android hands off to the browser only for Google Picker access. The actual
   // join still happens on Android so its local profile registry is updated.
   const legacyGrantOnlyRequested =
@@ -965,6 +1052,27 @@ export function SyncSettings({
           <span><HardDrive aria-hidden /> Local-first</span>
           <span><KeyRound aria-hidden /> Passkey protected</span>
           <span><LockKeyhole aria-hidden /> Encrypted before Drive</span>
+        </div>
+      )}
+
+      {!isJoinView && incomingOwnershipTransfer && (
+        <div className="sync-notice info" role="status">
+          <div>
+            <strong>Ownership offered to you</strong>
+            <span>
+              {incomingOwnershipProfile
+                ? `Accept to control ${profileDisplayLabel(sharedSyncState!, incomingOwnershipProfile)}. The current owner becomes an admin.`
+                : "Open the shared profile on this device first, then accept to control storage and sharing."}
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={unavailable || busy !== null || !incomingOwnershipProfile}
+            onClick={() => void acceptOwnership()}
+          >
+            <ArrowRightLeft aria-hidden />
+            {busy === "accept-ownership" ? "Transferring…" : "Accept ownership"}
+          </button>
         </div>
       )}
 
@@ -1054,6 +1162,16 @@ export function SyncSettings({
               : sharedWithYou || participantCount > 0
                 ? "shared"
                 : "private";
+            if (sharedWithYou) {
+              return (
+                <div className="sync-notice info">
+                  <div>
+                    <strong>Shared by {activeProfile.ownerEmail}</strong>
+                    <span>Your access is {activeProfile.role}. The owner controls storage and sharing.</span>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div className="profile-mode-cards" role="radiogroup" aria-label="Where this profile lives">
                 <EbModeCard
@@ -1062,7 +1180,7 @@ export function SyncSettings({
                   description="Stays in this browser. No account needed."
                   selected={currentMode === "local"}
                   pending={busy === "setup" || busy === "disconnect-profile"}
-                  disabled={sharedWithYou || busy !== null}
+                  disabled={busy !== null}
                   onSelect={() => {
                     if (currentMode !== "local") void disconnectActiveProfile();
                   }}
@@ -1073,7 +1191,7 @@ export function SyncSettings({
                   description="Encrypted in your Google Drive; your other devices unlock it with your passkey. Only you."
                   selected={currentMode === "private"}
                   pending={busy === "setup"}
-                  disabled={sharedWithYou || unavailable || busy !== null}
+                  disabled={unavailable || busy !== null}
                   onSelect={() => {
                     if (currentMode === "local") void runSetup();
                     else if (currentMode === "shared") {
@@ -1090,7 +1208,7 @@ export function SyncSettings({
                   description="Private cloud, plus invited people can view or edit what you choose."
                   selected={currentMode === "shared"}
                   pending={busy === "setup"}
-                  disabled={sharedWithYou || unavailable || busy !== null}
+                  disabled={unavailable || busy !== null}
                   onSelect={() => {
                     if (currentMode === "local") {
                       setShareAfterSetup(true);
@@ -1107,12 +1225,6 @@ export function SyncSettings({
                     }
                   }}
                 />
-                {sharedWithYou && (
-                  <p className="field-hint">
-                    Storage is controlled by {activeProfile.ownerEmail}, this
-                    profile&rsquo;s owner. Your access: {activeProfile.role}.
-                  </p>
-                )}
               </div>
             );
           })()}
@@ -1127,10 +1239,19 @@ export function SyncSettings({
               <Trash2 aria-hidden />
               {activeIsLocal
                 ? "Delete local profile"
-                : activeProfile.ownerEmail.toLowerCase() === sharedSyncState.ownerEmail.toLowerCase()
-                  ? "Remove from this device"
-                  : "Leave shared profile"}
+                : "Remove from this device"}
             </button>
+            {!activeIsLocal && activeProfile.role !== "owner" && (
+              <button
+                type="button"
+                className="ghost"
+                disabled={busy !== null}
+                onClick={() => void disconnectActiveProfile()}
+              >
+                <HardDrive aria-hidden />
+                Keep local copy
+              </button>
+            )}
             {!activeIsLocal && activeProfile.role === "owner" && (
               <button
                 type="button"
@@ -1691,6 +1812,9 @@ export function SyncSettings({
                       {!participant.emailAddress && !participant.isCurrentDevice
                         ? ` · key ${participant.keyId.slice(0, 10)}…`
                         : ""}
+                      {participant.keyId === pendingTransferToKeyId
+                        ? " · ownership transfer pending"
+                        : ""}
                     </span>
                     {canManage && (
                       <div className="participant-actions">
@@ -1735,6 +1859,19 @@ export function SyncSettings({
                         <option value="writer">Writer</option>
                         <option value="admin">Admin</option>
                       </select>
+                      {activeProfile?.role === "owner" &&
+                        participant.emailAddress &&
+                        participant.keyId !== pendingTransferToKeyId && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            disabled={busy !== null}
+                            onClick={() => void offerOwnership(participant)}
+                          >
+                            <ArrowRightLeft aria-hidden />
+                            Transfer ownership to {participant.emailAddress}…
+                          </button>
+                        )}
                     </label>
                   )}
                   {canManage && split && expanded && (
@@ -1764,12 +1901,58 @@ export function SyncSettings({
                         To add a dataset this person has never received, invite them again
                         with that dataset — sharing can’t add a file they hold no key for.
                       </span>
+                      {activeProfile?.role === "owner" &&
+                        participant.emailAddress &&
+                        participant.keyId !== pendingTransferToKeyId &&
+                        DATASET_PARTS.every((part) => participant.datasetRoles?.[part]) && (
+                          <button
+                            type="button"
+                            className="ghost"
+                            disabled={busy !== null}
+                            onClick={() => void offerOwnership(participant)}
+                          >
+                            <ArrowRightLeft aria-hidden />
+                            Transfer ownership to {participant.emailAddress}…
+                          </button>
+                        )}
                     </div>
                   )}
                 </EbPersonCard>
               );
             })}
           </div>
+          {ownershipTransferLink && (
+            <div className="sync-notice info">
+              <div>
+                <strong>Transfer link ready</strong>
+                <span>
+                  Send it to the new owner — nothing changes until they accept it inside
+                  EasyBC. Google Drive also emails them about the file transfer, but that
+                  email alone doesn&rsquo;t finish the switch. Discarding only removes the
+                  link from this device; the pending Drive transfer stays until accepted
+                  or cancelled in Google Drive.
+                </span>
+              </div>
+              <div>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={() => void navigator.clipboard.writeText(ownershipTransferLink)}
+                >
+                  <Copy aria-hidden />
+                  Copy link
+                </button>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={busy !== null}
+                  onClick={() => void discardOwnershipTransferLink()}
+                >
+                  Discard link
+                </button>
+              </div>
+            </div>
+          )}
           {pendingResponses.length > 0 && (
             <div className="sync-pending-list">
               <p className="field-hint">Pending join requests</p>

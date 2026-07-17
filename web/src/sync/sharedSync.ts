@@ -16,6 +16,7 @@ import {
   createSharingChangeDetectorFromTransport,
   sharedBackupParticipants,
   type SharedBackupParticipantV1,
+  type SharedBackupOwnershipTransferV1,
   type SharingChangeDetector,
   type SharingDatasetFileV1,
   type SharingInvitationV1,
@@ -66,6 +67,7 @@ import {
   createSharingIdentityProvider,
 } from "./sharedIdentity";
 import { easyBcSyncFolderName, profileKey } from "./sharedFolderName";
+import { buildOwnershipTransferLink } from "./ownershipTransfer";
 import {
   findOwnedStorageProfile,
   isOwnedProfile,
@@ -960,7 +962,7 @@ function buildControlDataset(
   // base dataset id changes generation, the control dataset never does), so
   // it derives from the control id's base — identical to the profile key at
   // creation time, stable forever after.
-  const controlProfileId = profileKey(
+  const controlProfileId = profile.controlProfileId ?? profileKey(
     profile.ownerEmail,
     datasetId.endsWith(CONTROL_DATASET_SUFFIX)
       ? datasetId.slice(0, -CONTROL_DATASET_SUFFIX.length)
@@ -1132,6 +1134,79 @@ function profileDatasetIdsIncludingControl(profile: ProfileRecord): string[] {
       ? [profile.controlDatasetId]
       : []),
   ];
+}
+
+/**
+ * Refresh app-owned owner labels/roles from sync-kit's authenticated ACL after
+ * a read. This is what makes the former owner's UI become Admin after the new
+ * owner finalizes on another device; cached app metadata is never treated as
+ * authority.
+ */
+async function reconcileProfileAuthority(
+  active: Runtime,
+  state: SharedSyncState,
+  profileKeyValue: string,
+): Promise<SharedSyncState> {
+  const profile = findProfile(state, profileKeyValue);
+  if (!profile || isLocalProfile(profile)) return state;
+  const identity = await active.identityProvider.getOrCreate();
+  const memberships = await Promise.all(
+    profileDatasetIdsIncludingControl(profile).map((datasetId) =>
+      active.controller.getDatasetParticipants(datasetId)
+    ),
+  );
+  const ownerKeyIds = new Set<string>();
+  const currentRoles = new Set<SharingRole>();
+  for (const membership of memberships) {
+    const owner = membership.participants.find((participant) => participant.role === "owner");
+    const current = membership.participants.find(
+      (participant) => participant.keyId === identity.publicKey.keyId,
+    );
+    if (!owner || !current) return state;
+    ownerKeyIds.add(owner.keyId);
+    currentRoles.add(current.role);
+  }
+  // A partially finalized transfer is intentionally left alone until every
+  // dataset agrees on the same owner and this device's same resulting role.
+  if (ownerKeyIds.size !== 1 || currentRoles.size !== 1) return state;
+  const ownerKeyId = [...ownerKeyIds][0]!;
+  const currentRole = [...currentRoles][0]!;
+  const ownerEmail = ownerKeyId === identity.publicKey.keyId
+    ? state.ownerEmail
+    : profile.participantEmails?.[ownerKeyId];
+  if (!ownerEmail) return state;
+  const participantEmails = { ...profile.participantEmails };
+  if (profile.role === "owner" && currentRole !== "owner") {
+    participantEmails[identity.publicKey.keyId] = profile.ownerEmail;
+  }
+  const updated: ProfileRecord = {
+    ...profile,
+    controlProfileId: profile.controlProfileId ?? profileKey(
+      profile.ownerEmail,
+      profile.controlDatasetId?.endsWith(CONTROL_DATASET_SUFFIX)
+        ? profile.controlDatasetId.slice(0, -CONTROL_DATASET_SUFFIX.length)
+        : profile.datasetId,
+    ),
+    ownerEmail,
+    role: currentRole,
+    participantEmails,
+    ...(profile.datasetGrants
+      ? {
+          datasetGrants: Object.fromEntries(
+            grantedParts(profile).map((part) => [part, currentRole]),
+          ) as DatasetGrants,
+        }
+      : {}),
+  };
+  const nextKey = profileKey(updated.ownerEmail, updated.datasetId);
+  if (nextKey !== profileKeyValue) {
+    return rebaseProfileRecord(state, profileKeyValue, updated);
+  }
+  if (updated.role === profile.role) return state;
+  const next = upsertProfile(state, updated);
+  cachedState = next;
+  await saveSharedSyncState(next);
+  return next;
 }
 
 /**
@@ -1739,13 +1814,20 @@ async function syncActiveDatasetInternal(
     let nextState = upsertProfile(refreshed, updatedProfile);
     cachedState = nextState;
     await saveSharedSyncState(nextState);
+    nextState = await reconcileProfileAuthority(
+      active,
+      nextState,
+      active.state.activeProfileKey,
+    );
+    const authoritativeProfile =
+      findProfile(nextState, nextState.activeProfileKey) ?? updatedProfile;
     // Existing installations skip setup, so setup-only discovery never sees
     // profiles created on another platform. Scan the owner's Drive folder on
     // every normal sync and adopt any valid profile datasets that are absent
     // from this device's local registry.
-    if (isOwnedProfile(nextState, updatedProfile)) {
-      const storage = updatedProfile.appFolderId
-        ? { appFolderId: updatedProfile.appFolderId }
+    if (isOwnedProfile(nextState, authoritativeProfile)) {
+      const storage = authoritativeProfile.appFolderId
+        ? { appFolderId: authoritativeProfile.appFolderId }
         : await active.controller.ensureStorage();
       const listedDatasets = await active.controller.listDatasets();
       nextState = await recoverAdditionalOwnedProfiles(
@@ -2985,6 +3067,179 @@ export type ManagedParticipant = {
   /** Split profiles: the participant's role per dataset part they can see. */
   datasetRoles?: Partial<Record<DatasetPart, SharedBackupParticipantV1["role"]>>;
 };
+
+const pendingOwnershipTransferKey = (transferId: string) =>
+  `easy-bc:pending-ownership-transfer:${transferId}`;
+
+export type PreparedProfileOwnershipTransfer = {
+  transfer: SharedBackupOwnershipTransferV1;
+  transferLink: string;
+};
+
+/**
+ * Owner-side transfer proposal. sync-kit authenticates the exact dataset-head
+ * manifest and puts every Drive object into pending-owner state; EasyBC only
+ * transports the opaque signed artifact to the recipient.
+ */
+export async function prepareProfileOwnershipTransfer(
+  config: SharedSyncConfig,
+  input: {
+    profileKey: string;
+    toKeyId: string;
+    recipientEmailAddress: string;
+  },
+): Promise<PreparedProfileOwnershipTransfer> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) throw new Error("No profile registry is available on this device.");
+    const profile = findProfile(state, input.profileKey);
+    if (!profile || isLocalProfile(profile)) {
+      throw new Error("That encrypted profile is not available on this device.");
+    }
+    if (profile.role !== "owner") {
+      throw new Error("Only the current owner can transfer this profile.");
+    }
+    if (!input.recipientEmailAddress.trim()) {
+      throw new Error("The new owner needs a verified email address.");
+    }
+    const scoped = createRuntimeForProfile(
+      config,
+      state,
+      input.profileKey,
+      createEmptySharedSyncPayload(),
+    );
+    try {
+      const transfer = await scoped.controller.prepareOwnershipTransfer({
+        datasetIds: profileDatasetIdsIncludingControl(profile),
+        toKeyId: input.toKeyId,
+        recipientEmailAddress: input.recipientEmailAddress.trim(),
+        previousOwnerRole: "admin",
+      });
+      const landingUrl = typeof window !== "undefined"
+        ? `${window.location.origin}${window.location.pathname}`
+        : "https://keyneom.github.io/easy-bc/";
+      return {
+        transfer,
+        transferLink: buildOwnershipTransferLink(landingUrl, transfer),
+      };
+    } finally {
+      scoped.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
+
+function profileForOwnershipTransfer(
+  state: SharedSyncState,
+  transfer: SharedBackupOwnershipTransferV1,
+): { key: string; profile: ProfileRecord } | null {
+  const transferDatasets = new Set(transfer.datasets.map((entry) => entry.datasetId));
+  for (const profile of state.profiles) {
+    if (isLocalProfile(profile)) continue;
+    const known = profileDatasetIdsIncludingControl(profile);
+    if (
+      known.length === transferDatasets.size &&
+      known.every((datasetId) => transferDatasets.has(datasetId))
+    ) {
+      return { key: profileKey(profile.ownerEmail, profile.datasetId), profile };
+    }
+  }
+  return null;
+}
+
+export function profileKeyForOwnershipTransfer(
+  state: SharedSyncState,
+  transfer: SharedBackupOwnershipTransferV1,
+): string | null {
+  return profileForOwnershipTransfer(state, transfer)?.key ?? null;
+}
+
+/** Recipient-side acceptance and resumable finalization of an owner proposal. */
+export async function acceptProfileOwnershipTransfer(
+  config: SharedSyncConfig,
+  transfer: SharedBackupOwnershipTransferV1,
+): Promise<{ state: SharedSyncState; profileKey: string }> {
+  return serialized(async () => {
+    const state = await getCachedState();
+    if (!state) {
+      throw new Error("Join and open this shared profile before accepting ownership.");
+    }
+    const matched = profileForOwnershipTransfer(state, transfer);
+    if (!matched) {
+      throw new Error("This ownership transfer does not match a profile on this device.");
+    }
+    const scoped = createRuntimeForProfile(
+      config,
+      state,
+      matched.key,
+      createEmptySharedSyncPayload(),
+    );
+    const pendingKey = pendingOwnershipTransferKey(transfer.transferId);
+    try {
+      const identity = await scoped.identityProvider.getOrCreate();
+      if (identity.publicKey.keyId !== transfer.toKeyId) {
+        throw new Error("This transfer was offered to a different sharing identity.");
+      }
+      let accepted = await idbGet<SharedBackupOwnershipTransferV1>(pendingKey);
+      if (
+        accepted &&
+        (accepted.ownerProof !== transfer.ownerProof ||
+          accepted.fromKeyId !== transfer.fromKeyId ||
+          accepted.toKeyId !== transfer.toKeyId)
+      ) {
+        await idbDelete(pendingKey);
+        accepted = undefined;
+      }
+      if (!accepted?.newOwnerProof) {
+        accepted = await scoped.controller.acceptOwnershipTransferProposal(transfer);
+        // Keep the countersigned artifact before touching provider ownership.
+        // A retry can then resume after any partially completed Drive step.
+        await idbSet(pendingKey, accepted);
+      }
+      const results = await scoped.controller.finalizeOwnershipTransfer(accepted);
+      const failed = results.filter((result) => result.status === "failed");
+      if (failed.length > 0) {
+        throw new Error(
+          `Ownership transfer is incomplete for ${failed.map((entry) => entry.datasetId).join(", ")}. Try again to resume it.`,
+        );
+      }
+      const refreshed = (await refreshCachedState()) ?? state;
+      const persisted = findProfile(refreshed, matched.key) ?? matched.profile;
+      const participantEmails = {
+        ...persisted.participantEmails,
+        [transfer.fromKeyId]: matched.profile.ownerEmail,
+      };
+      const nextProfile: ProfileRecord = {
+        ...persisted,
+        controlProfileId: persisted.controlProfileId ?? profileKey(
+          matched.profile.ownerEmail,
+          persisted.controlDatasetId?.endsWith(CONTROL_DATASET_SUFFIX)
+            ? persisted.controlDatasetId.slice(0, -CONTROL_DATASET_SUFFIX.length)
+            : persisted.datasetId,
+        ),
+        ownerEmail: refreshed.ownerEmail,
+        role: "owner",
+        participantEmails,
+        ...(persisted.datasetGrants
+          ? {
+              datasetGrants: Object.fromEntries(
+                grantedParts(persisted).map((part) => [part, "owner"]),
+              ) as DatasetGrants,
+            }
+          : {}),
+      };
+      const next = await rebaseProfileRecord(refreshed, matched.key, nextProfile);
+      await idbDelete(pendingKey);
+      return {
+        state: next,
+        profileKey: profileKey(nextProfile.ownerEmail, nextProfile.datasetId),
+      };
+    } finally {
+      scoped.identityProvider.clear();
+      disposeRuntime();
+    }
+  });
+}
 
 /** The per-part encrypted files this device knows for a split profile. */
 function splitProfileFiles(

@@ -145,12 +145,15 @@ class MainActivity : ComponentActivity() {
         val url = data.toString()
         val isResponseLink = data.getQueryParameter("sk-resp") == "1"
         val isJoinLink = data.getQueryParameter("sk-inv") != null
-        if (isResponseLink || isJoinLink) {
+        val isOwnershipTransfer = data.getQueryParameter(
+            com.easybc.planner.sync.shared.OWNERSHIP_TRANSFER_PARAM,
+        ) != null
+        if (isResponseLink || isJoinLink || isOwnershipTransfer) {
             // The link flow owns the auth UI from this moment; startup and
             // foreground auto-sync defer until it completes or is cleared.
             com.easybc.planner.sync.InteractiveAuthGate.deepLinkFlowStarted()
         }
-        if (!isResponseLink && !isJoinLink) {
+        if (!isResponseLink && !isJoinLink && !isOwnershipTransfer) {
             // Legacy exchange-file join link: leave to the Settings paste flow.
             if (parseSharedJoinLink(data) != null) {
                 com.easybc.planner.sync.shared.PendingSharedJoin.setJoinLink(this, url)
@@ -162,7 +165,15 @@ class MainActivity : ComponentActivity() {
             }
             return
         }
-        if (isResponseLink) {
+        if (isOwnershipTransfer) {
+            com.easybc.planner.sync.shared.PendingOwnershipTransferStore(this)
+                .setIncomingLink(url)
+            Toast.makeText(
+                this,
+                "Ownership offer ready — review it in Settings → Profiles.",
+                Toast.LENGTH_LONG,
+            ).show()
+        } else if (isResponseLink) {
             com.easybc.planner.sync.shared.PendingSharedJoin.setResponseToAccept(this, url)
             Toast.makeText(
                 this,
@@ -201,6 +212,7 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return false
         return data.getQueryParameter("sk-inv") != null ||
             data.getQueryParameter("sk-resp") == "1" ||
+            data.getQueryParameter(com.easybc.planner.sync.shared.OWNERSHIP_TRANSFER_PARAM) != null ||
             parseSharedJoinLink(data) != null
     }
 

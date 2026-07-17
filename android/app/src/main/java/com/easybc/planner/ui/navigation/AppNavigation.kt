@@ -31,6 +31,7 @@ import com.easybc.planner.ui.planner.PlannerScreen
 import com.easybc.planner.ui.reconcile.ReconcileScreen
 import com.easybc.planner.ui.settings.AboutScreen
 import com.easybc.planner.ui.settings.AcceptResponseScreen
+import com.easybc.planner.ui.settings.AcceptOwnershipScreen
 import com.easybc.planner.ui.settings.BackupScreen
 import com.easybc.planner.ui.settings.DeviceCalendarScreen
 import com.easybc.planner.ui.settings.JoinProfileScreen
@@ -109,10 +110,16 @@ fun AppNavigation(
             // active profile: the pending exchange identifies its profile.
             val isResponse = com.easybc.planner.sync.shared.PendingSharedJoin
                 .responseToAccept(context) != null
+            val isOwnership = com.easybc.planner.sync.shared.PendingOwnershipTransferStore(context)
+                .incomingLink() != null
             navController.navigate(Screen.Settings.route) { launchSingleTop = true }
             navController.navigate("settings/profiles") { launchSingleTop = true }
             navController.navigate(
-                if (isResponse) "settings/accept" else "settings/join",
+                when {
+                    isOwnership -> "settings/ownership"
+                    isResponse -> "settings/accept"
+                    else -> "settings/join"
+                },
             ) { launchSingleTop = true }
             onSettingsDeepLinkConsumed()
         }
@@ -206,6 +213,9 @@ fun AppNavigation(
                     onOpenJoin = {
                         navController.navigate("settings/join") { launchSingleTop = true }
                     },
+                    onOpenOwnershipOffer = {
+                        navController.navigate("settings/ownership") { launchSingleTop = true }
+                    },
                     profileChip = profileChip,
                 )
             }
@@ -225,6 +235,12 @@ fun AppNavigation(
             }
             composable("settings/accept") {
                 AcceptResponseScreen(
+                    onDone = { navController.popBackStack() },
+                    profileChip = profileChip,
+                )
+            }
+            composable("settings/ownership") {
+                AcceptOwnershipScreen(
                     onDone = { navController.popBackStack() },
                     profileChip = profileChip,
                 )

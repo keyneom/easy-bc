@@ -71,6 +71,7 @@ fun ManageProfilesScreen(
     onBack: () -> Unit,
     onOpenProfile: (String) -> Unit,
     onOpenJoin: () -> Unit,
+    onOpenOwnershipOffer: () -> Unit = {},
     profileChip: @Composable () -> Unit = {},
     vm: SettingsViewModel = viewModel(),
 ) {
@@ -90,6 +91,11 @@ fun ManageProfilesScreen(
     var newProfileOpen by remember { mutableStateOf(false) }
     var newProfileName by remember { mutableStateOf("") }
     var confirmReset by remember { mutableStateOf(false) }
+
+    // Screens keep back-stack-scoped view models, so decisions made on pushed
+    // screens (accepting/declining an ownership offer) land in a different
+    // instance. Re-entering this screen re-reads the shared state.
+    androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshSharedState() }
 
     fun switchTo(key: String) {
         val state = sharedState ?: return
@@ -157,6 +163,19 @@ fun ManageProfilesScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+
+            // A parked ownership offer stays reachable here until the user
+            // accepts or declines it on the offer screen.
+            val incomingOwnershipOffer by vm.incomingOwnershipTransferLink.collectAsState()
+            if (incomingOwnershipOffer != null) {
+                EbBanner(
+                    tone = EbBannerTone.INFO,
+                    title = "Ownership offer waiting",
+                    text = "Someone wants to make you the owner of a shared profile.",
+                    actionLabel = "Review",
+                    onAction = onOpenOwnershipOffer,
+                )
+            }
 
             val state = sharedState
             state?.profiles?.forEach { profile ->

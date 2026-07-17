@@ -401,9 +401,9 @@ combined screen (Android `EncryptedSyncSection`, ~1,700 lines) is deleted.
   Picker (`web/src/sync/listPicker.ts`) — checkbox multi-select works on
   touch, replacing the one-file-per-visit grid flow.
 
-### sync-kit 0.2.1 security compatibility
+### sync-kit 0.3.0 security compatibility and ownership transfer
 
-- Web and Android are pinned to sync-kit `0.2.1`.
+- Web and Android are pinned to sync-kit `0.3.0`.
 - Existing encrypted datasets and protected identities do not need migration.
 - Pending join links created by sync-kit `0.2.0` or earlier must be recreated;
   both clients explain this when a recipient opens an older, unsigned-manifest
@@ -416,3 +416,41 @@ combined screen (Android `EncryptedSyncSection`, ~1,700 lines) is deleted.
   explicit Android reset-and-replace recovery path continues to delete through
   the authorized Drive transport so a user can recover from a cloud copy whose
   local protected identity can no longer be unlocked.
+- Owners can offer a fully enrolled participant ownership from their People
+  card. EasyBC transports one opaque signed proposal link; sync-kit verifies
+  the exact dataset-head manifest, obtains the recipient's countersignature,
+  and finalizes every dataset plus the Drive app/exchange folders. The former
+  owner becomes an admin.
+- Recipient clients persist the countersigned artifact before finalization, so
+  an interrupted transfer resumes safely. EasyBC refreshes its cached owner
+  label and local role from the authenticated ACL after sync; a stable
+  `controlProfileId` keeps the existing control ledger valid when owner email
+  (and therefore the display/profile key) changes.
+
+### §11 addendum — ownership transfer polish (2026-07-20)
+
+Why transfers use a link at all: sync-kit 0.3.0's transfer is a dual-proof
+handshake (owner signs a proposal over every dataset + Drive permission ids;
+recipient countersigns and finalizes on their own device — Drive's consumer
+`pendingOwner` flow requires the recipient's account to accept). The signed
+proposal artifact must reach the recipient's device, and 0.3.0 offers no
+in-band channel for it (control-ledger events cover members/migrations only;
+exchange files cover invitations/replies only), so the link carries it and
+doubles as the notification. The reply direction needs no link: the former
+owner reconciles roles from the authenticated ACL. A linkless in-app offer
+(control-ledger event) is filed as a sync-kit follow-up.
+
+UX rules encoded now:
+- Transfer lives inside a person's expanded "Manage access" panel (never at
+  card level); requires the recipient to hold every section; hidden while a
+  transfer to them is already pending (card shows "transfer pending" instead).
+- The offer screen names the profile and current owner (registry match by the
+  proposal's exact dataset set), warns when the profile isn't on this device
+  ("join first"), and has an explicit Decline with confirm. Back/gesture-back
+  parks the offer (auth gate released, offer kept) and Profiles shows an
+  "Ownership offer waiting — Review" banner; link-driven screens (join,
+  accept-response) release the gate the same way on exit.
+- The owner's transfer link persists on both platforms (encrypted prefs /
+  IndexedDB) with copy · share · Discard; copy warns that Google Drive's own
+  transfer email doesn't finish the switch and that discarding the link
+  doesn't cancel the pending Drive transfer.

@@ -74,6 +74,15 @@ object PendingSharedJoin {
     fun grantCompleted(context: Context): Boolean =
         prefs(context).getString(GRANT_COMPLETED, null) == "1"
 
+    /**
+     * The user left a link-driven screen without finishing: release the auth
+     * gate so background sync resumes, but keep the stored link — it stays
+     * available to the paste/prefill flows until completed or cleared.
+     */
+    fun parkFlow() {
+        com.easybc.planner.sync.InteractiveAuthGate.deepLinkFlowFinished()
+    }
+
     private fun put(context: Context, key: String, value: String?) {
         val edit = prefs(context).edit()
         if (value.isNullOrBlank()) edit.remove(key) else edit.putString(key, value)

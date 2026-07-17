@@ -69,6 +69,20 @@ class SharedSyncRegistry(private val db: AppDatabase) {
         return next
     }
 
+    suspend fun replaceProfile(oldKey: String, profile: ProfileRecord): SharedSyncState {
+        val state = load() ?: error("Shared sync is not configured on this device.")
+        val newKey = profileKey(profile.ownerEmail, profile.datasetId)
+        val next = state.copy(
+            activeProfileKey = if (state.activeProfileKey == oldKey) newKey else state.activeProfileKey,
+            profiles = state.profiles.filter {
+                profileKey(it.ownerEmail, it.datasetId) != oldKey
+            } + profile,
+        )
+        save(next)
+        clearCheckpoint()
+        return next
+    }
+
     suspend fun setActiveProfile(profileKeyValue: String): SharedSyncState {
         val state = load() ?: error("Shared sync is not configured on this device.")
         require(state.profiles.any { profileKey(it.ownerEmail, it.datasetId) == profileKeyValue }) {

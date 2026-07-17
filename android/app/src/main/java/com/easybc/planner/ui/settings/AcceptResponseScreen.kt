@@ -62,13 +62,22 @@ fun AcceptResponseScreen(
         }
     }
 
+    // Leaving mid-flow keeps the reply link (still reachable from the
+    // profile's "Finish a share you sent") but frees the auth gate so
+    // background sync doesn't wait on an abandoned screen.
+    fun leave() {
+        PendingSharedJoin.parkFlow()
+        onDone()
+    }
+    androidx.activity.compose.BackHandler { leave() }
+
     Scaffold(
         contentWindowInsets = WindowInsets(0.dp),
         topBar = {
             TopAppBar(
                 title = { Text("Finish sharing") },
                 navigationIcon = {
-                    IconButton(onClick = onDone) {
+                    IconButton(onClick = { leave() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                     }
                 },

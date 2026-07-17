@@ -42,6 +42,8 @@ export type ProfileRecord = {
   avatarUpdatedAt?: string;
   /** Protocol-owned coordination ledger for membership and migrations. */
   controlDatasetId?: string;
+  /** Stable control-ledger profile id; owner email may change after a transfer. */
+  controlProfileId?: string;
   controlEnrollment?: "none" | "pending" | "enrolled";
   appFolderId?: string;
   role: SharingRole;
