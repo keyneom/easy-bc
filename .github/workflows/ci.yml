@@ -37,7 +37,7 @@ jobs:
           cargo build -p planner-core --target wasm32-unknown-unknown --features wasm --release
 
       - name: Node parity smoke
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: compare narrative (JS vs Rust)
@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Verify Gradle wrapper integrity
         run: bash scripts/verify-gradle-wrapper.sh
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
@@ -85,7 +85,7 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.117 --locked
           cd web
           npm run build:wasm
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - name: Install dependencies
