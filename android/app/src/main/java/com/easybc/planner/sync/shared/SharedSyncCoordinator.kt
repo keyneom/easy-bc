@@ -16,6 +16,7 @@ import com.keyneom.synckit.sharing.InviteParticipantInput
 import com.keyneom.synckit.sharing.SharedBackupController
 import com.keyneom.synckit.sharing.SharedBackupControllerCodec
 import com.keyneom.synckit.sharing.SharingCrypto
+import com.keyneom.synckit.sharing.sharedDatasetMutator
 import com.keyneom.synckit.sharing.SharingCryptoOptions
 import com.keyneom.synckit.sharing.SharingDatasetGrantV1
 import com.keyneom.synckit.sharing.SharingJoinParamStyle
@@ -313,7 +314,7 @@ class SharedSyncCoordinator(
                     val loaded = syncProfileDatasetGroup(
                         controller,
                         profile,
-                        emptySharedPayload(),
+                        snapshotPayloadAccess(emptySharedPayload()),
                         loadOnly = true,
                     )
                     val refreshed = registry.load() ?: state
@@ -499,14 +500,14 @@ class SharedSyncCoordinator(
                     val grouped = syncProfileDatasetGroup(
                         controller,
                         connectedProfile.copy(datasetGrants = OWNER_DATASET_GRANTS),
-                        local,
+                        snapshotPayloadAccess(local),
                         loadOnly = false,
                     )
                     appliedPayload = grouped.payload
                     createdFileId = grouped.fileId
                     createdRevisionId = grouped.revisionId
                 } else {
-                    val synced = controller.syncDataset(connectedProfile.datasetId, local)
+                    val synced = controller.syncDataset(connectedProfile.datasetId, snapshotMutator(local))
                     appliedPayload = synced.value
                     createdFileId = synced.fileId
                     createdRevisionId = synced.revisionId
@@ -651,7 +652,7 @@ class SharedSyncCoordinator(
                 val loaded = syncProfileDatasetGroup(
                     controller,
                     profile,
-                    emptySharedPayload(),
+                    snapshotPayloadAccess(emptySharedPayload()),
                     loadOnly = true,
                 )
                 val refreshed = registry.load() ?: provisional
@@ -699,16 +700,18 @@ class SharedSyncCoordinator(
             profile = reconciled.profile
             freeze = reconciled.freeze
         }
-        val local = sharedPayload(store.localPayload()).withProfileMetadata(profile)
+        val loadOnly = freeze || shouldLoadRemoteBeforePublish(profile)
         val result = syncProfileDatasetGroup(
             controller,
             profile,
-            local,
-            loadOnly = freeze || shouldLoadRemoteBeforePublish(profile),
+            storePayloadAccess(profile),
+            loadOnly = loadOnly,
         )
-        store.apply(result.payload.withLocalAndroidPreferences(store.localPayload()))
+        // A load-only turn never reaches the mutator, so it commits here; a
+        // publishing turn already committed through storePayloadAccess.
+        val applied = if (loadOnly) store.applyMerged(result.payload) else result.payload
         val syncedAt = java.time.Instant.now().toString()
-        val nextProfile = refreshedProfile(profile).withMetadataFrom(result.payload).copy(
+        val nextProfile = refreshedProfile(profile).withMetadataFrom(applied).copy(
             fileId = result.fileId,
             lastRevisionId = result.revisionId,
             lastSyncedAt = syncedAt,
@@ -1280,7 +1283,7 @@ class SharedSyncCoordinator(
         // When the base file is already gone we are resuming an interrupted
         // upgrade and the local store is the source of truth.
         val payload = if (hasBase) {
-            controller.syncDataset(profile.datasetId, local).value
+            controller.syncDataset(profile.datasetId, snapshotMutator(local)).value
         } else {
             local
         }
@@ -1295,9 +1298,9 @@ class SharedSyncCoordinator(
             profile.datasetId,
             projectDatasetPart(payload, PART_PLAN),
         )
-        store.apply(payload.withLocalAndroidPreferences(store.localPayload()))
+        val applied = store.applyMerged(payload)
         val syncedAt = java.time.Instant.now().toString()
-        val nextProfile = refreshedProfile(profile).withMetadataFrom(payload).copy(
+        val nextProfile = refreshedProfile(profile).withMetadataFrom(applied).copy(
             datasetGrants = OWNER_DATASET_GRANTS,
             fileId = created.fileId,
             lastRevisionId = created.revisionId,
@@ -1377,7 +1380,7 @@ class SharedSyncCoordinator(
 
         // Final publish of the source — the last write before the freeze.
         val local = sharedPayload(store.localPayload()).withProfileMetadata(profile)
-        val payload = controller.syncDataset(profile.datasetId, local).value
+        val payload = controller.syncDataset(profile.datasetId, snapshotMutator(local)).value
 
         // The control dataset is the coordination channel; make sure it
         // exists and every participant can write to it (acks are signed).
@@ -1486,7 +1489,7 @@ class SharedSyncCoordinator(
             openMigrationId = migrationId,
         )
         val next = rebaseProfileRecord(profileKey(profile.ownerEmail, profile.datasetId), rebased)
-        store.apply(payload.withLocalAndroidPreferences(store.localPayload()))
+        store.applyMerged(payload)
         baseHead?.fileId?.let { store.rememberSync(it, rebased.lastSyncedAt!!) }
         return next
     }
@@ -1548,7 +1551,7 @@ class SharedSyncCoordinator(
         val loaded = syncProfileDatasetGroup(
             freshController,
             fresh,
-            sharedPayload(store.localPayload()),
+            snapshotPayloadAccess(sharedPayload(store.localPayload())),
             loadOnly = true,
         )
         store.apply(loaded.payload.withLocalAndroidPreferences(store.localPayload()))
@@ -2208,7 +2211,7 @@ class SharedSyncCoordinator(
         val loaded = syncProfileDatasetGroup(
             controller,
             profile,
-            emptySharedPayload(),
+            snapshotPayloadAccess(emptySharedPayload()),
             loadOnly = true,
         )
         store.apply(loaded.payload.withLocalAndroidPreferences(store.localPayload()))
@@ -2572,10 +2575,59 @@ class SharedSyncCoordinator(
     /* ---- Multi-file dataset groups (docs/sync-kit-multi-file-datasets.md) ---- */
 
     private data class GroupResult(
+        /** What local state now holds. */
         val payload: SyncPayloadV1,
+        /**
+         * What was published. Equal to [payload] unless an edit landed during
+         * the round trip, in which case local is briefly ahead and the next
+         * sync publishes the difference.
+         */
+        val published: SyncPayloadV1,
         val fileId: String,
         val revisionId: String,
     )
+
+    /**
+     * Live access to the active profile's local payload.
+     *
+     * sync-kit calls [read] inside its serialized turn, immediately before the
+     * merge, so it must return the newest local state at that moment — a value
+     * captured at the call site can be arbitrarily stale by the time the sync
+     * runs. [commit] folds a merged value into live local state under the lock
+     * that guards local edits and returns what it stored. See sync-kit's
+     * docs/consumer-responsibilities.md, "The apply window".
+     */
+    private interface LocalPayloadAccess {
+        suspend fun read(): SyncPayloadV1
+
+        suspend fun commit(merged: SyncPayloadV1): SyncPayloadV1
+    }
+
+    /**
+     * Access for the one-shot flows — connect, split upgrade, migration repair,
+     * load-only reads — that publish a snapshot and let their caller replace
+     * local state wholesale. The UI is blocked on the operation, so there is
+     * nothing live to fold in; [commit] is the identity, which the subsumption
+     * guard accepts. The recurring sync path must never use this.
+     */
+    /** The same pass-through, for a dataset with no live local mirror. */
+    private fun <T> snapshotMutator(value: T) =
+        sharedDatasetMutator<T>(read = { value }, apply = { merged -> merged })
+
+    private fun snapshotPayloadAccess(local: SyncPayloadV1) = object : LocalPayloadAccess {
+        override suspend fun read(): SyncPayloadV1 = local
+
+        override suspend fun commit(merged: SyncPayloadV1): SyncPayloadV1 = merged
+    }
+
+    /** Live access backed by the Room store, for the profile that is active. */
+    private fun storePayloadAccess(profile: ProfileRecord) = object : LocalPayloadAccess {
+        override suspend fun read(): SyncPayloadV1 =
+            sharedPayload(store.localPayload()).withProfileMetadata(profile)
+
+        override suspend fun commit(merged: SyncPayloadV1): SyncPayloadV1 =
+            sharedPayload(store.applyMerged(merged))
+    }
 
     /**
      * Sync or load every dataset file this device is granted and reassemble
@@ -2621,33 +2673,63 @@ class SharedSyncCoordinator(
     private suspend fun syncProfileDatasetGroup(
         controller: SharedBackupController<SyncPayloadV1>,
         profile: ProfileRecord,
-        local: SyncPayloadV1,
+        access: LocalPayloadAccess,
         loadOnly: Boolean,
     ): GroupResult {
         if (!isSplitProfile(profile)) {
             val upgraded = maybeAdoptSplitLayout(controller, profile)
             if (upgraded != null) {
-                return syncProfileDatasetGroup(controller, upgraded, local, loadOnly)
+                return syncProfileDatasetGroup(controller, upgraded, access, loadOnly)
             }
+            var published: SyncPayloadV1? = null
             val result = if (loadOnly) {
                 controller.loadDataset(profile.datasetId)
             } else {
-                controller.syncDataset(profile.datasetId, local)
+                controller.syncDataset(
+                    profile.datasetId,
+                    sharedDatasetMutator(
+                        read = { access.read() },
+                        apply = { merged ->
+                            published = merged
+                            access.commit(merged)
+                        },
+                    ),
+                )
             }
-            return GroupResult(result.value, result.fileId, result.revisionId)
+            return GroupResult(
+                payload = result.value,
+                published = published ?: result.value,
+                fileId = result.fileId,
+                revisionId = result.revisionId,
+            )
         }
         val values = mutableMapOf<String, SyncPayloadV1>()
+        val publishedParts = mutableMapOf<String, SyncPayloadV1>()
         var baseFileId: String? = null
         var baseRevisionId: String? = null
         for (part in grantedParts(profile)) {
             val datasetId = datasetIdForPart(profile.datasetId, part)
             val writable = !loadOnly && partIsWritable(profile, part)
             val result = if (writable) {
-                controller.syncDataset(datasetId, projectDatasetPart(local, part))
+                controller.syncDataset(
+                    datasetId,
+                    // Parts are disjoint slices, so projecting live local per
+                    // part and folding each merged part straight back is
+                    // equivalent to combining first — and it keeps every later
+                    // part's read current.
+                    sharedDatasetMutator(
+                        read = { projectDatasetPart(access.read(), part) },
+                        apply = { merged ->
+                            publishedParts[part] = merged
+                            projectDatasetPart(access.commit(merged), part)
+                        },
+                    ),
+                )
             } else {
                 controller.loadDataset(datasetId)
             }
             values[part] = result.value
+            publishedParts.putIfAbsent(part, result.value)
             if (part == PART_PLAN || baseRevisionId == null) {
                 baseFileId = result.fileId
                 baseRevisionId = result.revisionId
@@ -2655,6 +2737,7 @@ class SharedSyncCoordinator(
         }
         return GroupResult(
             payload = combineDatasetParts(values),
+            published = combineDatasetParts(publishedParts),
             fileId = requireNotNull(baseFileId) {
                 "No dataset in this profile is accessible from this device."
             },
@@ -2846,7 +2929,7 @@ class SharedSyncCoordinator(
             val repair = runCatching {
                 repairLegacyControlSignature(raw, identityStore.getOrCreate())
             }.getOrNull() ?: throw original
-            repairController.syncDataset(datasetId, repair.state)
+            repairController.syncDataset(datasetId, snapshotMutator(repair.state))
             developerLog.append(
                 "migration",
                 "control-signature-repaired",

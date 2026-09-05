@@ -50,6 +50,7 @@ import {
   closeSplitMigration,
   splitMigrationStatusForActive,
   syncActiveDataset,
+  type LocalPayloadAccess,
   upgradeActiveProfileToSplit,
   updateParticipantDatasetRole,
   type SplitMigrationGrantChoices,
@@ -104,6 +105,13 @@ type Props = {
   session: PersistedSession;
   sharedSyncState: SharedSyncState | null;
   onApplyPayload: (payload: SyncPayloadV1) => Promise<void>;
+  /**
+   * Live read/commit hooks for the active profile, handed straight to
+   * sync-kit. `commit` re-merges against live local state, so an edit made
+   * during the round trip is not overwritten. Setup, join, reset and migration
+   * keep using onApplyPayload: those replace local state on purpose.
+   */
+  localPayloadAccess: LocalPayloadAccess;
   onSharedSyncStateChange: (state: SharedSyncState | null) => void;
   onSyncComplete?: (payload: SyncPayloadV1 | null) => void;
   /**
@@ -174,6 +182,7 @@ export function SyncSettings({
   session,
   sharedSyncState,
   onApplyPayload,
+  localPayloadAccess,
   onSharedSyncStateChange,
   onSyncComplete,
   view = "detail",
@@ -335,9 +344,12 @@ export function SyncSettings({
     setBusy("sync");
     setNotice({ kind: "info", message: "Merging encrypted changes…" });
     try {
-      const result = await syncActiveDataset(config, localShared());
-      await applyShared(result.payload);
-      onSyncComplete?.(sharedPayloadToSyncPayload(result.payload, session.androidPreferences));
+      // sync-kit commits through localPayloadAccess, so local state is
+      // already up to date here — no apply of the returned value.
+      const result = await syncActiveDataset(config, localPayloadAccess);
+      // The published payload, not the committed one — a local edit that
+      // survived the reconcile must still look unpublished to the watcher.
+      onSyncComplete?.(sharedPayloadToSyncPayload(result.published, session.androidPreferences));
       setNotice({ kind: "success", message: `Encrypted sync updated ${formatLastSync(result.syncedAt)}.` });
     } catch (error) {
       setNotice({ kind: "error", message: error instanceof Error ? error.message : String(error) });

@@ -82,7 +82,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
 
     // Encrypted snapshot sync (crypto, Drive appData store, passkey PRF, controller).
-    implementation("com.keyneom:sync-kit-android:0.3.0")
+    implementation("com.keyneom:sync-kit-android:0.4.1")
 
     // User-consented OAuth access to Drive (appData + shared drive.file).
     implementation("com.google.android.gms:play-services-auth:21.6.0")

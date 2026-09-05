@@ -31,6 +31,7 @@ import {
   createSharedBackupController,
   type SharedBackupController,
   type SharedBackupControllerCodec,
+  type SharedDatasetMutator,
 } from "@keyneom/sync-kit/sharing/controller";
 import { verifySharingInvitationV1 } from "@keyneom/sync-kit/sharing/web-crypto";
 import {
@@ -129,11 +130,52 @@ export type SharedSyncConfig = {
 };
 
 export type SharedSyncRunResult = {
+  /** What local state now holds — the merge folded into live local. */
   payload: SharedSyncPayloadV1;
+  /**
+   * What was published to Drive. Equal to {@link payload} unless an edit
+   * landed during the round trip, in which case local is briefly ahead and the
+   * next sync publishes the difference. Fingerprint bookkeeping must use this,
+   * not `payload`, or a surviving edit looks already-published and never goes up.
+   */
+  published: SharedSyncPayloadV1;
   syncedAt: string;
   revisionId: string;
   profileKey: string;
 };
+
+/**
+ * Live access to the active profile's local payload.
+ *
+ * sync-kit calls `read` inside its serialized turn, immediately before the
+ * merge, so it must return the newest local state at that moment — a value
+ * captured at the call site can be arbitrarily stale by the time the sync runs.
+ * `commit` folds a merged value into live local state under whatever guards
+ * local edits, and returns what it stored. See sync-kit's
+ * docs/consumer-responsibilities.md, "The apply window".
+ */
+export type LocalPayloadAccess = {
+  read(): SharedSyncPayloadV1;
+  commit(merged: SharedSyncPayloadV1): Promise<SharedSyncPayloadV1>;
+};
+
+/**
+ * Access for the one-shot flows — setup, connect, split upgrade, migration
+ * repair — that publish a snapshot and let their caller replace local state
+ * wholesale. The UI is blocked on the operation, so there is nothing live to
+ * fold in; `commit` is the identity, which the subsumption guard accepts.
+ * The recurring sync path must never use this.
+ */
+export function snapshotPayloadAccess(
+  local: SharedSyncPayloadV1,
+): LocalPayloadAccess {
+  return { read: () => local, commit: async (merged) => merged };
+}
+
+/** The same pass-through, for a dataset with no local mirror. */
+function snapshotMutator<T>(value: T): SharedDatasetMutator<T> {
+  return { read: () => value, apply: (merged) => merged };
+}
 
 type Runtime = {
   config: SharedSyncConfig;
@@ -449,7 +491,7 @@ async function recoverAdditionalOwnedProfiles(
       const loaded = await syncProfileDatasetGroup(
         controller,
         profile,
-        createEmptySharedSyncPayload(),
+        snapshotPayloadAccess(createEmptySharedSyncPayload()),
         "load",
       );
       const refreshed = (await loadSharedSyncState()) ?? provisional;
@@ -791,7 +833,7 @@ export async function discoverAvailableProfiles(
           const loaded = await syncProfileDatasetGroup(
             controller,
             profile,
-            createEmptySharedSyncPayload(),
+            snapshotPayloadAccess(createEmptySharedSyncPayload()),
             "load",
           );
           const refreshed = (await loadSharedSyncState()) ?? state;
@@ -1025,7 +1067,7 @@ async function readControlWithLegacyRepair(
       identityProvider,
       authorizationProvider,
       createLegacyControlRepairCodec(repair),
-    ).syncDataset(profile.controlDatasetId, repair.state);
+    ).syncDataset(profile.controlDatasetId, snapshotMutator(repair.state));
     void appendDeveloperLog("migration", "control-signature-repaired", {
       eventId: repair.eventId,
       repair: "rc15-target-order",
@@ -1209,6 +1251,15 @@ async function reconcileProfileAuthority(
   return next;
 }
 
+type DatasetGroupResult = {
+  /** What local state now holds. */
+  payload: SharedSyncPayloadV1;
+  /** What was published; local may be ahead of it. */
+  published: SharedSyncPayloadV1;
+  fileId: string;
+  revisionId: string;
+};
+
 /**
  * Sync or load every dataset file this device is granted, and reassemble the
  * app payload from the parts. Legacy single-file profiles pass straight
@@ -1219,19 +1270,26 @@ async function reconcileProfileAuthority(
 async function syncProfileDatasetGroup(
   controller: EasyBcController,
   profile: ProfileRecord,
-  local: SharedSyncPayloadV1,
+  access: LocalPayloadAccess,
   mode: "sync" | "load",
-): Promise<{ payload: SharedSyncPayloadV1; fileId: string; revisionId: string }> {
+): Promise<DatasetGroupResult> {
   if (!isSplitProfile(profile)) {
     const upgraded = await maybeAdoptSplitLayout(controller, profile);
     if (upgraded) {
       profile = upgraded;
     } else {
       let result;
+      let published: SharedSyncPayloadV1 | null = null;
       try {
         result = mode === "load"
           ? await controller.loadDataset(profile.datasetId)
-          : await controller.syncDataset(profile.datasetId, local);
+          : await controller.syncDataset(profile.datasetId, {
+              read: () => access.read(),
+              apply: (merged) => {
+                published = merged as SharedSyncPayloadV1;
+                return access.commit(merged as SharedSyncPayloadV1);
+              },
+            });
       } catch (error) {
         throw wrapProfileDatasetError(error, {
           baseDatasetId: profile.datasetId,
@@ -1240,14 +1298,17 @@ async function syncProfileDatasetGroup(
           stage: mode,
         });
       }
+      const payload = result.value as SharedSyncPayloadV1;
       return {
-        payload: result.value as SharedSyncPayloadV1,
+        payload,
+        published: published ?? payload,
         fileId: result.fileId,
         revisionId: result.revisionId,
       };
     }
   }
   const values: Partial<Record<DatasetPart, SharedSyncPayloadV1>> = {};
+  const publishedParts: Partial<Record<DatasetPart, SharedSyncPayloadV1>> = {};
   // Prefer the base (plan) file's head for the profile record; a partial
   // grant without the plan part falls back to the first granted file so the
   // result always carries a revision id.
@@ -1258,7 +1319,17 @@ async function syncProfileDatasetGroup(
     let result;
     try {
       result = writable
-        ? await controller.syncDataset(datasetId, projectDatasetPart(local, part))
+        ? await controller.syncDataset(datasetId, {
+            // Parts are disjoint slices, so projecting live local per part and
+            // folding each merged part straight back is equivalent to
+            // combining first — and it keeps every later part's read current.
+            read: () => projectDatasetPart(access.read(), part),
+            apply: async (merged) => {
+              publishedParts[part] = merged as SharedSyncPayloadV1;
+              const committed = await access.commit(merged as SharedSyncPayloadV1);
+              return projectDatasetPart(committed, part);
+            },
+          })
         : await controller.loadDataset(datasetId);
     } catch (error) {
       throw wrapProfileDatasetError(error, {
@@ -1269,6 +1340,7 @@ async function syncProfileDatasetGroup(
       });
     }
     values[part] = result.value as SharedSyncPayloadV1;
+    publishedParts[part] ??= values[part];
     if (part === "plan" || baseInfo.revisionId === undefined) {
       baseInfo = { fileId: result.fileId, revisionId: result.revisionId };
     }
@@ -1278,6 +1350,7 @@ async function syncProfileDatasetGroup(
   }
   return {
     payload: combineDatasetParts(values),
+    published: combineDatasetParts(publishedParts),
     fileId: baseInfo.fileId,
     revisionId: baseInfo.revisionId,
   };
@@ -1435,6 +1508,7 @@ export async function resetSharedSync(
         state: nextState,
         result: {
           payload: local,
+          published: local,
           syncedAt,
           revisionId: created.revisionId,
           profileKey: state.activeProfileKey,
@@ -1659,13 +1733,13 @@ export async function setupSharedSync(
           const synced = await syncProfileDatasetGroup(
             controller,
             recoveredPrimary,
-            local,
+            snapshotPayloadAccess(local),
             "sync",
           );
           created = { fileId: synced.fileId, revisionId: synced.revisionId };
           createdPayload = synced.payload;
         } else {
-          const synced = await controller.syncDataset(connectedProfile.datasetId, local);
+          const synced = await controller.syncDataset(connectedProfile.datasetId, snapshotMutator(local));
           created = { fileId: synced.fileId, revisionId: synced.revisionId };
           createdPayload = synced.value as SharedSyncPayloadV1;
         }
@@ -1745,6 +1819,7 @@ export async function setupSharedSync(
         state: recoveredState,
         result: {
           payload: createdPayload,
+          published: createdPayload,
           syncedAt: new Date().toISOString(),
           revisionId: created.revisionId,
           profileKey: recoveredState.activeProfileKey,
@@ -1766,18 +1841,18 @@ export async function setupSharedSync(
 
 export async function syncActiveDataset(
   config: SharedSyncConfig,
-  local: SharedSyncPayloadV1,
+  access: LocalPayloadAccess,
 ): Promise<SharedSyncRunResult> {
-  return serialized(() => syncActiveDatasetInternal(config, local, true));
+  return serialized(() => syncActiveDatasetInternal(config, access, true));
 }
 
 async function syncActiveDatasetInternal(
   config: SharedSyncConfig,
-  local: SharedSyncPayloadV1,
+  access: LocalPayloadAccess,
   allowMigrationReconcile: boolean,
 ): Promise<SharedSyncRunResult> {
   {
-    const active = await ensureRuntime(config, local);
+    const active = await ensureRuntime(config, access.read());
     let profile = profileForActive(active.state);
     if (isLocalProfile(profile)) {
       throw new Error("This profile is local only. Connect encrypted sync before syncing it.");
@@ -1791,7 +1866,7 @@ async function syncActiveDatasetInternal(
       ) {
         // The record was rebased onto a new generation; the runtime was
         // disposed, so rebuild against the fresh state and sync once more.
-        return syncActiveDatasetInternal(config, local, false);
+        return syncActiveDatasetInternal(config, access, false);
       }
       profile = reconciled.profile;
       freeze = reconciled.freeze;
@@ -1799,7 +1874,7 @@ async function syncActiveDatasetInternal(
     const result = await syncProfileDatasetGroup(
       active.controller,
       profile,
-      local,
+      access,
       freeze || shouldLoadRemoteBeforePublish(profile) ? "load" : "sync",
     );
     // Pick up companion registry records the controller persisted mid-sync.
@@ -1844,6 +1919,7 @@ async function syncActiveDatasetInternal(
     active.state = nextState;
     return {
       payload: result.payload,
+      published: result.published,
       syncedAt: updatedProfile.lastSyncedAt ?? new Date().toISOString(),
       revisionId: result.revisionId,
       profileKey: nextState.activeProfileKey,
@@ -1865,7 +1941,7 @@ export async function loadActiveProfileDataset(
     const loaded = await syncProfileDatasetGroup(
       active.controller,
       profile,
-      createEmptySharedSyncPayload(),
+      snapshotPayloadAccess(createEmptySharedSyncPayload()),
       "load",
     );
     const refreshed = (await refreshCachedState()) ?? state;
@@ -1881,6 +1957,7 @@ export async function loadActiveProfileDataset(
     await saveSharedSyncState(nextState);
     return {
       payload: loaded.payload,
+      published: loaded.published,
       syncedAt: updatedProfile.lastSyncedAt ?? new Date().toISOString(),
       revisionId: loaded.revisionId,
       profileKey: nextState.activeProfileKey,
@@ -1930,7 +2007,12 @@ async function preserveCurrentProfile(
     local,
   );
   try {
-    await syncProfileDatasetGroup(currentRuntime.controller, current, local, "sync");
+    await syncProfileDatasetGroup(
+      currentRuntime.controller,
+      current,
+      snapshotPayloadAccess(local),
+      "sync",
+    );
     return (await refreshCachedState()) ?? state;
   } finally {
     currentRuntime.identityProvider.clear();
@@ -1978,7 +2060,7 @@ export async function switchManagedProfile(
       const loaded = await syncProfileDatasetGroup(
         targetRuntime.controller,
         target,
-        createEmptySharedSyncPayload(),
+        snapshotPayloadAccess(createEmptySharedSyncPayload()),
         "load",
       );
       const refreshedAfterLoad = (await refreshCachedState()) ?? state;
@@ -2058,7 +2140,8 @@ export async function upgradeActiveProfileToSplit(
     // the base file is already gone we are resuming an interrupted upgrade
     // and the local store is the source of truth.
     const payload = hasBase
-      ? ((await controller.syncDataset(profile.datasetId, local)).value as SharedSyncPayloadV1)
+      ? ((await controller.syncDataset(profile.datasetId, snapshotMutator(local)))
+          .value as SharedSyncPayloadV1)
       : local;
     for (const part of DATASET_PARTS) {
       if (part === "plan") continue;
@@ -2187,7 +2270,7 @@ export async function beginSplitMigration(
     }
 
     // Final publish of the source — the last write before the freeze.
-    const synced = await controller.syncDataset(profile.datasetId, local);
+    const synced = await controller.syncDataset(profile.datasetId, snapshotMutator(local));
     const payload = synced.value as SharedSyncPayloadV1;
 
     // The control dataset is the coordination channel; make sure it exists
@@ -2421,7 +2504,7 @@ export async function acknowledgeSplitMigration(
       const loaded = await syncProfileDatasetGroup(
         loadRuntime.controller,
         target,
-        createEmptySharedSyncPayload(),
+        snapshotPayloadAccess(createEmptySharedSyncPayload()),
         "load",
       );
       const after = (await refreshCachedState()) ?? nextState;
@@ -3583,6 +3666,7 @@ export async function createOwnedProfile(
         state: nextState,
         result: {
           payload: emptyPayload,
+          published: emptyPayload,
           syncedAt,
           revisionId: created.revisionId,
           profileKey: profileKeyValue,
@@ -3681,6 +3765,7 @@ export async function connectActiveLocalProfile(
         state: next,
         result: {
           payload: local,
+          published: local,
           syncedAt,
           revisionId: created.revisionId,
           profileKey: connectedKey,
@@ -3872,7 +3957,7 @@ export async function submitJoinFromLink(
           await syncProfileDatasetGroup(
             preservationRuntime.controller,
             currentProfile,
-            input.local,
+            snapshotPayloadAccess(input.local),
             "sync",
           );
           previousState = (await refreshCachedState()) ?? previousState;

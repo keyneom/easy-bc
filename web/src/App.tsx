@@ -93,6 +93,7 @@ import {
   restrictedParts,
   sharedPayloadFingerprint,
   sharedPayloadToSyncPayload,
+  type SharedSyncPayloadV1,
   type SharedSyncState,
 } from "./sync/sharedTypes";
 import {
@@ -119,6 +120,8 @@ import {
   disposeSensitiveSyncSession,
 } from "./sync/sharedSync";
 import { profileKey } from "./sync/sharedFolderName";
+import type { LocalPayloadAccess } from "./sync/sharedSync";
+import { reconcileSyncResult } from "./sync/reconcileSyncResult";
 import {
   ProfileChipSwitcher,
   type SwitcherProfileRow,
@@ -1124,7 +1127,16 @@ export default function App() {
     return () => window.clearTimeout(h);
   }, [storageReady, opts]);
 
+  // The latest committed session, readable from async callbacks. A `session`
+  // captured in a closure is the value from the render that created it, which
+  // goes stale for the whole length of a sync round trip.
+  const sessionRef = useRef(session);
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
   const applySyncedPayload = useCallback(async (payload: SyncPayloadV1) => {
+    const session = sessionRef.current;
     const nextOptions: WasmOptions = {
       ...defaultOptions(),
       ...payload.planner.value,
@@ -1166,7 +1178,27 @@ export default function App() {
       });
       setSharedSyncState(next);
     }
-  }, [session, sharedSyncState]);
+    // Reflect the commit in the ref immediately. A split profile reads and
+    // commits once per dataset part inside a single serialized turn, and the
+    // effect that refreshes this ref does not run until React re-renders — so
+    // a later part would otherwise read pre-commit state and roll back the
+    // parts already applied. The effect writes the same values afterwards.
+    latestSyncInputsRef.current = {
+      options: nextOptions,
+      periodRecords: payload.periodRecords,
+      session: nextSession,
+      fingerprint: sharedPayloadFingerprint(
+        buildSharedSyncPayload(
+          nextOptions,
+          payload.periodRecords,
+          nextSession,
+          sharedSyncState
+            ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
+            : null,
+        ),
+      ),
+    };
+  }, [sharedSyncState]);
 
   const localSyncFingerprint = useMemo(
     () =>
@@ -1204,6 +1236,61 @@ export default function App() {
       ? sharedPayloadFingerprint(extractSharedPayload(payload))
       : "";
   }, []);
+
+  /**
+   * Apply a sync result for the *active* profile without losing edits made
+   * while the round trip was in flight.
+   *
+   * The synced payload was merged from a local snapshot taken before the
+   * network call, so assigning it directly overwrites anything the user
+   * changed in the seconds since — silently, and on both sides, because the
+   * next sync then compares the clobbered value and finds nothing to publish.
+   * Re-merging against live local closes that window: the merge is per-field
+   * last-write-wins and idempotent, so every field untouched during the round
+   * trip resolves back to the synced payload and only strictly newer local
+   * edits survive. Those survivors leave the local fingerprint diverging from
+   * the published one, which is exactly what schedules the follow-up publish.
+   *
+   * Only for same-profile results. Switching or joining a profile must replace
+   * local state, not merge the previous profile's data into it.
+   */
+  const readLivePayload = useCallback((): SharedSyncPayloadV1 => {
+    const { options: liveOptions, periodRecords: liveRecords, session: liveSession } =
+      latestSyncInputsRef.current;
+    return buildSharedSyncPayload(
+      liveOptions,
+      liveRecords,
+      liveSession,
+      sharedSyncState
+        ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
+        : null,
+    );
+  }, [sharedSyncState]);
+
+  const applySyncResult = useCallback(
+    async (payload: SharedSyncPayloadV1): Promise<SharedSyncPayloadV1> => {
+      const committed = reconcileSyncResult(payload, readLivePayload());
+      await applySyncedPayload(
+        sharedPayloadToSyncPayload(
+          committed,
+          latestSyncInputsRef.current.session.androidPreferences,
+        ),
+      );
+      return committed;
+    },
+    [applySyncedPayload, readLivePayload],
+  );
+
+  /**
+   * Handed to sync-kit for the active profile. `read` runs inside its
+   * serialized turn, so it must observe live state rather than a snapshot
+   * captured at the call site; `commit` folds the merge back in and returns
+   * what was stored, which sync-kit checks subsumes the merge.
+   */
+  const localPayloadAccess = useMemo<LocalPayloadAccess>(
+    () => ({ read: readLivePayload, commit: applySyncResult }),
+    [applySyncResult, readLivePayload],
+  );
 
   // Global profile chip + switcher (docs/settings-profiles-redesign.md §1).
   // Runs the same publish-before-switch routine as the sharing screen so
@@ -1472,9 +1559,7 @@ export default function App() {
       }
       if (!autoSyncTriggerRef.current.request(reason)) return;
 
-      const { options, periodRecords: records, session: currentSession, fingerprint } =
-        latestSyncInputsRef.current;
-      autoSyncFingerprintRef.current = fingerprint;
+      autoSyncFingerprintRef.current = latestSyncInputsRef.current.fingerprint;
       setAutoSyncNotice({
         kind: "info",
         message:
@@ -1488,19 +1573,13 @@ export default function App() {
       });
 
       try {
-        const local = buildSharedSyncPayload(
-          options,
-          records,
-          currentSession,
-          sharedSyncState
-            ? findProfile(sharedSyncState, sharedSyncState.activeProfileKey)
-            : null,
-        );
-        const result = await syncActiveDataset(sharedSyncConfig, local);
-        autoSyncFingerprintRef.current = sharedPayloadFingerprint(result.payload);
-        await applySyncedPayload(
-          sharedPayloadToSyncPayload(result.payload, currentSession.androidPreferences),
-        );
+        // sync-kit reads and commits through localPayloadAccess, so the merge
+        // is already folded into local state by the time this resolves.
+        const result = await syncActiveDataset(sharedSyncConfig, localPayloadAccess);
+        // The published fingerprint, not the committed one: if a local edit
+        // survived the reconcile, the two diverge and the change watcher
+        // schedules the follow-up publish that carries it.
+        autoSyncFingerprintRef.current = sharedPayloadFingerprint(result.published);
         const refreshed = await loadSharedSyncState();
         if (refreshed) setSharedSyncState(refreshed);
         setAutoSyncNotice({
@@ -1529,7 +1608,7 @@ export default function App() {
     },
     [
       activeEncryptedProfile,
-      applySyncedPayload,
+      localPayloadAccess,
       sharedSyncConfig,
       sharedSyncState,
       syncReadOnly,
@@ -3142,6 +3221,7 @@ export default function App() {
                   session={session}
                   sharedSyncState={sharedSyncState}
                   onApplyPayload={applySyncedPayload}
+                  localPayloadAccess={localPayloadAccess}
                   onSharedSyncStateChange={setSharedSyncState}
                   onSyncComplete={markSyncComplete}
                   view="detail"
@@ -3174,6 +3254,7 @@ export default function App() {
                 session={session}
                 sharedSyncState={sharedSyncState}
                 onApplyPayload={applySyncedPayload}
+                localPayloadAccess={localPayloadAccess}
                 onSharedSyncStateChange={setSharedSyncState}
                 onSyncComplete={markSyncComplete}
                 view="join"

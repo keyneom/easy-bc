@@ -15,6 +15,35 @@ import java.time.LocalDate
 interface SyncPayloadGateway {
     suspend fun localPayload(): SyncPayloadV1
     suspend fun apply(payload: SyncPayloadV1)
+
+    /**
+     * Apply a sync result without discarding edits written while the network
+     * round trip was in flight.
+     *
+     * `syncDataset` merges against a payload read before the call, so handing
+     * its result straight to [apply] deletes and reinserts every row from a
+     * value computed before those edits existed — silently, because the next
+     * sync then reads the clobbered rows and finds nothing left to publish.
+     * The payload merge is per-field last-write-wins with tombstones and is
+     * idempotent, so anything untouched during the round trip folds back to
+     * [payload] unchanged and only strictly newer local writes survive; the
+     * next sync publishes those.
+     *
+     * `payload` comes first so ties resolve to the published value, matching
+     * `EasyBcSharedCodec.merge`. Device-local Android preferences are never
+     * taken from the sync result.
+     *
+     * Only for a result belonging to the profile that is already active.
+     * Switching, joining or resetting a profile must replace local state.
+     */
+    suspend fun applyMerged(payload: SyncPayloadV1): SyncPayloadV1 {
+        val local = localPayload()
+        val merged = SyncMerge.merge(payload, local)
+            .copy(androidPreferences = local.androidPreferences)
+        apply(merged)
+        return merged
+    }
+
     suspend fun rememberSync(fileId: String, syncedAt: String)
     suspend fun forgetSync()
 }
@@ -195,6 +224,11 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
             ),
         )
     }
+
+    // One transaction around the read, the merge and the delete-and-reinsert,
+    // so no local write can land in between and be lost by apply().
+    override suspend fun applyMerged(payload: SyncPayloadV1): SyncPayloadV1 =
+        db.withTransaction { super.applyMerged(payload) }
 
     override suspend fun apply(payload: SyncPayloadV1) = db.withTransaction {
         val current = db.userSettingsDao().getSettings() ?: UserSettingsEntity()
