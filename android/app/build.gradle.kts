@@ -69,7 +69,7 @@ ksp {
     arg("room.generateKotlin", "true")
 }
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2026.06.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -85,7 +85,7 @@ dependencies {
     implementation("com.keyneom:sync-kit-android:0.4.1")
 
     // User-consented OAuth access to Drive (appData + shared drive.file).
-    implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
 
     // Encrypted storage for per-device sharing identity private keys.
     implementation("androidx.security:security-crypto:1.1.0")
@@ -95,7 +95,7 @@ dependencies {
     implementation("androidx.browser:browser:1.10.0")
 
     // Navigation
-    implementation("androidx.navigation:navigation-compose:2.9.8")
+    implementation("androidx.navigation:navigation-compose:2.10.0")
 
     // Lifecycle / ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
