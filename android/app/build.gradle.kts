@@ -85,7 +85,7 @@ dependencies {
     implementation("com.keyneom:sync-kit-android:0.4.1")
 
     // User-consented OAuth access to Drive (appData + shared drive.file).
-    implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
 
     // Encrypted storage for per-device sharing identity private keys.
     implementation("androidx.security:security-crypto:1.1.0")
