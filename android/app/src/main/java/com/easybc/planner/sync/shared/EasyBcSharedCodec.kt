@@ -31,6 +31,14 @@ object EasyBcSharedCodec : SharedBackupControllerCodec<SyncPayloadV1> {
             }
         }
 
+    // The argument swap is load-bearing, not cosmetic. SyncMerge.merge resolves
+    // ties to its FIRST argument, so swapping makes this codec resolve ties to
+    // `remote` — and sync-kit's apply guard calls codec.merge(merged, committed),
+    // which therefore resolves tie fields to `committed` itself and is trivially
+    // satisfied. See SyncPayloadApplyMergedTest's tie test: that and this swap
+    // are two independent reasons the guard passes, and losing both turns an
+    // equal-timestamp field into a STATE error thrown after the cloud write
+    // already succeeded.
     override fun merge(local: SyncPayloadV1, remote: SyncPayloadV1): SyncPayloadV1 =
         SyncMerge.merge(remote, local)
 

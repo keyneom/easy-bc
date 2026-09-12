@@ -242,4 +242,37 @@ class SyncPayloadApplyMergedTest {
             assertTrue("part=$part", subsumes(mergedPart, committed))
         }
     }
+
+    /**
+     * Two *independent* properties keep sync-kit's guard satisfied on fields
+     * whose timestamps tie, and only losing both raises STATE:
+     *
+     *   a) [EasyBcSharedCodec.merge] swaps its arguments, so the guard's
+     *      codec.merge(merged, committed) resolves ties to `committed` itself.
+     *   b) [SyncPayloadGateway.applyMerged] calls SyncMerge.merge(payload, local),
+     *      resolving ties toward the synced payload, so a tie field in the
+     *      committed value already holds the merged value.
+     *
+     * In *codec* terms our apply is codec.merge(local, merged) — local-first,
+     * the opposite of sync-kit's normative merged-first rule. We are safe
+     * despite that, not because of it.
+     */
+    @Test
+    fun applyMergedResolvesTiesTowardTheSyncedPayload() = runBlocking {
+        val tied = "2026-04-01T00:00:00Z"
+        val gateway = FakeGateway(payload(35, tied))
+
+        gateway.applyMerged(payload(31, tied))
+
+        assertEquals(31, gateway.local.planner.value.ageYears)
+    }
+
+    @Test
+    fun codecMergeResolvesTiesTowardItsRemoteArgument() {
+        val tied = "2026-04-01T00:00:00Z"
+
+        val merged = EasyBcSharedCodec.merge(payload(31, tied), payload(35, tied))
+
+        assertEquals(35, merged.planner.value.ageYears)
+    }
 }

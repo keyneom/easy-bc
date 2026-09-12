@@ -176,6 +176,40 @@ function subsumes(merged: SharedSyncPayloadV1, committed: SharedSyncPayloadV1): 
   );
 }
 
+/**
+ * Two *independent* properties keep sync-kit's guard satisfied on fields whose
+ * timestamps tie, and only losing both throws — verified against the 0.4.1
+ * guard across all four combinations:
+ *
+ *   a) `easyBcSharedCodec.merge` swaps its arguments, so the guard's
+ *      `codec.merge(merged, committed)` resolves ties to `committed` itself.
+ *   b) `reconcileSyncResult` resolves ties toward the synced payload, so a tie
+ *      field in `committed` already holds `merged`'s value.
+ *
+ * Worth being precise about, because in *codec* terms our apply is
+ * `codec.merge(live, merged)` — local-first, the opposite of sync-kit's
+ * normative merged-first rule. We are safe despite that, not because of it.
+ * If this ever needs to follow the normative form, call
+ * `easyBcSharedCodec.merge(synced, live)` — but note that flips tie resolution
+ * from the published value to the local one, which is a real behavior change.
+ */
+describe("the guard's tie-safety rests on two independent properties", () => {
+  const tied = "2026-04-01T00:00:00.000Z";
+
+  it("(b) resolves ties toward the synced payload, not live local", () => {
+    const merged = payload(31, tied, []);
+    const live = payload(35, tied, []);
+    expect(reconcileSyncResult(merged, live).planner.value.ageYears).toBe(31);
+  });
+
+  it("(a) uses a codec whose merge resolves ties toward its remote argument", () => {
+    const local = payload(31, tied, []);
+    const remote = payload(35, tied, []);
+    const merged = easyBcSharedCodec.merge(local, remote) as SharedSyncPayloadV1;
+    expect(merged.planner.value.ageYears).toBe(35);
+  });
+});
+
 describe("reconcileSyncResult satisfies sync-kit's subsumption guard", () => {
   it("subsumes the merge when a local edit survives", () => {
     const snapshot = payload(30, "2026-01-01T00:00:00.000Z", []);
