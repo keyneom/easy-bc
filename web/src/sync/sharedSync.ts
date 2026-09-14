@@ -156,7 +156,8 @@ export type SharedSyncRunResult = {
  */
 export type LocalPayloadAccess = {
   read(): SharedSyncPayloadV1;
-  commit(merged: SharedSyncPayloadV1): Promise<SharedSyncPayloadV1>;
+  /** A split result must be reconciled within this part at the live commit boundary. */
+  commit(merged: SharedSyncPayloadV1, part?: DatasetPart): Promise<SharedSyncPayloadV1>;
 };
 
 /**
@@ -1320,13 +1321,12 @@ async function syncProfileDatasetGroup(
     try {
       result = writable
         ? await controller.syncDataset(datasetId, {
-            // Parts are disjoint slices, so projecting live local per part and
-            // folding each merged part straight back is equivalent to
-            // combining first — and it keeps every later part's read current.
+            // Keep the part identity through the commit: day-log rows span
+            // files and cannot be merged into full local state as whole rows.
             read: () => projectDatasetPart(access.read(), part),
             apply: async (merged) => {
               publishedParts[part] = merged as SharedSyncPayloadV1;
-              const committed = await access.commit(merged as SharedSyncPayloadV1);
+              const committed = await access.commit(merged as SharedSyncPayloadV1, part);
               return projectDatasetPart(committed, part);
             },
           })

@@ -26,8 +26,6 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun DayDetailSheet(
     cell: DayCellData,
-    /** Which action types the planner is actually using (drives which log buttons appear). */
-    activeActions: Set<RecommendedAction>,
     /** If true, auto-expand the optional Body Signals section. */
     signalsDefaultExpanded: Boolean,
     /**
@@ -236,33 +234,30 @@ fun DayDetailSheet(
                 style = MaterialTheme.typography.titleSmall,
             )
 
-            // Build the list of action buttons dynamically based on active methods.
-            // U and A are always available; W and C depend on the user's method config.
-            val logActions = buildList {
-                add(RecommendedAction.U)
-                if (RecommendedAction.W in activeActions) add(RecommendedAction.W)
-                if (RecommendedAction.C in activeActions) add(RecommendedAction.C)
-                add(RecommendedAction.A)
-            }
+            // Actual behavior can differ from every action in the generated plan.
+            val logActions = listOf(RecommendedAction.U, RecommendedAction.C, RecommendedAction.W, RecommendedAction.A)
 
             var showClearActionConfirm by remember(cell.date) { mutableStateOf(false) }
             val loggedActionInRow = logActions.any { it.shortLabel == cell.dayLog?.actualAction }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                logActions.forEach { action ->
-                    val isActive = cell.dayLog?.actualAction == action.shortLabel
-                    ActionLogButton(
-                        action = action,
-                        isActive = isActive,
-                        modifier = Modifier.weight(1f),
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                logActions.chunked(2).forEach { actions ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        // Tapping the already-logged action asks to clear it;
-                        // tapping any other action just switches the log.
-                        if (isActive) showClearActionConfirm = true
-                        else onLogAction(action)
+                        actions.forEach { action ->
+                            val isActive = cell.dayLog?.actualAction == action.shortLabel
+                            ActionLogButton(
+                                action = action,
+                                isActive = isActive,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                // Tapping an already-logged action asks to clear it.
+                                if (isActive) showClearActionConfirm = true
+                                else onLogAction(action)
+                            }
+                        }
                     }
                 }
             }

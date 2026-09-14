@@ -114,29 +114,6 @@ class ReconcileViewModel(application: Application) : AndroidViewModel(applicatio
         reconcileOne(date, row.plannerAction.shortLabel)
     }
 
-    fun logCondomBreak(date: LocalDate) {
-        val row = currentRows.firstOrNull { it.date == date } ?: return
-        viewModelScope.launch {
-            repo.reconcileDay(date, row.plannerAction.shortLabel)
-            repo.logDayEvent(date, "condom_broke")
-            _selectedDates.update { it - date.toEpochDay() }
-        }
-    }
-
-    /**
-     * Log any per-act event while reconciling — the same options the day
-     * sheet offers (condom broke / unplanned unprotected / emergency
-     * contraception). Reconciles the day as planned first so the row clears.
-     */
-    fun logEvent(date: LocalDate, kind: String, ecType: String?, hoursFromAct: Double?) {
-        val row = currentRows.firstOrNull { it.date == date } ?: return
-        viewModelScope.launch {
-            repo.reconcileDay(date, row.plannerAction.shortLabel)
-            repo.logDayEvent(date, kind, ecType, hoursFromAct)
-            _selectedDates.update { it - date.toEpochDay() }
-        }
-    }
-
     /** Apply the same action to every currently selected date. */
     fun reconcileSelected(actualAction: String) {
         val selected = _selectedDates.value

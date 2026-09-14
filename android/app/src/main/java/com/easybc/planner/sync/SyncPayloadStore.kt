@@ -7,6 +7,9 @@ import com.easybc.planner.data.db.DayEventEntity
 import com.easybc.planner.data.db.PeriodRecord
 import com.easybc.planner.data.db.SyncMetadataEntity
 import com.easybc.planner.data.db.UserSettingsEntity
+import com.easybc.planner.sync.shared.DATASET_PARTS
+import com.easybc.planner.sync.shared.combineDatasetParts
+import com.easybc.planner.sync.shared.projectDatasetPart
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import java.time.Instant
@@ -36,10 +39,20 @@ interface SyncPayloadGateway {
      * Only for a result belonging to the profile that is already active.
      * Switching, joining or resetting a profile must replace local state.
      */
-    suspend fun applyMerged(payload: SyncPayloadV1): SyncPayloadV1 {
+    suspend fun applyMerged(payload: SyncPayloadV1, part: String? = null): SyncPayloadV1 {
         val local = localPayload()
-        val merged = SyncMerge.merge(payload, local)
-            .copy(androidPreferences = local.androidPreferences)
+        val reconciled = if (part == null) {
+            SyncMerge.merge(payload, local)
+        } else {
+            require(part in DATASET_PARTS) { "Unknown dataset part: $part" }
+            // A day spans files, but LWW selects entire rows. Reconcile only
+            // this file's slice so a tied/newer partial row cannot erase the
+            // day's other events or signals. Keep this inside the transaction.
+            val parts = DATASET_PARTS.associateWith { projectDatasetPart(local, it) }.toMutableMap()
+            parts[part] = SyncMerge.merge(payload, parts.getValue(part))
+            combineDatasetParts(parts)
+        }
+        val merged = reconciled.copy(androidPreferences = local.androidPreferences)
         apply(merged)
         return merged
     }
@@ -227,8 +240,8 @@ class SyncPayloadStore(private val db: AppDatabase) : SyncPayloadGateway {
 
     // One transaction around the read, the merge and the delete-and-reinsert,
     // so no local write can land in between and be lost by apply().
-    override suspend fun applyMerged(payload: SyncPayloadV1): SyncPayloadV1 =
-        db.withTransaction { super.applyMerged(payload) }
+    override suspend fun applyMerged(payload: SyncPayloadV1, part: String?): SyncPayloadV1 =
+        db.withTransaction { super.applyMerged(payload, part) }
 
     override suspend fun apply(payload: SyncPayloadV1) = db.withTransaction {
         val current = db.userSettingsDao().getSettings() ?: UserSettingsEntity()

@@ -62,8 +62,6 @@ fun CalendarScreen(
     val monthCells by vm.monthCells.collectAsState()
     val weekCells by vm.weekCells.collectAsState()
     val selectedDate by vm.selectedDate.collectAsState()
-    val showDetail by vm.showDayDetail.collectAsState()
-    val selectedDetail by vm.selectedDayDetail.collectAsState()
     val settings by vm.settings.collectAsState()
     val plan by vm.plannerResult.collectAsState()
     val unreconciledCount by vm.unreconciledCount.collectAsState()
@@ -355,44 +353,7 @@ fun CalendarScreen(
             }
         }
 
-        // Day detail bottom sheet
-        if (showDetail && selectedDetail != null) {
-            val activeActions = remember(plan) {
-                plan?.years?.flatMap { y -> y.dayWeights.map { it.recommendedAction } }
-                    ?.toSet()
-                    ?: setOf(RecommendedAction.U, RecommendedAction.C, RecommendedAction.A)
-            }
-
-            val signalsDefaultExpanded by vm.hasEverLoggedObservations.collectAsState()
-            val restrictedDayParts by vm.restrictedDayParts.collectAsState()
-            DayDetailSheet(
-                cell = selectedDetail!!,
-                activeActions = activeActions,
-                signalsDefaultExpanded = signalsDefaultExpanded,
-                restricted = restrictedDayParts,
-                onDismiss = { vm.dismissDayDetail() },
-                onLogPeriodStart = { vm.logPeriodStart(selectedDetail!!.date) },
-                onClearPeriodStart = { vm.clearPeriodStart(selectedDetail!!.date) },
-                onLogPeriodEnd = { vm.endCurrentPeriod(selectedDetail!!.date) },
-                onClearPeriodEnd = { vm.clearPeriodEnd(selectedDetail!!.date) },
-                onLogAction = { action -> vm.logDayAction(selectedDetail!!.date, action) },
-                onClearAction = { vm.clearDayAction(selectedDetail!!.date) },
-                onLogEvent = { kind, ecType, hours ->
-                    vm.logDayEvent(selectedDetail!!.date, kind, ecType, hours)
-                },
-                onDeleteEvent = { event -> vm.deleteDayEvent(event) },
-                onLogObservations = { mucus, bbt, opk, mitt, tender ->
-                    vm.logDayObservations(
-                        date = selectedDetail!!.date,
-                        mucus = mucus,
-                        bbtCelsius = bbt,
-                        opk = opk,
-                        mittelschmerz = mitt,
-                        breastTender = tender,
-                    )
-                },
-            )
-        }
+        SelectedDayDetailSheet(vm)
         }
     }
 }

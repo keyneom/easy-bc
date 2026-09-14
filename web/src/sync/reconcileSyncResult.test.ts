@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WasmOptions } from "../App";
-import type { PersistedSession } from "../sessionUtils";
+import type { DayEvent, PersistedSession } from "../sessionUtils";
 import type { PeriodRecord } from "../tracker/types";
 import type { PortablePlannerOptions } from "./types";
 import { easyBcSharedCodec } from "./sharedCodec";
@@ -9,7 +9,7 @@ import {
   sharedPayloadFingerprint,
   type SharedSyncPayloadV1,
 } from "./sharedTypes";
-import { DATASET_PARTS, projectDatasetPart } from "./datasets";
+import { DATASET_PARTS, projectDatasetPart, updateCalendarDayLog } from "./datasets";
 import { reconcileSyncResult } from "./reconcileSyncResult";
 
 const options = (ageYears: number): PortablePlannerOptions => ({
@@ -291,8 +291,78 @@ describe("reconcileSyncResult satisfies sync-kit's subsumption guard", () => {
         projectDatasetPart(snapshot, part),
         projectDatasetPart(remote, part),
       );
-      const committedFull = reconcileSyncResult(mergedPart, live);
+      const committedFull = reconcileSyncResult(mergedPart, live, part);
       expect(subsumes(mergedPart, projectDatasetPart(committedFull, part))).toBe(true);
     }
+  });
+});
+
+describe("split day-log commits", () => {
+  const date = "2026-09-13";
+  const t1 = "2026-09-13T10:00:00.000Z";
+  const t2 = "2026-09-13T10:01:00.000Z";
+  const t3 = "2026-09-13T10:02:00.000Z";
+  const incident: DayEvent = { id: "incident", kind: "condom_broke", occurredAt: t1 };
+  const ec: DayEvent = {
+    id: "ec", kind: "plan_b_taken", ecType: "levonorgestrel", occurredAt: t1,
+  };
+  const withEvents = (events: DayEvent[]): SharedSyncPayloadV1 => ({
+    ...payload(30, t1, []),
+    calendarDayLogs: { [date]: { actualAction: "C", mucus: "dry", events, updatedAt: t1 } },
+  });
+
+  it.each([[incident, ec], [ec, incident]])("keeps both same-day events through repeated split syncs (%j first)", (first, second) => {
+    let live = withEvents([first]);
+    const remote = { ...live };
+    live = { ...live, calendarDayLogs: {
+      [date]: updateCalendarDayLog(live.calendarDayLogs[date], { events: [first, second] }, t2),
+    } };
+    for (let turn = 0; turn < 2; turn++) {
+      for (const part of DATASET_PARTS) {
+        const merged = roundTrip(projectDatasetPart(live, part), projectDatasetPart(remote, part));
+        live = reconcileSyncResult(merged, live, part);
+        expect(live.calendarDayLogs[date].events).toEqual(expect.arrayContaining([incident, ec]));
+        expect(live.calendarDayLogs[date].events).toHaveLength(2);
+        expect(live.calendarDayLogs[date].mucus).toBe("dry");
+        expect(live.calendarDayLogs[date].actualAction).toBe("C");
+        expect(subsumes(merged, projectDatasetPart(live, part))).toBe(true);
+      }
+    }
+  });
+
+  it("keeps the incident when EC is removed and re-added during sync", () => {
+    const original = withEvents([incident, ec]);
+    const removed = updateCalendarDayLog(original.calendarDayLogs[date], { events: [incident] }, t2);
+    const pendingDelete = projectDatasetPart({ ...original, calendarDayLogs: { [date]: removed } }, "sensitive");
+    const replacement = { ...ec, id: "replacement-ec", occurredAt: t3 };
+    let live: SharedSyncPayloadV1 = { ...original, calendarDayLogs: {
+      [date]: updateCalendarDayLog(removed, { events: [incident, replacement] }, t3),
+    } };
+    live = reconcileSyncResult(pendingDelete, live, "sensitive");
+    for (const part of DATASET_PARTS) {
+      live = reconcileSyncResult(projectDatasetPart(live, part), live, part);
+    }
+    expect(live.calendarDayLogs[date].events).toEqual([incident, replacement]);
+    expect(projectDatasetPart(live, "sensitive").calendarDayLogs[date].events).toEqual([replacement]);
+  });
+
+  it("keeps both events when the day has no action or body signals", () => {
+    let live: SharedSyncPayloadV1 = { ...withEvents([]), calendarDayLogs: {
+      [date]: { events: [incident, ec], updatedAt: t2 },
+    } };
+    for (const part of DATASET_PARTS) {
+      live = reconcileSyncResult(projectDatasetPart(live, part), live, part);
+      expect(live.calendarDayLogs[date].events).toEqual([incident, ec]);
+    }
+  });
+
+  it("applies a remote EC deletion without deleting the incident or resurrecting EC", () => {
+    const live = withEvents([incident, ec]);
+    const remote = { ...live, calendarDayLogs: { [date]: { updatedAt: t2 } } };
+    const committed = reconcileSyncResult(projectDatasetPart(remote, "sensitive"), live, "sensitive");
+    expect(committed.calendarDayLogs[date].events).toEqual([incident]);
+    expect(committed.calendarDayLogs[date].deletedDatasetParts?.sensitive).toBe(t2);
+    const again = reconcileSyncResult(projectDatasetPart(committed, "sensitive"), committed, "sensitive");
+    expect(again.calendarDayLogs[date].events).toEqual([incident]);
   });
 });

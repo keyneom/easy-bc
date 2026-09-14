@@ -24,8 +24,8 @@ android {
         applicationId = "com.easybc.planner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 67
-        versionName = "0.1.66"
+        versionCode = 68
+        versionName = "0.1.67"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
@@ -39,6 +39,10 @@ android {
         }
     }
     buildTypes {
+        debug {
+            // Opt-in isolated installs for device QA; the normal app id is unchanged.
+            applicationIdSuffix = providers.gradleProperty("easybc.testApplicationIdSuffix").orNull
+        }
         release {
             isMinifyEnabled = false
             if (releaseSigningEnabled) {

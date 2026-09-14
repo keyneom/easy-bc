@@ -2600,7 +2600,7 @@ class SharedSyncCoordinator(
     private interface LocalPayloadAccess {
         suspend fun read(): SyncPayloadV1
 
-        suspend fun commit(merged: SyncPayloadV1): SyncPayloadV1
+        suspend fun commit(merged: SyncPayloadV1, part: String? = null): SyncPayloadV1
     }
 
     /**
@@ -2617,7 +2617,7 @@ class SharedSyncCoordinator(
     private fun snapshotPayloadAccess(local: SyncPayloadV1) = object : LocalPayloadAccess {
         override suspend fun read(): SyncPayloadV1 = local
 
-        override suspend fun commit(merged: SyncPayloadV1): SyncPayloadV1 = merged
+        override suspend fun commit(merged: SyncPayloadV1, part: String?): SyncPayloadV1 = merged
     }
 
     /** Live access backed by the Room store, for the profile that is active. */
@@ -2625,8 +2625,8 @@ class SharedSyncCoordinator(
         override suspend fun read(): SyncPayloadV1 =
             sharedPayload(store.localPayload()).withProfileMetadata(profile)
 
-        override suspend fun commit(merged: SyncPayloadV1): SyncPayloadV1 =
-            sharedPayload(store.applyMerged(merged))
+        override suspend fun commit(merged: SyncPayloadV1, part: String?): SyncPayloadV1 =
+            sharedPayload(store.applyMerged(merged, part))
     }
 
     /**
@@ -2713,15 +2713,13 @@ class SharedSyncCoordinator(
             val result = if (writable) {
                 controller.syncDataset(
                     datasetId,
-                    // Parts are disjoint slices, so projecting live local per
-                    // part and folding each merged part straight back is
-                    // equivalent to combining first — and it keeps every later
-                    // part's read current.
+                    // Preserve the part identity through the transactional
+                    // commit; a partial day must never replace a full day.
                     sharedDatasetMutator(
                         read = { projectDatasetPart(access.read(), part) },
                         apply = { merged ->
                             publishedParts[part] = merged
-                            projectDatasetPart(access.commit(merged), part)
+                            projectDatasetPart(access.commit(merged, part), part)
                         },
                     ),
                 )

@@ -1268,8 +1268,8 @@ export default function App() {
   }, [sharedSyncState]);
 
   const applySyncResult = useCallback(
-    async (payload: SharedSyncPayloadV1): Promise<SharedSyncPayloadV1> => {
-      const committed = reconcileSyncResult(payload, readLivePayload());
+    async (payload: SharedSyncPayloadV1, part?: DatasetPart): Promise<SharedSyncPayloadV1> => {
+      const committed = reconcileSyncResult(payload, readLivePayload(), part);
       await applySyncedPayload(
         sharedPayloadToSyncPayload(
           committed,

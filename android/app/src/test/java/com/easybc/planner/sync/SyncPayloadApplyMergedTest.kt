@@ -238,10 +238,105 @@ class SyncPayloadApplyMergedTest {
                 projectDatasetPart(remote, part),
             )
             val gateway = FakeGateway(live)
-            val committed = projectDatasetPart(gateway.applyMerged(mergedPart), part)
+            val committed = projectDatasetPart(gateway.applyMerged(mergedPart, part), part)
             assertTrue("part=$part", subsumes(mergedPart, committed))
         }
     }
+
+    @Test
+    fun keepsBothSameDayEventsAfterEveryPartAcrossRepeatedSyncs() = runBlocking {
+        for (events in listOf(listOf(incident, ec), listOf(ec, incident))) {
+            val remote = eventPayload(events.take(1))
+            val gateway = FakeGateway(eventPayload(events).copy(
+                calendarDayLogs = mapOf(eventDate to eventPayload(events).calendarDayLogs.getValue(eventDate).copy(
+                    updatedAt = "2026-09-13T10:01:00Z",
+                )),
+                androidPreferences = TimestampedAndroidPreferences(
+                    value = AndroidPreferences(reminderHour = 7), updatedAt = eventTime,
+                ),
+            ))
+            repeat(2) {
+                for (part in DATASET_PARTS) {
+                    val merged = EasyBcSharedCodec.merge(
+                        projectDatasetPart(gateway.local, part), projectDatasetPart(remote, part),
+                    )
+                    val applied = gateway.applyMerged(merged, part)
+                    val day = applied.calendarDayLogs.getValue(eventDate)
+                    assertEquals("part=$part", setOf(incident, ec), day.events.toSet())
+                    assertEquals(2, day.events.size)
+                    assertEquals("C", day.actualAction)
+                    assertEquals("dry", day.mucus)
+                    assertEquals(7, applied.androidPreferences?.value?.reminderHour)
+                    assertTrue("part=$part", subsumes(merged, projectDatasetPart(applied, part)))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun reAddingEcDuringSyncKeepsTheIncidentAndPublishesTheReplacement() = runBlocking {
+        val removedAt = "2026-09-13T10:01:00Z"
+        val reAddedAt = "2026-09-13T10:02:00Z"
+        val removed = eventPayload(listOf(incident)).let { original ->
+            original.copy(calendarDayLogs = mapOf(eventDate to original.calendarDayLogs.getValue(eventDate).copy(
+                updatedAt = removedAt,
+                deletedDatasetParts = mapOf(DAY_LOG_PART_SENSITIVE to removedAt),
+            )))
+        }
+        val pendingDelete = projectDatasetPart(removed, DAY_LOG_PART_SENSITIVE)
+        val replacement = ec.copy(id = "replacement-ec", occurredAt = reAddedAt)
+        val reAdded = eventPayload(listOf(incident, replacement)).let { original ->
+            original.copy(calendarDayLogs = mapOf(eventDate to original.calendarDayLogs.getValue(eventDate).copy(
+                updatedAt = reAddedAt,
+            )))
+        }
+        val gateway = FakeGateway(reAdded)
+        gateway.applyMerged(pendingDelete, DAY_LOG_PART_SENSITIVE)
+        for (part in DATASET_PARTS) {
+            gateway.applyMerged(projectDatasetPart(gateway.local, part), part)
+        }
+        assertEquals(listOf(incident, replacement), gateway.local.calendarDayLogs.getValue(eventDate).events)
+        assertEquals(listOf(replacement), projectDatasetPart(gateway.local, DAY_LOG_PART_SENSITIVE)
+            .calendarDayLogs.getValue(eventDate).events)
+    }
+
+    @Test
+    fun remoteEcDeletionKeepsTheIncidentAndDoesNotResurrectEc() = runBlocking {
+        val remote = eventPayload(emptyList()).copy(calendarDayLogs = mapOf(
+            eventDate to SyncDayLog(updatedAt = "2026-09-13T10:01:00Z"),
+        ))
+        val gateway = FakeGateway(eventPayload(listOf(incident, ec)))
+        gateway.applyMerged(projectDatasetPart(remote, DAY_LOG_PART_SENSITIVE), DAY_LOG_PART_SENSITIVE)
+        val day = gateway.local.calendarDayLogs.getValue(eventDate)
+        assertEquals(listOf(incident), day.events)
+        assertEquals("2026-09-13T10:01:00Z", day.deletedDatasetParts[DAY_LOG_PART_SENSITIVE])
+        gateway.applyMerged(projectDatasetPart(gateway.local, DAY_LOG_PART_SENSITIVE), DAY_LOG_PART_SENSITIVE)
+        assertEquals(listOf(incident), gateway.local.calendarDayLogs.getValue(eventDate).events)
+    }
+
+    @Test
+    fun keepsBothEventsWhenTheDayHasNoActionOrBodySignals() = runBlocking {
+        val gateway = FakeGateway(eventPayload(emptyList()).copy(calendarDayLogs = mapOf(
+            eventDate to SyncDayLog(events = listOf(incident, ec), updatedAt = eventTime),
+        )))
+        for (part in DATASET_PARTS) {
+            gateway.applyMerged(projectDatasetPart(gateway.local, part), part)
+            assertEquals("part=$part", listOf(incident, ec), gateway.local.calendarDayLogs.getValue(eventDate).events)
+        }
+    }
+
+    private val eventDate = "2026-09-13"
+    private val eventTime = "2026-09-13T10:00:00Z"
+    private val incident = SyncDayEvent(id = "incident", kind = "condom_broke", occurredAt = eventTime)
+    private val ec = SyncDayEvent(
+        id = "ec", kind = "plan_b_taken", ecType = "levonorgestrel", occurredAt = eventTime,
+    )
+
+    private fun eventPayload(events: List<SyncDayEvent>) = payload(30, eventTime).copy(
+        calendarDayLogs = mapOf(eventDate to SyncDayLog(
+            actualAction = "C", mucus = "dry", events = events, updatedAt = eventTime,
+        )),
+    )
 
     /**
      * Two *independent* properties keep sync-kit's guard satisfied on fields

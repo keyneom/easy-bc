@@ -15,6 +15,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.easybc.planner.data.RecommendedAction
+import com.easybc.planner.ui.calendar.CalendarViewModel
+import com.easybc.planner.ui.calendar.SelectedDayDetailSheet
 import com.easybc.planner.ui.theme.*
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -22,7 +24,7 @@ import java.time.format.DateTimeFormatter
 /**
  * Batch-reconciliation screen. Lets the user confirm what actually happened
  * on past planner days they haven't explicitly logged yet. Supports
- * single-row quick actions ("As planned", "Abstained", "Condom broke") and
+ * single-row quick actions ("As planned", "Abstained"), the full day editor, and
  * multi-select bulk actions for common patterns like "we were traveling
  * this whole week, mark it all as abstained".
  */
@@ -32,12 +34,16 @@ fun ReconcileScreen(
     onBack: () -> Unit,
     profileChip: @Composable () -> Unit = {},
     vm: ReconcileViewModel = viewModel(),
+    dayVm: CalendarViewModel = viewModel(),
 ) {
     // null = planner still computing (show a spinner); emptyList = computed
     // and genuinely nothing to do (show "all caught up"); non-empty = rows.
     val rows by vm.unreconciled.collectAsState()
     val selected by vm.selectedDates.collectAsState()
     val dateFmt = remember { DateTimeFormatter.ofPattern("EEE, MMM d") }
+    val restricted by dayVm.restrictedDayParts.collectAsState()
+    val canReconcile = "intimacy" !in restricted
+    LaunchedEffect(Unit) { dayVm.resetToCurrentMonth() }
 
     // Zero insets: the app-level scaffold already consumed the system bars.
     Scaffold(
@@ -65,7 +71,7 @@ fun ReconcileScreen(
             )
         },
         bottomBar = {
-            if (selected.isNotEmpty()) {
+            if (selected.isNotEmpty() && canReconcile) {
                 SelectionActionBar(
                     count = selected.size,
                     onAsPlanned = vm::acceptSelectedAsPlanned,
@@ -100,14 +106,14 @@ fun ReconcileScreen(
                         onToggleSelect = { vm.toggleSelection(row.date) },
                         onAsPlanned = { vm.acceptAsPlanned(row.date) },
                         onReconcile = { action -> vm.reconcileOne(row.date, action) },
-                        onLogEvent = { kind, ecType, hours ->
-                            vm.logEvent(row.date, kind, ecType, hours)
-                        },
+                        canReconcile = canReconcile,
+                        onEditDetails = { dayVm.selectDate(row.date) },
                     )
                 }
             }
         }
     }
+    SelectedDayDetailSheet(dayVm)
 }
 
 @Composable
@@ -169,16 +175,9 @@ private fun ReconcileRow(
     onToggleSelect: () -> Unit,
     onAsPlanned: () -> Unit,
     onReconcile: (String) -> Unit,
-    onLogEvent: (kind: String, ecType: String?, hoursFromAct: Double?) -> Unit,
+    canReconcile: Boolean,
+    onEditDetails: () -> Unit,
 ) {
-    var showEventDialog by remember { mutableStateOf(false) }
-    if (showEventDialog) {
-        com.easybc.planner.ui.kit.DayEventDialog(
-            title = "Log an event for ${row.date.format(dateFmt)}",
-            onLog = onLogEvent,
-            onDismiss = { showEventDialog = false },
-        )
-    }
     val containerColor = if (selected) {
         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
     } else {
@@ -219,22 +218,23 @@ private fun ReconcileRow(
             ) {
                 FilledTonalButton(
                     onClick = onAsPlanned,
-                    enabled = row.canAcceptAsPlanned,
+                    enabled = canReconcile && row.canAcceptAsPlanned,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("As planned", style = MaterialTheme.typography.labelSmall)
                 }
                 OutlinedButton(
                     onClick = { onReconcile("NONE") },
+                    enabled = canReconcile,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("Abstained", style = MaterialTheme.typography.labelSmall)
                 }
                 OutlinedButton(
-                    onClick = { showEventDialog = true },
+                    onClick = onEditDetails,
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text("Event…", style = MaterialTheme.typography.labelSmall)
+                    Text("Details…", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }

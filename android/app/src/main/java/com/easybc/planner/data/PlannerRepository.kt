@@ -1,5 +1,6 @@
 package com.easybc.planner.data
 
+import androidx.room.withTransaction
 import com.easybc.planner.BuildConfig
 import com.easybc.planner.bridge.PlannerBridge
 import com.easybc.planner.data.db.*
@@ -673,7 +674,9 @@ class PlannerRepository(
         ecType: String? = null,
         hoursFromAct: Double? = null,
         notes: String? = null,
-    ) {
+    ) = db.withTransaction {
+        // Sync replaces rows transactionally. Keep the event and its day/deletion
+        // clocks in the same transaction so it never sees a half-finished edit.
         require(kind in EVENT_KINDS) { "Unsupported event kind: $kind" }
         if (kind == "plan_b_taken") {
             require(ecType in EC_TYPES) { "Emergency contraception type is required" }
@@ -705,7 +708,7 @@ class PlannerRepository(
         )
     }
 
-    suspend fun deleteDayEvent(event: DayEventEntity) {
+    suspend fun deleteDayEvent(event: DayEventEntity) = db.withTransaction {
         val now = System.currentTimeMillis()
         dayEventDao.delete(event)
         val remaining = dayEventDao.getForDate(event.date)

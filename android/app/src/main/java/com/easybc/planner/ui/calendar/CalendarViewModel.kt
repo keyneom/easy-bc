@@ -359,9 +359,9 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
 
     /** Detail data for the selected day. */
     val selectedDayDetail: StateFlow<DayCellData?> = combine(
-        _selectedDate, plannerResult, periods, calendarLogsFlow,
-    ) { date, plan, periodList, calendarLogs ->
-        val ctx = buildCalendarContext(periodList, calendarLogs)
+        _selectedDate, plannerResult, periods, calendarLogsFlow, settings,
+    ) { date, plan, periodList, calendarLogs, currentSettings ->
+        val ctx = buildCalendarContext(periodList, calendarLogs, currentSettings)
         buildCellForDate(date, plan, periodList, ctx, isCurrentMonth = true)
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.Lazily, null)
@@ -419,8 +419,7 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
             val state = registry.load() ?: return@launch run { _restrictedDayParts.value = emptySet() }
             val profile = com.easybc.planner.sync.shared.findProfile(state, state.activeProfileKey)
             if (profile == null ||
-                com.easybc.planner.sync.shared.isLocalProfile(profile) ||
-                !com.easybc.planner.sync.shared.isSplitProfile(profile)
+                com.easybc.planner.sync.shared.isLocalProfile(profile)
             ) {
                 _restrictedDayParts.value = emptySet()
                 return@launch
@@ -582,9 +581,9 @@ class CalendarViewModel(application: Application) : AndroidViewModel(application
     private fun buildCalendarContext(
         periodList: List<PeriodRecord>,
         calendarLogs: CalendarLogs,
+        settingsNow: UserSettingsEntity? = settings.value,
     ): CalendarContext {
         val today = LocalDate.now()
-        val settingsNow = settings.value
         val allCycles = if (settingsNow != null) {
             cycleCalc.buildCoverageCycles(periodList, settingsNow)
         } else {

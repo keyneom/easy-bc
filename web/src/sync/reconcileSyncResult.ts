@@ -1,4 +1,5 @@
 import { mergeSharedSyncPayloads, type SharedSyncPayloadV1 } from "./sharedTypes";
+import { combineDatasetParts, DATASET_PARTS, projectDatasetPart, type DatasetPart } from "./datasets";
 
 /**
  * Fold a sync result back into whatever local state became while the network
@@ -23,6 +24,18 @@ import { mergeSharedSyncPayloads, type SharedSyncPayloadV1 } from "./sharedTypes
 export function reconcileSyncResult(
   synced: SharedSyncPayloadV1,
   liveLocal: SharedSyncPayloadV1,
+  part?: DatasetPart,
 ): SharedSyncPayloadV1 {
+  if (part) {
+    // Day logs are LWW rows shared by several files. A partial row must never
+    // compete with the complete local day: even a tie would discard siblings.
+    // Reconcile within the file, then reassemble it with the other live slices.
+    const parts = Object.fromEntries(DATASET_PARTS.map((candidate) => [
+      candidate,
+      projectDatasetPart(liveLocal, candidate),
+    ]));
+    parts[part] = mergeSharedSyncPayloads(synced, parts[part]);
+    return combineDatasetParts(parts);
+  }
   return mergeSharedSyncPayloads(synced, liveLocal);
 }
