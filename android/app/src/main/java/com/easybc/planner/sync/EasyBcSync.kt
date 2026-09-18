@@ -10,6 +10,26 @@ import com.keyneom.synckit.keys.AndroidPasskeyKeyProvider
 import com.keyneom.synckit.stores.GoogleDriveAppDataStore
 import kotlinx.serialization.encodeToString
 
+/**
+ * WebAuthn relying party for the sync passkey, and a load-bearing dependency on
+ * a file that does not live in this repository.
+ *
+ * Android derives the passkey PRF secret only if
+ * `https://keyneom.github.io/.well-known/assetlinks.json` lists this app with
+ * the `delegate_permission/common.get_login_creds` relation and this build's
+ * signing-cert SHA-256. That file is served from the separate
+ * `keyneom.github.io` pages repo — `deploy/keyneom.github.io/.well-known/` here
+ * is an empty placeholder, so searching this repo for it finds nothing and
+ * proves nothing. A signing-key change breaks Android passkeys until the pages
+ * repo is updated.
+ *
+ * Android and the browser derive the *same* secret, so one envelope serves both
+ * platforms. Never add a second Android-only key path: Keyweb read a missing
+ * asset link as "Android cannot do PRF", built a second envelope around it, and
+ * the divergence cost a user their cloud backup. Since sync-kit 0.4.2 that
+ * failure arrives as SyncKitErrorCode.KEY naming this fix rather than a bare
+ * NoCredentialException.
+ */
 const val SYNC_RP_ID = "keyneom.github.io"
 const val SYNC_FILE_NAME = "easybc-sync-v1.json"
 const val DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
