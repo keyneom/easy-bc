@@ -127,7 +127,7 @@ class MainActivity : ComponentActivity() {
             data.getQueryParameter("grant-folder") == "1" ||
             data.getQueryParameter("grant-files") == "1"
         ) {
-            if (com.easybc.planner.util.launchGrantInBrowser(this, data.toString())) {
+            if (com.keyneom.synckit.stores.launchGrantInBrowser(this, data.toString())) {
                 Toast.makeText(
                     this,
                     "Opening the browser to grant folder access…",

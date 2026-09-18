@@ -86,7 +86,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
 
     // Encrypted snapshot sync (crypto, Drive appData store, passkey PRF, controller).
-    implementation("com.keyneom:sync-kit-android:0.4.1")
+    implementation("com.keyneom:sync-kit-android:0.4.2")
 
     // User-consented OAuth access to Drive (appData + shared drive.file).
     implementation("com.google.android.gms:play-services-auth:21.6.0")
@@ -96,7 +96,6 @@ dependencies {
 
     // Custom Tabs for the Google Picker folder-grant hand-off (the app owns
     // the keyneom.github.io App Link, so a plain VIEW intent would loop back).
-    implementation("androidx.browser:browser:1.10.0")
 
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.9.8")

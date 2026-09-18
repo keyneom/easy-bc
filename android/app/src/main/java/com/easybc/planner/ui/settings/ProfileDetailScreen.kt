@@ -582,7 +582,7 @@ fun ProfileDetailScreen(
                                     .appendQueryParameter("sk-mfiles", encoded)
                                     .build()
                                     .toString()
-                                if (!com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
+                                if (!com.keyneom.synckit.stores.launchGrantInBrowser(activity, grantUrl)) {
                                     clipboard.setText(AnnotatedString(grantUrl))
                                     vm.cloudError(
                                         "No browser was available. The file-access link was " +

@@ -134,7 +134,7 @@ fun JoinProfileScreen(
             .appendQueryParameter("grant-files", "1")
             .build()
             .toString()
-        if (com.easybc.planner.util.launchGrantInBrowser(activity, grantUrl)) {
+        if (com.keyneom.synckit.stores.launchGrantInBrowser(activity, grantUrl)) {
             grantOpened = true
         } else {
             clipboard.setText(AnnotatedString(grantUrl))
