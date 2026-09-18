@@ -73,7 +73,7 @@ ksp {
     arg("room.generateKotlin", "true")
 }
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2026.06.01")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -89,7 +89,7 @@ dependencies {
     implementation("com.keyneom:sync-kit-android:0.4.2")
 
     // User-consented OAuth access to Drive (appData + shared drive.file).
-    implementation("com.google.android.gms:play-services-auth:21.6.0")
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
 
     // Encrypted storage for per-device sharing identity private keys.
     implementation("androidx.security:security-crypto:1.1.0")
@@ -98,16 +98,16 @@ dependencies {
     // the keyneom.github.io App Link, so a plain VIEW intent would loop back).
 
     // Navigation
-    implementation("androidx.navigation:navigation-compose:2.9.8")
+    implementation("androidx.navigation:navigation-compose:2.10.1")
 
     // Lifecycle / ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
 
     // Room
-    implementation("androidx.room:room-runtime:2.8.4")
-    implementation("androidx.room:room-ktx:2.8.4")
-    ksp("androidx.room:room-compiler:2.8.4")
+    implementation("androidx.room:room-runtime:2.8.5")
+    implementation("androidx.room:room-ktx:2.8.5")
+    ksp("androidx.room:room-compiler:2.8.5")
 
     // Kotlinx Serialization
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
