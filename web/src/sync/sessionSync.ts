@@ -3,7 +3,6 @@ import {
   type SyncEnvelopeV1,
 } from "@keyneom/sync-kit/crypto";
 import type {
-  SnapshotOperation,
   SyncReason,
   SyncResult,
 } from "@keyneom/sync-kit/core";
@@ -240,7 +239,11 @@ function runControllerOperation(
   }
 }
 
-function operationMessage(operation: SnapshotOperation): string {
+// Exhaustive over the operations EasyBC runs, not sync-kit's SnapshotOperation:
+// that union is sync-kit's to extend (0.5.0 added "recover"), and switching over
+// it made every new library operation a type error here even though EasyBC can
+// never produce one.
+function operationMessage(operation: Exclude<SyncOperation, "delete">): string {
   switch (operation) {
     case "setup":
       return "Encrypted cloud sync is set up and unlocked for this app session.";
